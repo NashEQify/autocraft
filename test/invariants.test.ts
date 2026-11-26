@@ -14,7 +14,7 @@ import type { PlanSet } from "../src/core/plan-set.ts";
 import { planned } from "../src/core/select.ts";
 import type { Db } from "../src/db/index.ts";
 import { LANE_KINDS, LANES, type PlanCtx } from "../src/runner/autopilot.ts";
-import { factsOf, greenRows, headOf, prng, randomPrRows, reached, reviewed, rnd, type PrRows, type Rnd } from "./random-pr.ts";
+import { factsOf, greenRows, headOf, prng, randomPrRows, reached, reviewed, rnd, startedAs, type PrRows, type Rnd } from "./random-pr.ts";
 import { randomItem } from "./random-item.ts";
 
 const CASES = Number(process.env.INVARIANT_CASES ?? 4000);
@@ -256,7 +256,7 @@ test("a green PR that its approver handed over breaks no rule, and every excepti
 test("the CI fix lane takes the asks and the notes of a fix it gave up", async () => {
   const failed = (n: number): PrRows["patches"] => ({ fixups: [], conflicts: [], pushes: [], cifixes: Array.from({ length: n }, (_, i) => ({ id: i, repo: "app", number: 1, createdAt: "2026-11-04T09:30:00.000Z", reason: null, attempt: 1, head: i < 2 ? "c0" : "old", toHead: null, kind: "code" as const, state: "failed", files: [], taskId: null, lintTask: null, runs: null })) });
   const red = { legs: [], checks: { head: "c0", overall: "failure" as const, approvedRuns: false } };
-  for (const [action, w] of [["cifix:ask", greenRows({ ...red, patches: failed(2) })], ["cifix:capped", greenRows({ ...red, patches: failed(4), approvals: { merge: true, push: true, comment: false, ci: true, fixissue: true } })]] as const) {
+  for (const [action, w] of [["cifix:ask", greenRows({ ...red, patches: failed(2), workflow: startedAs("fixup", { approvedBy: null }) })], ["cifix:capped", greenRows({ ...red, patches: failed(4), approvals: { merge: true, push: true, comment: false, ci: true, fixissue: true } })]] as const) {
     const c = caseOf(w);
     assert.deepEqual(c.p.actions.filter(isWork).map(label), [action]);
     assert.equal(await taken(c), "cifix", action);

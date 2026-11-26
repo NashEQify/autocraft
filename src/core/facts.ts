@@ -103,6 +103,12 @@ function currentHead(m: Mirrored): string | null {
 }
 
 /** Whether the PR is a draft, or no longer open (`gone`, which `draft` includes), as the freshest of mirror and checks says. */
+/** The stored checks of a PR (JSON text or parsed) as a list; unreadable text is none. */
+function checkList(checks: string | { name: string; state: string }[] | null | undefined): { name: string; state: string }[] {
+  if (Array.isArray(checks)) return checks;
+  try { const v = JSON.parse(checks ?? "[]") as unknown; return Array.isArray(v) ? (v as { name: string; state: string }[]) : []; } catch { return []; }
+}
+
 export function draftOf(i: { is_draft: number | null; updated_at: string | null }, ch: { state: string | null; is_draft: number | null; fetched_at: string | null } | null | undefined): { draft: boolean; gone?: true } {
   if (!ch?.fetched_at || (i.updated_at && ch.fetched_at <= i.updated_at)) return { draft: !!i.is_draft };
   return ch.state === "OPEN" ? { draft: !!ch.is_draft } : { draft: true, gone: true };
@@ -199,7 +205,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
     // The timed waits the facts hold end at their own times; the refresh also covers the clock uses they do not show.
     const until = (u: { until: number } | "final" | undefined): number | undefined => (typeof u === "object" ? u.until : undefined);
     for (const f of out) {
-      const at = refresh.at(`${f.repo}#${f.number}`, f.reviewHold?.until, f.conflict?.until, until(f.fixup?.unsent), until(f.cifix?.unsent));
+      const at = refresh.at(`${f.repo}#${f.number}`, f.reviewHold?.until, f.conflict?.until, until(f.fixup?.unsent), until(f.cifix?.unsent), f.cifix?.readAgainAt);
       if (at !== undefined) f.refreshAt = at;
     }
     return out;
@@ -259,6 +265,12 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const defaultBranch = repoRow?.default_branch ?? null;
   const optional = cfg.repo(repo).optionalChecks;
   const ciOf = (at: string): CiState => ciAt(ch, at, { optional, approvedRuns: d.merge.runs.get(`${ref}@${at}`)?.approved.length ?? 0 });
+  /** The required checks at `at` that still run and that fail; none when the stored checks are of another head. */
+  const requiredAt = (at: string): { running: boolean; failing: string[] } => {
+    if (ch?.head_oid !== at) return { running: false, failing: [] };
+    const req = checkList(ch.checks).filter((x) => !optional.includes(x.name));
+    return { running: req.some((x) => x.state === "pending"), failing: req.filter((x) => x.state === "failure").map((x) => x.name) };
+  };
   const isOwn = (author: string | null): boolean => !!author && d.ownLogins.has(author.toLowerCase());
   const batchRow = integration ? d.merge.integration.get(ref) : undefined;
   const pipelineRepo = !!d.control.tracked.get(repo)?.pipeline;
@@ -414,7 +426,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const hasPublic = src ? src.hasPublic : !mx && latest!.public_summary !== null;
   const pubText = src ? src.public : !hasPublic ? { ok: true } : parsePublic({ summary: latest!.public_summary ?? "", points: [] });
   base.post = { postable: (hasPublic || !!p?.review_id) && !!pubText, posted: p ? { head: p.head, at: p.posted_at, opusAt: p.opus_at } : null };
-  const cifixOf = (cfHead: string): NonNullable<PrFacts["cifix"]> => ({ ...cifixAt(patch.cifixes, cfHead, now, d.tasks), checksAt: ch?.fetched_at ?? null });
+  const cifixOf = (cfHead: string): NonNullable<PrFacts["cifix"]> => ({ ...cifixAt(patch.cifixes, cfHead, now, d.tasks), checksAt: ch?.fetched_at ?? null, ...requiredAt(cfHead) });
   const redNow = !!head && ciOf(head) === "failure";
   // A non-take review at an earlier head while the review gate waits on red CI at the new head: the CI fix cannot start, so the contributor is asked (src/core/decide.ts unreviewedRed).
   if (!take && state === "OPEN" && head && head !== qh && base.reviewHold?.kind === "ci" && base.reviewHold.red && redNow) {

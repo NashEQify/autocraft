@@ -75,7 +75,7 @@ test("a large fix is every push of ours since the approval together; a base merg
   }
 });
 
-test("a yes after a blocker resumes the merge leg and does not stop again on what the person saw", async () => {
+test("an answer to merge after a blocker resumes the merge leg and does not stop again on what the person saw", async () => {
   const w = await approvedReview();
   const db = w.db;
   await new Promise((r) => setTimeout(r, 10));
@@ -83,9 +83,11 @@ test("a yes after a blocker resumes the merge leg and does not stop again on wha
   await advanceWorkflows(db);
   assert.equal((await liveWorkflow(db, "app", 1))!.state, "blocked");
 
+  // A hold with no recommendation of its own offers a new review, never a merge it did not recommend.
+  assert.match((await liveWorkflow(db, "app", 1))!.rec!.text, /hold it/);
   // The answer comes after the review: what it found is what the person chose to go on with.
   await new Promise((r) => setTimeout(r, 10));
-  const r = await runCommand(db, actor, "dashboard", { parsed: parse("yes"), items: [{ repo: "app", number: 1 }] });
+  const r = await runCommand(db, actor, "dashboard", { parsed: parse("merge"), items: [{ repo: "app", number: 1 }] });
   assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
   await advanceWorkflows(db);
   const wf = (await liveWorkflow(db, "app", 1))!;

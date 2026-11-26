@@ -143,6 +143,8 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
     if (now.headSha !== head) return await done("nothing-to-do", "main moved to a newer head");
     const reading = await readFailure(c.gh, c.repo, head, await optionalChecks(c.db, c.repo));
     if (reading.kind === "skip") return await done("nothing-to-do", reading.why);
+    // A log GitHub does not serve yet (the run goes on): the row waits, as for a running check.
+    if (reading.kind === "unread") return "waiting";
     const failing = new Map(reading.failure.checks.map((x) => [x.name, x]));
     for (const r of rows.filter((x) => !failing.has(x.check))) await set([r], "nothing-to-do", "the check no longer fails at this head");
     const live = rows.filter((r) => failing.has(r.check));

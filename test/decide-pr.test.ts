@@ -28,6 +28,8 @@ const TAKE_FIX = { review: { verdict: "take-fix" } } as const;
 const fixup = (o: Partial<NonNullable<PrFacts["fixup"]>> = {}) => ({ fixes: 2, attempts: 0, recorded: [] as string[], ...o });
 const conflicting = (o: Partial<NonNullable<PrFacts["conflict"]>> = {}) => ({ mergeable: "CONFLICTING", conflict: { bucket: "merge", base: "main", baseOk: true, ...o } });
 const CI_FAIL = { ci: "failure" } as const;
+/** Started at the fix-up, merge not approved: the CI fix runs, and what it gives up on is the contributor's. */
+const FIXUP_ONLY = { workflow: { entry: "fixup", approved: false, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } } as const;
 const cifix = (o: Partial<NonNullable<PrFacts["cifix"]>> = {}) => ({ states: [] as string[], tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, checksAt: "2026-11-04T11:00:00.000Z", ...o });
 const merged = (o: Partial<NonNullable<PrFacts["postmerge"]>> = {}) => ({ mergedAt: "2026-11-04T09:00:00.000Z", head: "h1", why: "rule" as const, since: "2026-11-01T00:00:00.000Z", review: null, ...o });
 const runs = (o: Partial<NonNullable<PrFacts["runs"]>> = {}) => ({ waiting: 1, reread: false, crossRepo: true, approvable: 1, blocked: null, ...o });
@@ -248,16 +250,20 @@ const rows: Row[] = [
   { name: "cifix: not pushable, no comment approval", facts: { ...CI_FAIL, cifix: cifix(), pushable: false, repoFacts: { commentApproved: false } }, expect: { actions: [] } },
   { name: "cifix: formatter task running", facts: { ...CI_FAIL, cifix: cifix({ states: ["formatting"], formattingTask: 7, formatterEnded: false, tries: 1 }) }, expect: { actions: [] } },
   { name: "cifix: formatter task ended is collected", facts: { ...CI_FAIL, cifix: cifix({ states: ["formatting"], formattingTask: 7, formatterEnded: true, tries: 1 }) }, expect: { actions: ["cifix:collect"] } },
-  { name: "cifix: PR at its push limit asks the contributor", facts: { ...CI_FAIL, cifix: cifix({ totalPushes: 2 }) }, expect: { actions: ["cifix:ask"], wait: "the contributor to fix CI", code: "ci-contributor" } },
+  { name: "cifix: PR at its push limit goes back to the person who approved the merge", facts: { ...CI_FAIL, cifix: cifix({ totalPushes: 2 }) }, expect: { actions: ["cifix:capped"], wait: "a person to look at the red CI", code: "ci-fix-failed" } },
+  { name: "cifix: PR nobody approved for merge at its push limit asks the contributor", facts: { ...CI_FAIL, ...FIXUP_ONLY, cifix: cifix({ totalPushes: 2 }) }, expect: { actions: ["cifix:ask"], wait: "the contributor to fix CI", code: "ci-contributor" } },
   { name: "cifix: a quiet PR at its push limit asks nobody", facts: { ...CI_FAIL, cifix: cifix({ totalPushes: 2 }), quiet: true }, expect: { actions: ["cifix:capped"] } },
   { name: "cifix: a quiet PR with both tries used waits for a person", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed"] }), quiet: true }, expect: { actions: [], wait: "a person to look at the red CI", code: "ci-fix-failed" } },
   { name: "cifix: a quiet PR whose branch is closed to us gets no patch as a comment", facts: { ...CI_FAIL, cifix: cifix(), pushable: false, quiet: true }, expect: { actions: [], wait: "a person to look at the red CI", code: "ci-fix-failed" } },
   { name: "cifix: PR at its push limit, no comment approval: a capped note", facts: { ...CI_FAIL, cifix: cifix({ totalPushes: 2 }), repoFacts: { commentApproved: false } }, expect: { actions: ["cifix:capped"] } },
-  { name: "cifix: PR at its try limit", facts: { ...CI_FAIL, cifix: cifix({ totalTries: 4 }) }, expect: { actions: ["cifix:ask"] } },
-  { name: "cifix: two tries at this head", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed"] }) }, expect: { actions: ["cifix:ask"] } },
-  { name: "cifix: two tries at this head, no comment approval: waits on approval", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed"] }), repoFacts: { commentApproved: false } }, expect: { actions: [], wait: "comment approval for the repo", code: "repo-approval" } },
+  { name: "cifix: PR at its try limit", facts: { ...CI_FAIL, cifix: cifix({ totalTries: 4 }) }, expect: { actions: ["cifix:capped"] } },
+  { name: "cifix: two tries at this head", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed"] }) }, expect: { actions: [], wait: "a person to look at the red CI", code: "ci-fix-failed" } },
+  { name: "cifix: two tries at this head of a PR nobody approved for merge", facts: { ...CI_FAIL, ...FIXUP_ONLY, cifix: cifix({ tries: 2, states: ["failed", "failed"] }) }, expect: { actions: ["cifix:ask"] } },
+  { name: "cifix: the checks of the head still run", facts: { ...CI_FAIL, cifix: cifix({ running: true }) }, expect: { actions: [], code: "ci-running" } },
+  { name: "cifix: two tries at this head, no comment approval: waits on approval", facts: { ...CI_FAIL, ...FIXUP_ONLY, cifix: cifix({ tries: 2, states: ["failed", "failed"] }), repoFacts: { commentApproved: false } }, expect: { actions: [], wait: "comment approval for the repo", code: "repo-approval" } },
   { name: "cifix: our own breakage is not asked", facts: { ...CI_FAIL, brokeByUs: true, cifix: cifix({ totalTries: 4 }) }, expect: { actions: ["cifix:capped"] } },
-  { name: "cifix: asked at this head: waits on the contributor", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed", "asked"] }) }, expect: { actions: [], wait: "the contributor to fix CI", code: "ci-contributor" } },
+  { name: "cifix: asked at this head: waits on the contributor", facts: { ...CI_FAIL, ...FIXUP_ONLY, cifix: cifix({ tries: 2, states: ["failed", "failed", "asked"] }) }, expect: { actions: [], wait: "the contributor to fix CI", code: "ci-contributor" } },
+  { name: "cifix: a contributor asked on a PR approved for merge: the approver is asked instead", facts: { ...CI_FAIL, cifix: cifix({ tries: 2, states: ["failed", "failed", "asked"] }) }, expect: { actions: [], wait: "a person to look at the red CI", code: "ci-fix-failed" } },
   { name: "cifix: infra failure is rerun once", facts: { ...CI_FAIL, cifix: cifix({ states: ["infra"], infraRuns: [11] }) }, expect: { actions: ["cifix:rerun"] } },
   { name: "cifix: rerun needs CI run approval in the repo", facts: { ...CI_FAIL, cifix: cifix({ states: ["infra"], infraRuns: [11] }), repoFacts: { ciApproved: false } }, expect: { actions: [] } },
   { name: "cifix: rerun done, checks not read since", facts: { ...CI_FAIL, cifix: cifix({ states: ["infra", "rerun"], infraRuns: [11], rerunAt: "2026-11-04T11:30:00.000Z" }) }, expect: { actions: [] } },

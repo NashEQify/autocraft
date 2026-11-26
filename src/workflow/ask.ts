@@ -7,7 +7,8 @@ import type { Action, ItemFacts, Plan, PrFacts, StandingFact } from "../core/pla
 import { t } from "../i18n/index.ts";
 import { nobodyFixes, nobodyFixesFor } from "../preapproval/paths.ts";
 import { afterSteps, droppedOf, onConflict, planned, textFor, without, type Conflict, type ReviewView } from "./recommend.ts";
-import { earlierReview } from "./status.ts";
+import { earlierReview, listText } from "./status.ts";
+import { asSentence, clipText } from "../prose.ts";
 import type { Blocker, PlanPart, Recommendation } from "./types.ts";
 
 /** `blocker` and `params` are what an approved item stops at (`params.code`: the wait); one not approved comes back with `rec` alone. */
@@ -29,15 +30,28 @@ function goneQuestion(repo: string, login: string, o: Pick<Asked, "approved" | "
   return { blocker: "other", params: { code: "actor-gone", reason: `${login} has no write access to ${repo}`, login }, rec: { text, parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, goes: "on", cause: { code: "actor-gone", ...(lane ? { lane: true as const } : {}) } } };
 }
 
+/** Characters of the CI fix's last reason a question names. */
+const LAST_TRY_CHARS = 200;
+
+/** `head` followed by which required checks fail and what the CI fix tried at the commit, when the facts say. */
+function ciFixTried(f: PrFacts | undefined, head: string): string {
+  const c = f?.cifix;
+  if (!c) return head;
+  const out = [head];
+  if (c.failing.length) out.push(t("Failing: {checks}.", { checks: listText(c.failing.slice(0, 3).map((x) => `\`${x}\``)) }));
+  if (c.lastTry) out.push(t("Its last try: {reason}", { reason: asSentence(clipText(c.lastTry, LAST_TRY_CHARS)) }));
+  return out.join(" ");
+}
+
 const isGone = (s: StandingFact | null | undefined): s is StandingFact => s?.standing === "no" && !s.boxIdentity;
 
 /** What an approved item waits on that a review of its head may settle, as the question says it. */
-const REVIEW_AGAIN: Partial<Record<WaitCode, () => string>> = {
+const REVIEW_AGAIN: Partial<Record<WaitCode, (f?: PrFacts) => string>> = {
   answer: () => t("The review asks for fixes and lists none AutoCraft can make."),
   "review-failed": () => t("Its review failed too often at this commit."),
   "ask-failed": () => t("AutoCraft could not post its comment to the contributor."),
-  "ci-fix-failed": () => t("CI fails, and the CI fix could not repair it."),
-  "ci-own-breakage": () => t("CI fails since a push of AutoCraft's, and the CI fix could not repair it."),
+  "ci-fix-failed": (f) => ciFixTried(f, t("CI fails, and the CI fix could not repair it.")),
+  "ci-own-breakage": (f) => ciFixTried(f, t("CI fails since a push of AutoCraft's, and the CI fix could not repair it.")),
   "ci-nothing-to-fix": () => t("CI fails, and the CI fix has nothing to fix there."),
   "revision-failed": () => t("The implementation session ended, and its pull request is not ready to merge."),
 };
@@ -85,7 +99,7 @@ function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Reco
   const skip = code === "answer" || code === "ask-failed" ? withoutFixes(f, o) : null;
   if (skip) return skip;
   if (code === "review-failed") return reviewFailed(o);
-  const why = (REVIEW_AGAIN[code] ?? (() => waitText(wait ?? "")))();
+  const why = (REVIEW_AGAIN[code] ?? (() => waitText(wait ?? "")))(f);
   // The session does not make the review's fixes: a fix-up of ours does.
   const fix = code === "revision-failed" && o.review?.verdict === "take-fix" ? planned(o.parts) : [];
   const again = fix.length ? {} : { again: "review" as const };

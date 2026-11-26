@@ -7,7 +7,7 @@
 import { t } from "../i18n/index.ts";
 import { byHand, type ConflictPath } from "../core/decide.ts";
 import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, UNSURE_REASON } from "../core/rules.ts";
-import { asSentence } from "../prose.ts";
+import { asSentence, clipText } from "../prose.ts";
 import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
 import { listText } from "./status.ts";
@@ -26,7 +26,11 @@ export function planOf(fixes: readonly ReviewFix[], before: readonly PlanPart[])
   });
 }
 
-export type ReviewView = { verdict: string; sure: boolean; rec: ReviewRecommendation | null };
+/** `finding`: what the review found, in the words it wrote for the PR (its public summary, which is posted anyway); null when it wrote none. */
+export type ReviewView = { verdict: string; sure: boolean; rec: ReviewRecommendation | null; finding?: string | null };
+
+/** Characters of a review's finding a recommendation quotes. */
+const FINDING_CHARS = 300;
 
 export const planned = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "planned").map((p) => p.n);
 export const droppedOf = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "dropped").map((p) => p.n);
@@ -146,7 +150,8 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
         const fix = planned(plan);
         return fix.length ? { text: t("Try the fix-up of {parts} again, then merge.", { parts: listText(fix) }), parts: { fix, drop }, merges: true } : go(t("Try the fix-up again, then merge."), { again: "fixup" });
       }
-      return go(t("Review it again with the failing checks, then merge."), { again: "review" });
+      const again = t("Review it again with the failing checks, then merge.");
+      return go(p.step === "CI fix" ? `${ciFixFailed(p)} ${again}` : again, { again: "review" });
     }
     // The fix-up a leg stopped at pushed nothing.
     case "large-fix": return p.lines === undefined ? afterStop(String(p.reason ?? ""), go) : go(t("Keep the fix of {lines} lines, then merge.", { lines: Number(p.lines ?? 0) }));
@@ -156,12 +161,34 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       if (review?.rec) return afterSteps(review, plan);
       const fix = planned(plan).filter((n) => plan.find((x) => x.n === n)?.major);
       if (fix.length) return { text: fixText(fix, true), parts: { fix, drop }, merges: true };
-      return found.blocker === "outside-purpose" ? go(t("Keep the {lines} lines outside the purpose, then merge.", { lines: Number(p.lines ?? 0) })) : go(t("Merge it as it is."));
+      if (found.blocker === "outside-purpose") return go(t("Keep the {lines} lines outside the purpose, then merge.", { lines: Number(p.lines ?? 0) }));
+      // A review that says hold or close and recommends nothing never said to merge: the question says what it found and offers only what it says.
+      const verdict = review?.verdict ?? p.verdict;
+      if (verdict === "hold" || verdict === "close") return holdOrClose(verdict, review?.finding ?? null, drop);
+      return go(t("Merge it as it is."));
     }
     case "other": {
       return afterStop(String(p.reason ?? ""), go);
     }
   }
+}
+
+/** What a CI fix that failed twice says: the failing checks (`params.failing`) and its last try (`params.last`), where the blocker names them. */
+function ciFixFailed(p: Record<string, unknown>): string {
+  const failing = Array.isArray(p.failing) ? (p.failing as string[]) : [];
+  const last = typeof p.last === "string" && p.last ? asSentence(clipText(p.last, FINDING_CHARS)) : null;
+  const what = failing.length ? t("CI fails ({checks}), and the CI fix failed twice.", { checks: listText(failing.map((x) => `\`${x}\``)) }) : t("CI fails, and the CI fix failed twice.");
+  return last ? `${what} ${t("Its last try: {reason}", { reason: last })}` : what;
+}
+
+/** The question of a review that says hold or close with no recommendation of its own: its finding, then a new review (hold) or the close. */
+function holdOrClose(verdict: "hold" | "close", finding: string | null, drop: number[]): Recommendation {
+  const said = finding ? clipText(finding, FINDING_CHARS) : null;
+  const found = verdict === "hold"
+    ? said ? t("The review says to hold it: {finding}", { finding: asSentence(said) }) : t("The review says to hold it and recommends nothing.")
+    : said ? t("The review says to close it: {finding}", { finding: asSentence(said) }) : t("The review says to close it.");
+  if (verdict === "close") return { text: `${found} ${textFor({ fix: [], merges: false, close: true })}`, parts: { fix: [], drop }, merges: false, close: true };
+  return { text: `${found} ${textFor({ fix: [], merges: false, again: "review" })}`, parts: { fix: [], drop }, merges: false, again: "review" };
 }
 
 const afterStop = (reason: string, go: (text: string) => Recommendation): Recommendation =>

@@ -87,7 +87,7 @@ describe("pre-approved merge", () => {
     assert.ok((await w.rows("SELECT action FROM audit WHERE target = 'app#1' AND action = 'preapproval'")).length >= 4);
   });
 
-  test("a push by someone else cancels it, and red CI the CI fix gave up on waits for the contributor, or fails it when nobody can be asked", async () => {
+  test("a push by someone else cancels it, and red CI the CI fix gave up on fails it for the approver", async () => {
     const w = await (await take(await (await take(await fresh(), 2)).review(2, { verdict: "take-fix" }), 3)).review(3, { verdict: "take-fix" });
     await start(w, 2);
     await w.synced(2, "foreign");
@@ -101,20 +101,13 @@ describe("pre-approved merge", () => {
     // The CI fix step may still repair the red head: the leg waits for it, and ends once it has given up.
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 3))?.state, "ci");
-    await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 3, head: "sha3b", kind: "code", state: "capped", attempt: 1, created_at: T0 }));
+    // The merge is approved: what the CI fix gives up on goes back to the approver, and the contributor is not asked.
+    await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 3, head: "sha3b", kind: "code", state: "capped", reason: "the PR's limit is used", attempt: 1, created_at: T0 }));
     await settle(w);
-    assert.equal((await preapprovalOf(w.db, "app", 3))?.state, "ci");
-    assert.ok((await w.prPlan(3)).actions.some((a) => a.kind === "cifix" && a.params?.bucket === "ask"));
-    assert.equal((await w.rows("SELECT details FROM audit WHERE target = 'app#3' AND action = 'preapproval' AND details LIKE '%ci-ask%'")).length, 1, "said once");
-    await w.db.run(w.db.k.insertInto("ci_fixes").values({ repo: "app", number: 3, head: "sha3b", kind: "code", state: "asked", attempt: 1, created_at: T0 }));
-    await settle(w);
-    assert.deepEqual([(await preapprovalOf(w.db, "app", 3))?.state, (await w.prPlan(3)).waitKind], ["ci", "contributor"]);
-    await w.db.run(w.db.k.deleteFrom("ci_fixes").where("state", "=", "asked"));
-    await setCommentApproval(w.db, OPERATOR, "app", false);
-    await settle(w);
+    assert.ok(!(await w.prPlan(3)).actions.some((a) => a.kind === "cifix" && a.params?.bucket === "ask"));
     const p = (await preapprovalOf(w.db, "app", 3))!;
     assert.equal(p.state, "failed");
-    assert.match(p.reason!, /CI failed/);
+    assert.match(p.reason!, /CI failed .*the PR's limit is used/);
     assert.deepEqual(await codes(w, 3), ["ci-failed"]);
   });
 

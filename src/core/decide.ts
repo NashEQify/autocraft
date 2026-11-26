@@ -376,8 +376,18 @@ export function ciFixIdle(f: PrFacts): string | null {
   return `CI fails, but the CI fix has nothing to fix${c.skipReason ? ` (${excerpt(c.skipReason)})` : ""}`;
 }
 
-/** comment-wait: the step's comment never reached GitHub and the step runs again after a backoff (cifix.unsent). */
-export type CifixBucket = "unreviewed" | "comment-wait" | "work" | "unapproved" | "cannot-push" | "formatting" | "linting" | "collect" | "rerun" | "rerun-wait" | "failed" | "capped" | "done";
+/**
+ * comment-wait: the step's comment never reached GitHub and the step runs again after a backoff (cifix.unsent). ci-running: a required check
+ * at the head still runs, so the failed run's log cannot be read and its failed jobs cannot be rerun yet. read-wait: the failure log could not
+ * be read yet and is read again after a backoff (cifix.readAgainAt).
+ */
+export type CifixBucket = "unreviewed" | "comment-wait" | "work" | "unapproved" | "cannot-push" | "formatting" | "linting" | "collect" | "rerun" | "rerun-wait" | "ci-running" | "read-wait" | "failed" | "capped" | "done";
+
+/** A person approved the PR's merge (or started it at the merge queue): its red CI is AutoCraft's to fix, and what the CI fix gives up on goes back to that person, never to the contributor. */
+export const mergeOwned = (f: PrFacts): boolean => { const w = workflowOf(f); return !!w && (w.approved || w.entry === "merge"); };
+
+/** The CI fix may have the failed jobs rerun: the repo approves CI reruns, and a review read the head (none at a head the contributor pushed). */
+export const cifixMayRerun = (f: PrFacts): boolean => f.repoFacts.ciApproved && !f.gateRed;
 
 /** CI is red at the head, the review gate waits on it, and no take review covers the head. */
 function unreviewedRed(f: PrFacts): boolean {
@@ -410,7 +420,9 @@ export function cifixBucket(f: PrFacts): CifixBucket | null {
     const fx = fixupOf(f);
     if (fx && ["fix", "unapproved", "ask", "ask-retry"].includes(fx.bucket)) return null;
   }
-  const has = (s: string) => c.states.includes(s);
+  // On a PR a person approved for merge, asking the contributor was never the CI fix's to do: such a row ends nothing.
+  const owned = mergeOwned(f);
+  const has = (s: string) => c.states.includes(s) && !(s === "asked" && owned && !c.askedPatch);
   if (CIFIX_FINAL_STATES.some(has) || c.unsent === "final") return "done";
   if (c.unsent) return "comment-wait";
   if (has("linting")) return "linting";
@@ -418,6 +430,9 @@ export function cifixBucket(f: PrFacts): CifixBucket | null {
   if (has("capped")) return "failed";
   if (c.totalPushes >= CIFIX_MAX_PUSHES_PER_PR || c.totalTries >= CIFIX_MAX_TRIES_PER_PR) return "capped";
   if (c.tries >= CIFIX_MAX_TRIES) return "failed";
+  // Nothing is read or rerun before every required check at the head has ended.
+  if (c.running) return "ci-running";
+  if (c.readAgainAt !== undefined) return "read-wait";
   if (c.infraRuns && c.rerunAt === null) return "rerun";
   if (c.rerunAt !== null && !(c.checksAt && c.checksAt > c.rerunAt)) return "rerun-wait";
   if (!f.pushable && (!f.repoFacts.commentApproved || f.quiet)) return "cannot-push";
@@ -432,9 +447,10 @@ function cifixOf(f: PrFacts): "work" | "collect" | "rerun" | "capped" | "ask" | 
   if (b === "unreviewed") return "ask";
   // A fix given up or capped at this head: the contributor is asked once.
   // Not on a quiet pull request, not for our own breakage, and not when the fix-up already asked at this head: one comment per head.
-  if ((b === "failed" || b === "capped") && f.repoFacts.commentApproved && !f.quiet && !f.brokeByUs && fixupOf(f)?.bucket !== "asked") return "ask";
+  // A PR a person approved for merge goes back to that person instead (its workflow stops with the question).
+  if ((b === "failed" || b === "capped") && f.repoFacts.commentApproved && !f.quiet && !f.brokeByUs && !mergeOwned(f) && fixupOf(f)?.bucket !== "asked") return "ask";
   // No rerun at a head the contributor pushed that no review has read.
-  if (b === "rerun") return f.repoFacts.ciApproved && !f.gateRed ? "rerun" : "other";
+  if (b === "rerun") return cifixMayRerun(f) ? "rerun" : "other";
   return b === "work" || b === "collect" || b === "capped" ? b : "other";
 }
 
@@ -499,13 +515,15 @@ const stuckWait = (f: PrFacts): Wait | null => {
   if (undelivered && (cf === "collect" || linted)) return undelivered;
   if (cf === "formatting" || (cf === "linting" && !linted)) return system("ci-running", "the formatter or lint run of the CI fix");
   if (cf === "rerun-wait") return system("ci-running", "the rerun of the failed CI jobs");
+  if (cf === "ci-running") return system("ci-running", "the CI run to finish before the CI fix reads its log");
+  if (cf === "read-wait") return system("ci-running", `the CI failure log, read again${f.cifix?.readAgainAt === undefined ? "" : ` after ${new Date(f.cifix.readAgainAt).toISOString().slice(11, 16)}`}: GitHub had no log to download yet`);
   if (cf === "rerun" && !f.repoFacts.ciApproved) return person("repo-approval", "CI approval for the repo");
   if (cf === "comment-wait") return unsentWait("the CI fix comment", unsentUntil(f.cifix?.unsent));
-  if (cf === "done" && f.cifix?.states.includes("asked")) return CI_AUTHOR;
+  if (cf === "done" && (f.cifix?.askedPatch || (f.cifix?.states.includes("asked") && !mergeOwned(f)))) return CI_AUTHOR;
   if (cf === "done" && (f.cifix?.states.includes("comment-failed") || f.cifix?.unsent === "final")) return person("ask-failed", "a person: the CI fix comment failed");
   if (cf === "done" && f.cifix?.states.includes("pushing")) return system("ci-running", "the push of the CI fix");
   if (cf === "done" && f.cifix?.states.some((s) => s === "push-denied" || s === "cannot-push")) return person("ci-fix-failed", "a person to fix CI: the CI fix could not push");
-  if (cf === "failed" || cf === "capped") return f.brokeByUs ? person("ci-own-breakage", "a person to fix CI our push broke") : f.quiet ? RED_CI : f.repoFacts.commentApproved ? CI_AUTHOR : COMMENT_OFF;
+  if (cf === "failed" || cf === "capped") return f.brokeByUs ? person("ci-own-breakage", "a person to fix CI our push broke") : f.quiet || mergeOwned(f) ? RED_CI : f.repoFacts.commentApproved ? CI_AUTHOR : COMMENT_OFF;
   return cf === "cannot-push" ? (f.quiet ? RED_CI : COMMENT_OFF) : null;
 };
 

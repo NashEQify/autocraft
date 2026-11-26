@@ -1,5 +1,5 @@
 // Pure functions over loaded patch facts; no handle. Rows arrive ordered by id; each helper applies the order its caller had before.
-import { CIFIX_PUSH_STATES, CIFIX_TRY_STATES, CONFLICT_MAX_MERGES_PER_PR_PER_DAY, unsentAsk } from "../../core/rules.ts";
+import { CIFIX_ASK_REASON, CIFIX_NO_LOG_REASON, CIFIX_PUSH_STATES, CIFIX_TRY_STATES, CIFIX_UNREAD_DELAYS_MS, CONFLICT_MAX_MERGES_PER_PR_PER_DAY, unsentAsk } from "../../core/rules.ts";
 import type {
   CifixFacts, CifixRow, ConflictBucket, ConflictRow, FixupAtHead, FixupRow, LintFactOf, MadeBy, OutcomeRow, PatchFacts, PatchKind, PushEdge, TaskStates, UnsentAsk,
 } from "./types.ts";
@@ -78,17 +78,25 @@ export function conflictBucketOf(rows: readonly ConflictRow[], p: { head: string
 
 /** The CI fix state at one head from the PR's rows and the already-loaded task states. No query inside. */
 export function cifixAt(rows: readonly CifixRow[], head: string, now: number, tasks: TaskStates): CifixFacts {
-  const all = byCreated(rows);
+  // A failure log that could not be read was no try; older rows recorded it as a failed one.
+  const all = byCreated(rows).filter((x) => !(x.state === "failed" && x.reason === CIFIX_NO_LOG_REASON));
   const prior = all.filter((x) => x.head === head);
   const formatting = prior.find((x) => x.state === "formatting");
   const infra = prior.find((x) => x.state === "infra");
+  const isTry = (x: CifixRow): boolean => CIFIX_TRY_STATES.includes(x.state);
+  const unread = prior.filter((x) => x.state === "unread").map((x) => x.createdAt);
+  const readWait = unsentAsk(unread, now, CIFIX_UNREAD_DELAYS_MS);
   return {
-    states: prior.map((x) => x.state), tries: prior.filter((x) => CIFIX_TRY_STATES.includes(x.state)).length,
+    states: prior.map((x) => x.state), tries: prior.filter(isTry).length,
     rerunAt: prior.find((x) => x.state === "rerun" || x.state === "rerunning")?.createdAt ?? null,
     infraRuns: infra ? infra.runs ?? [] : null,
     formattingTask: formatting?.taskId ?? null, formatterEnded: taskEnded(tasks, formatting?.taskId ?? null),
-    totalPushes: all.filter((x) => CIFIX_PUSH_STATES.includes(x.state)).length, totalTries: all.filter((x) => CIFIX_TRY_STATES.includes(x.state)).length,
+    totalPushes: all.filter((x) => CIFIX_PUSH_STATES.includes(x.state)).length, totalTries: all.filter(isTry).length,
     skipReason: [...prior].reverse().find((x) => x.state === "skipped")?.reason ?? null,
+    lastTry: [...prior].reverse().find((x) => isTry(x) || x.state === "capped")?.reason ?? null,
+    askedPatch: prior.some((x) => x.state === "asked" && x.reason !== CIFIX_ASK_REASON),
+    unreads: unread.length,
+    ...(readWait && readWait !== "final" ? { readAgainAt: readWait.until } : {}),
     ...unsentOf(prior.filter((x) => x.state === "comment-unsent").map((x) => x.createdAt), now),
   };
 }

@@ -20,7 +20,7 @@
 import type { Preapproval } from "../../web/src/api/types.ts";
 import { systemBlock } from "../conversations/store.ts";
 import type { Params, Stop, StopCode } from "../core/codes.ts";
-import { byHand, conflictPath, decidePr, fixAllowed, fixupOf, isDraft as draftPr, notStarted, premergeFix } from "../core/decide.ts";
+import { byHand, conflictPath, decidePr, fixAllowed, fixupOf, isDraft as draftPr, mergeOwned, notStarted, premergeFix } from "../core/decide.ts";
 import { pushRefusal } from "../core/gates.ts";
 import { draftOf, loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { chainsOwn, ciAt, neededReview, type HeadReview, type RecordedPush } from "../core/evidence.ts";
@@ -37,7 +37,7 @@ import type { Exec } from "../fixup/git.ts";
 import { staleReviews } from "../review/discussion.ts";
 import { reviewHold } from "../review/gate.ts";
 import type { PrFacts } from "../core/plan.ts";
-import { fixPath, redCiPath, revisesNow } from "./paths.ts";
+import { fixPath, redCiPath, redCiStopReason, revisesNow } from "./paths.ts";
 import { operatorTriesLeft, queuedOperatorFix } from "./state.ts";
 import { refreshSettlers, type RefreshDeps } from "./permissions.ts";
 import { addAudit, listAudit, loadAuditActions, withConfig } from "../data/control/index.ts";
@@ -589,10 +589,15 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (ci === "pending") return;
     if (ci === "failure") {
       // The CI fix step works the red head as it would for any PR, and the leg goes on with its push. What it gives up on is the contributor's, whose push brings the workflow back.
-      const path = redCiPath(await factOf());
+      const f = await factOf();
+      const path = redCiPath(f);
       if (path === "fix") return;
-      if (path === "contributor") return await noteOnce(db, p, head, "ci-ask", `CI failed at ${headName(p)} and the CI fix did not repair it: the merge stays approved and waits for the contributor, who is asked to fix it.`);
-      return await stop(stopOf("ci-failed", `CI failed at ${headName(p)} and the CI fix did not repair it`));
+      if (path === "contributor") {
+        const line = f && mergeOwned(f) ? `CI failed at ${headName(p)} and the CI fix posted its patch as a comment, as it cannot push to the branch: the merge stays approved and waits for the contributor to apply it.`
+          : `CI failed at ${headName(p)} and the CI fix did not repair it: the merge stays approved and waits for the contributor, who is asked to fix it.`;
+        return await noteOnce(db, p, head, "ci-ask", line);
+      }
+      return await stop(stopOf("ci-failed", redCiStopReason(f, headName(p))));
     }
     // Nothing merges without CI, so a repo that never runs any has nothing to wait for.
     if (ci === "none") {

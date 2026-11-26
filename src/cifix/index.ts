@@ -51,7 +51,8 @@ import { selectCifix } from "./select.ts";
 import { formattingOnly, guardPatch, TEST_PATH } from "./guard.ts";
 import { readFailure } from "./logs.ts";
 import { askCiText, askText, commentText, commitMessage } from "./template.ts";
-import { formatDiffPaths, matchPrFiles, triage } from "./triage.ts";
+import { formatDiffPaths, matchPrFiles, triage, unrelatedTests } from "./triage.ts";
+import { CIFIX_ASK_REASON, CIFIX_UNREAD_DELAYS_MS } from "../core/rules.ts";
 import { CheckTool, applyCheck, refusal } from "../checktool/index.ts";
 import { foldFormat, queueLintFor, readLint } from "../prepush/index.ts";
 import { findingsWord, lintVerdict, testsNoteOf } from "../prepush/tests.ts";
@@ -209,9 +210,10 @@ class Recorder {
    */
   async set(c: CifixCandidate, kind: "format" | "code" | "infra", state: string, reason: string | null, o: { files?: string[]; toHead?: string | null; task?: number | null; runs?: number[] } = {}): Promise<void> {
     const at = this.at();
-    const quiet = state === "infra" || state === "formatting" || state === "rerun" || state === "rerunning";
+    const quiet = state === "infra" || state === "formatting" || state === "rerun" || state === "rerunning" || state === "unread";
     const note = state === "pushed" ? `CI fix pushed at ${short(c.head)}: ${(o.files ?? []).join(", ")}`
       : state === "skipped" ? `CI fix skipped at ${short(c.head)}: ${reason}`
+      : state === "asked" && reason === CIFIX_ASK_REASON ? `asked the contributor to fix CI at ${short(c.head)}`
       : state === "asked" ? `posted a CI fix at ${short(c.head)}: ${(o.files ?? []).join(", ")}` : `CI fix ${state} at ${short(c.head)}: ${reason}`;
     await finishPatch(this.db, {
       kind: "cifix", repo: c.repo, number: c.number, head: c.head, state, reason, files: o.files ?? [], toHead: o.toHead ?? null, task: o.task ?? null, runs: o.runs ?? null, attempt: c.attempt, ciKind: kind, at,
@@ -635,7 +637,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     }
     if (verdict.action === "fail") { await fail("rejected", `${findingsWord(res.findings)} remain after ${w.round} rounds: ${oneLine(verdict.first.message)}`); return; }
     const reading = await readFailure(d.gh, repo, c.head, await optionalChecks(db, repo));
-    if (reading.kind === "skip") { await fail("failed", reading.why); return; }
+    if (reading.kind !== "failure") { await fail("failed", reading.why); return; }
     const findings = verdict.texts;
     await fixCode(c, pr, reading.failure, { patch: w.patch, findings }, sessionAsk(w.session, "", findings, new Date(at())));
   };
@@ -650,34 +652,56 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       const reading = await readFailure(d.gh, repo, c.head, await optionalChecks(db, repo));
       const skip = async (why: string) => { await rec.set(c, "code", "skipped", why); summary.skipped.push(ref); log(`  ${ref}: skipped: ${why}`); };
       if (reading.kind === "skip") { handle(); await skip(reading.why); return; }
+      if (reading.kind === "unread") {
+        // A log GitHub does not serve yet is no try: it is read again after a backoff, and counts as a failed try once that is used up.
+        handle();
+        const why = scrubReason(oneLine(reading.why), d.root);
+        if ((c.unreads ?? 0) < CIFIX_UNREAD_DELAYS_MS.length) { await rec.set(c, "code", "unread", why); log(`  ${ref}: unread: ${why}`); return; }
+        const reason = `the failure log could not be read: ${why}`;
+        await rec.set(c, "code", "failed", reason);
+        summary.failed.push({ ref, reason });
+        return;
+      }
       const failure = reading.failure;
+      const runsOf = (): number[] => [...new Set(failure.checks.flatMap((x) => (x.runId === null ? [] : [x.runId])))];
+      // After the one rerun, only results from after it say how the code fares; older ones are what the rerun was meant to replace.
+      if (c.rerun && !failure.checks.every((x) => !!x.completedAt && !!c.rerunAt && Date.parse(x.completedAt) > Date.parse(c.rerunAt))) {
+        const waited = !c.rerunAt || Date.parse(at()) > Date.parse(c.rerunAt) + RERUN_WAIT_MS;
+        if (!waited) { log(`  ${ref}: waiting: the checks were not rerun yet`); return; }
+        handle();
+        const reason = "the rerun produced no new check results";
+        await rec.set(c, "infra", "failed", reason);
+        summary.failed.push({ ref, reason });
+        return;
+      }
       const t = triage(failure);
       log(`  ${ref}: ${t.kind}: ${t.why}`);
-      if (t.kind === "skip") { handle(); await skip(t.why); return; }
-      if (t.kind !== "infra" || !c.rerun) handle();
+      handle();
+      if (t.kind === "skip") { await skip(t.why); return; }
       if (t.kind === "unreadable") { await rec.set(c, "code", "failed", t.why); summary.failed.push({ ref, reason: t.why }); return; }
       if (t.kind === "infra") {
         if (c.rerun) {
-          // Only results from after the rerun can say it failed again; older ones are what the rerun was meant to replace.
-          const fresh = failure.checks.every((x) => !!x.completedAt && !!c.rerunAt && Date.parse(x.completedAt) > Date.parse(c.rerunAt));
-          if (!fresh) {
-            const waited = !c.rerunAt || Date.parse(at()) > Date.parse(c.rerunAt) + RERUN_WAIT_MS;
-            if (!waited) { log(`  ${ref}: waiting: the checks were not rerun yet`); return; }
-            handle();
-            const reason = "the rerun produced no new check results";
-            await rec.set(c, "infra", "failed", reason);
-            summary.failed.push({ ref, reason });
-            return;
-          }
-          handle();
           const reason = "the failure looks like an infrastructure error again after the rerun";
           await rec.set(c, "infra", "failed", reason);
           summary.failed.push({ ref, reason });
           return;
         }
-        await rec.set(c, "infra", "infra", t.why, { runs: [...new Set(failure.checks.flatMap((x) => (x.runId === null ? [] : [x.runId])))] });
+        await rec.set(c, "infra", "infra", t.why, { runs: runsOf() });
         summary.infra.push(ref);
         return;
+      }
+      // Failed tests that nothing in the log ties to the PR's changes look flaky: the failed jobs are rerun once before a code fix.
+      if (t.kind === "code" && !c.rerun && c.mayRerun && runsOf().length) {
+        const diff = await cachedDiff(db, repo, c.number, c.head, d.fetchDiff);
+        const tests = diff.ok ? unrelatedTests(failure, [...diff.text.matchAll(DIFF_FILE)].map((m) => m[1]!)) : null;
+        if (tests) {
+          const shown = tests.slice(0, 3).join(", ") + (tests.length > 3 ? ", …" : "");
+          const reason = `the failing test${tests.length === 1 ? "" : "s"} (${shown}) ${tests.length === 1 ? "is" : "are"} outside the PR's changes; the failed jobs are rerun once first`;
+          await rec.set(c, "infra", "infra", reason, { runs: runsOf() });
+          summary.infra.push(ref);
+          log(`  ${ref}: ${reason}`);
+          return;
+        }
       }
       if (t.kind === "format") {
         // Only files that are in both the PR's diff and the log's `Diff in` lines are formatted.
@@ -758,7 +782,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       }
       const g = await guard(db, { repo, number: c.number }, { kind: "cifix", bucket: "ask", head: c.head }, params.by ?? CLI_BY, liveOf(db, d.querier));
       if ("refused" in g) { summary.skipped.push(ref); log(`  ${ref}: skipped: ${g.refused}`); continue; }
-      const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, { by: "fixed" }, askCiText(reading.failure.checks.map((x) => x.name)), { run: runId, head: c.head });
+      const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, { by: "fixed" }, askCiText(reading.failure.checks.map((x) => x.name), c.author ?? null), { run: runId, head: c.head });
       if (cm.code !== 0) {
         const reason = `the comment ${cm.sent === false ? "was not sent" : "failed"}: ${scrubReason(oneLine(cm.stderr), d.root)}`;
         await rec.set(c, "code", cm.sent === false ? "comment-unsent" : "comment-failed", reason);
@@ -766,7 +790,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
         log(`  ${ref}: ${reason}`);
         continue;
       }
-      await rec.set(c, "code", "asked", "the CI fix is left to the contributor");
+      await rec.set(c, "code", "asked", CIFIX_ASK_REASON);
       summary.asked.push(ref);
       log(`  ${ref}: asked the contributor about the failing CI at ${short(c.head)}`);
     } catch (e) {
