@@ -6,7 +6,7 @@ import {
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
 import { inFlightNow, isWork, unassignActions } from "./assignment.ts";
-import { permit, permitted } from "./authority.ts";
+import { mayRun, permitted } from "./authority.ts";
 import type { Refusal, WaitCode, Why } from "./codes.ts";
 import { mergeAllowed, pushAllowed } from "./gates.ts";
 import { liveAttempt, ownImplementation } from "./implementation.ts";
@@ -782,11 +782,13 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (basic && reviewed && approved && !unsentHeld) actions.push(act("lint", f.head, { bucket: l.step, source: l.source }));
   }
 
+  let filingHeld = false;
   if (e) {
     if (e.state === "waiting-premerge" && mergeAllowed(f) && premergeRetryDue(f)) actions.push(act("premerge", qHead));
-    // The follow-ups of an approved PR are filed before it merges, so the issue can name it as open work; a refused filing holds nothing back.
-    const filingFirst = followUpsDue(f) && permit(f, { kind: "followups" }).ok;
-    if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting && !filingFirst) {
+    // The follow-ups of an approved PR are filed before it merges; a filing the pipeline's own job may not run (refused, or the pipeline off) holds nothing back.
+    const filingFirst = followUpsDue(f) && mayRun({ facts: f, action: act("followups", f.head) }, "pipeline").ok;
+    if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting && filingFirst) filingHeld = true;
+    else if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting) {
       const singleOnly = f.verification?.state === VERIFY_UNAVAILABLE || f.verifyOverride || f.mainFix;
       actions.push(act("merge", qHead, { singleOnly, batchable: !singleOnly }));
     }
@@ -848,6 +850,6 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // A revision in progress is what the PR waits on, also while its continuation is planned.
   const wait: Wait | null = im?.state === "revising" && open ? implWait : main ? null : implWait ?? (e ? (f.draft ? system("mirror", "the mirror to show that it is closed") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);
   // A review hold names what the pre-approved merge itself waits for, so it comes before the generic pre-approval wait.
-  const finalWait: Wait | null = wait ?? (main ? null : draftWait ?? holdWait ?? unreviewedWait(f)) ?? (main ? null : reviewWait ?? (f.operator?.hold ? LEG : null));
+  const finalWait: Wait | null = (filingHeld ? system("followups", "its follow-ups to be filed before the merge") : null) ?? wait ?? (main ? null : draftWait ?? holdWait ?? unreviewedWait(f)) ?? (main ? null : reviewWait ?? (f.operator?.hold ? LEG : null));
   return plan(state, { ...(e ? { path: e.path, reasons: e.reasons, note: e.note, conflictNote: e.conflictNote, eligible: eligible(f, e) } : {}), actions, wait: finalWait });
 }
