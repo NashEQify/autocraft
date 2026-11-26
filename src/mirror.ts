@@ -19,7 +19,7 @@ import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-err
 import { exclusive } from "./async-seq.ts";
 import { isFenced } from "./db/fence.ts";
 import type { Db } from "./db/index.ts";
-import { dbLockName, openDb, setDbRole } from "./db/open.ts";
+import { closeDb, dbLockName, openDb, setDbRole } from "./db/open.ts";
 import { loadTrackedRepos, readSettingsSnapshot, withSettingsSnapshot } from "./data/control/index.ts";
 import { effect } from "./db/effects.ts";
 import {
@@ -1090,7 +1090,7 @@ async function sync(args: string[]): Promise<void> {
         await chore("security", async () => {
           const { exec, fixupDir } = await import("./fixup/git.ts");
           await (await import("./security/land.ts")).pollLandingIfDue(db, { exec, root: fixupDir(), log: (l) => console.log(l) });
-        }, stuck);
+        }, stuck, async () => `at ${(await import("./security/land.ts")).landingStage()}`);
       }
     } catch (e) {
       await finishSyncRun(db, row, { endedAt: iso(new Date()), error: String((e as Error)?.message ?? e).slice(0, 300) });
@@ -1099,7 +1099,23 @@ async function sync(args: string[]): Promise<void> {
   } finally {
     release();
   }
-  if (stuck.length) process.exit(1);
+  await endRun(stuck.length ? 1 : 0);
+}
+
+/** How long the end of a sync run waits for the database handle to close. */
+const CLOSE_MS = 5_000;
+
+/**
+ * Ends the sync process once its run is done. Whatever still holds the event loop is logged first: nothing should, so a
+ * line here names a handle some code left open. A chore left running past its limit is one of them.
+ */
+async function endRun(code: number): Promise<never> {
+  const open = process.getActiveResourcesInfo();
+  if (open.length) console.log(`sync: open at the end of the run: ${open.join(", ")}`);
+  let t: NodeJS.Timeout | undefined;
+  await Promise.race([closeDb().catch(() => undefined), new Promise((r) => { t = setTimeout(r, CLOSE_MS); })]);
+  clearTimeout(t);
+  process.exit(code);
 }
 
 /** Longest a chore after the mirror run may take before the run goes on without it. */
@@ -1107,9 +1123,9 @@ const CHORE_MS = 15 * 60_000;
 
 /**
  * Runs one chore after the mirror run. Its failure is logged under `name` and does not fail the run; one still running after
- * `ms` is logged, added to `stuck` and left behind.
+ * `ms` is logged with `where` it is and the process's open resources, added to `stuck` and left behind.
  */
-async function chore(name: string, fn: () => Promise<void>, stuck: string[], ms = CHORE_MS): Promise<void> {
+async function chore(name: string, fn: () => Promise<void>, stuck: string[], where?: () => Promise<string>, ms = CHORE_MS): Promise<void> {
   let t: NodeJS.Timeout | undefined;
   const late = new Promise<false>((r) => { t = setTimeout(() => r(false), ms); });
   const run = fn().then(() => true, (e: unknown) => {
@@ -1119,7 +1135,8 @@ async function chore(name: string, fn: () => Promise<void>, stuck: string[], ms 
   try {
     if (await Promise.race([run, late])) return;
     stuck.push(name);
-    console.log(`${name}: still running after ${Math.round(ms / 60_000)} min; the run goes on without it`);
+    const place = where ? ` (${await where()})` : "";
+    console.log(`${name}: still running after ${Math.round(ms / 60_000)} min${place}; the run goes on without it; open resources: ${process.getActiveResourcesInfo().join(", ")}`);
   } finally {
     clearTimeout(t);
   }

@@ -2,7 +2,11 @@
 // against a server (AUTOCRAFT_TEST_PG_URL; `pnpm test:pg` starts one) and is skipped with the reason otherwise.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { connect as netConnect, createServer, type AddressInfo, type Socket } from "node:net";
+import { join } from "node:path";
+import { SCRATCH } from "./scratch.ts";
 import { countQueries } from "../src/db/counter.ts";
 import { isLockTimeout } from "../src/db/errors.ts";
 import { rewriteScriptForPostgres } from "../src/db/params.ts";
@@ -264,5 +268,25 @@ test("a statement whose answer is lost fails after the statement timeout and its
     await db.close();
     for (const s of sockets) s.destroy();
     await new Promise((r) => proxy.close(r));
+  }
+});
+
+test("a process whose identity cache listens for settings changes still ends when its work is done", { skip: needsPg, timeout: 30_000 }, async () => {
+  const t = await testDatabase("", "postgres", { empty: true });
+  try {
+    await (await t.open({ app: true })).close();
+    const src = (m: string) => JSON.stringify(new URL(`../src/${m}`, import.meta.url).href);
+    const script = join(SCRATCH, `listen-exit-${process.pid}.ts`);
+    writeFileSync(script, `import { connectDb } from ${src("db/open.ts")};
+import { watchIdentity } from ${src("data/access/index.ts")};
+const db = await connectDb(process.argv[2], { migrate: false });
+const sub = watchIdentity(db);
+while (!sub.listening()) await new Promise((r) => setTimeout(r, 20));
+console.log("listening");
+`);
+    const out = await new Promise<string>((resolve, reject) => execFile(process.execPath, ["--no-warnings", script, t.target], { timeout: 15_000 }, (e, stdout) => (e ? reject(e) : resolve(stdout))));
+    assert.match(out, /listening/);
+  } finally {
+    await t.close();
   }
 });

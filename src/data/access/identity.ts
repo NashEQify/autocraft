@@ -74,7 +74,7 @@ export function noteIdentity(app: boolean): void {
 /** Subscribes the process cache to the `settings` topic through `db`, which its reads then go through; a change drops the cache. The caller keeps one watch at a time and ends it with `off`. */
 export function watchIdentity(db: Db): Subscription {
   watched = db;
-  const sub = db.listen("settings", () => { invalidations++; if (held) held.at = 0; });
+  const sub = db.listen("settings", () => { invalidations++; if (held) held.at = 0; }, { background: true });
   return {
     listening: () => sub?.listening() ?? false,
     off: () => { sub?.off(); if (watched === db) watched = null; },

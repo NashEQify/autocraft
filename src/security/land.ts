@@ -337,13 +337,16 @@ export async function stallReason(db: Db, repo: string, number: number): Promise
  * `advisory`. External wait: it reads GitHub state and never sleeps on a timer. Returns the number of findings moved.
  */
 export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "log">): Promise<number> {
+  at("watch");
   const { quiet, waiting } = await sec.loadLandingWatch(db);
   let moved = 0;
+  at(`facts of ${quiet.length} quiet, ${waiting.length} waiting`);
   const facts = await loadPrFacts(db, quiet.map((f) => ({ repo: f.repo, number: f.fix_pr })));
   const stateOf = (f: (typeof quiet)[number]) => facts.get(`${f.repo}#${f.fix_pr}`)?.item?.state;
   const merged = quiet.filter((f) => stateOf(f) === "MERGED");
   const closed = quiet.filter((f) => stateOf(f) === "CLOSED");
   const open = quiet.filter((f) => stateOf(f) === "OPEN");
+  at("write");
   const landed = await db.write(async () => {
     const landedKeys = await sec.advanceFindings(db, merged.map((f) => ({ repo: f.repo, number: f.number, from: ["landing"], to: "landed", set: { note: null } })));
     await addAudit(db, merged.filter((f) => landedKeys.has(sec.findingKey(f.repo, f.number))).map((f) => ({ login: ACTOR, action: "security-landed", target: findingKey(f.repo, f.number), details: { pr: f.fix_pr } })));
@@ -354,8 +357,10 @@ export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "l
     return merged.filter((f) => landedKeys.has(sec.findingKey(f.repo, f.number)));
   });
   // The draft advisory records the issue once the fix is public. Best effort: Publish creates it when this could not.
+  at("landed findings");
   const rows = await sec.loadFindings(db, landed.map((f) => sec.findingKey(f.repo, f.number)), { internal: true });
   for (const f of landed) {
+    at(`draft advisory ${f.repo}#${f.number}`);
     try {
       const row = rows.get(sec.findingKey(f.repo, f.number)) as FindingRow | undefined;
       const g = !row || row.ghsa_id ? null : await guardRepo(db, f.repo, "security", "pipeline");
@@ -366,6 +371,7 @@ export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "l
   }
   const advisory = async (fs: typeof waiting): Promise<void> => {
     if (!fs.length) return;
+    at("advisory write");
     const keys = await db.write(async () => {
       const hit = await sec.advanceFindings(db, fs.map((f) => ({ repo: f.repo, number: f.number, from: ["awaiting-admin"], to: "advisory", set: { note: null } })));
       await addAudit(db, fs.filter((f) => hit.has(sec.findingKey(f.repo, f.number))).map((f) => ({ login: ACTOR, action: "security-landed", target: findingKey(f.repo, f.number), details: { route: "advisory" } })));
@@ -379,16 +385,19 @@ export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "l
   const viaFork: typeof waiting = [];
   for (const f of waiting) {
     if (!f.fork || f.fix_pr === null) continue;
+    at(`gh pr view ${f.fork}#${f.fix_pr}`);
     const view = await d.exec("gh", ["pr", "view", String(f.fix_pr), "--repo", f.fork, "--json", "state", "--jq", ".state"]);
     if (view.code === 0 && view.stdout.trim() === "MERGED") viaFork.push(f);
   }
   await advisory(viaFork);
   for (const repo of new Set(waiting.map((f) => f.repo))) {
     try {
+      at(`fetch ${repo}`);
       const git = new Git(d.exec, d.root, repo);
       const head = await git.fetchBase(ownerOf(repo), repo, await branchOf(db, repo));
       const onMain: typeof waiting = [];
       for (const f of waiting.filter((x) => x.repo === repo && !done.has(sec.findingKey(x.repo, x.number)))) {
+        at(`fix on main ${repo}#${f.number}`);
         if (await fixOnMain(git, f.fix_commit, head)) onMain.push(f);
       }
       await advisory(onMain);
@@ -396,8 +405,14 @@ export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "l
       d.log(`security: ${repo}: ${oneLine(String((e as Error).message ?? e), 160)}`);
     }
   }
+  at("done");
   return moved;
 }
+
+let stage = "";
+const at = (s: string): void => { stage = s; };
+/** Where the running landing poll is, for the sync run's report of a poll that does not end. */
+export const landingStage = (): string => stage;
 
 /** Runs `pollLanding` when the last poll is older than a couple of minutes; the sync run calls it. */
 export async function pollLandingIfDue(db: Db, d: Pick<LandDeps, "exec" | "root" | "log">, now = Date.now()): Promise<number> {
