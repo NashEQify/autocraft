@@ -6,7 +6,7 @@ import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
 import { jevAvailable } from "./jev.ts";
 import { add, askClaude, askJev, pool, promptVersion, saveUsages, type AskOptions, type UsageRow, type LintedReply, type Usage } from "../classify/run.ts";
 import { CLAUDE_PROMPTS, JEV_PROMPTS, JEV_USD_PER_INPUT_TOKEN, renderJev, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
-import type { DupePair } from "../dupes/pair.ts";
+import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
 import type { Lint, LintProblem } from "../replylint.ts";
 import type { Db } from "../db/index.ts";
@@ -58,7 +58,7 @@ export type JevStep<I, V, C = void> = StepBase<I, V> & {
   provider: "jev";
   id: JevPromptId;
   /** The item the run records and the request body (default body: the registered request for the item). */
-  request: (input: I, ctx: C) => { item: Item | DupePair | { ref: string }; body?: string };
+  request: (input: I, ctx: C) => { item: Item | DupePair | DupeAsk | { ref: string }; body?: string };
   /** `answers` of Jev's JSON reply; null is a parse error. Not called when the reply was not JSON. */
   parse: (answers: unknown, input: I, ctx: ParseCtx, c: C) => Parsed<I, V> | null;
 };
@@ -190,7 +190,7 @@ async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C
     return ask ? ask(input, lint) : askClaude(step.id, model, (step.toPrompt ? step.toPrompt(input) : input) as never, db, { ...ask_, ...(lint && { lint }) });
   }
   const { item, body } = step.request(input, opts.ctx as C);
-  const p = await askJev(step.id, item as never, db, body ?? renderJev(step.id, item as Item | DupePair), opts.usage === undefined);
+  const p = await askJev(step.id, item as never, db, body ?? renderJev(step.id, item as Item | DupeAsk), opts.usage === undefined);
   opts.onJevProc?.(p);
   type Json = { answers?: unknown; usage?: { input_tokens?: number; output_tokens?: number } };
   let parsed: unknown = null;
@@ -292,7 +292,7 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
 /** The hash a kept Jev answer (jev_unsure) is valid for: the request's body, with the prompt's version and the parser that made the value. */
 export function jevRequestHash<I, V, C>(step: JevStep<I, V, C>, input: I, ctx: C): string {
   const { item, body } = step.request(input, ctx);
-  return createHash("sha256").update(`${promptVersion(step.id)}\n${String(step.parse)}\n${body ?? renderJev(step.id, item as Item | DupePair)}`).digest("hex");
+  return createHash("sha256").update(`${promptVersion(step.id)}\n${String(step.parse)}\n${body ?? renderJev(step.id, item as Item | DupeAsk)}`).digest("hex");
 }
 
 type Kept<It, JV> = { rows: Map<string, { hash: string; answer: JV | null }>; hashOf: (x: It) => string };

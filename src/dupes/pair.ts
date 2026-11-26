@@ -22,6 +22,38 @@ const itemView = (i: PairItem) => ({ ref: `#${i.number}`, kind: i.kind === "pr" 
 /** What the models see of a pair. */
 export const pairView = (p: DupePair): Record<string, unknown> => ({ ref: p.ref, first: itemView(p.a), second: itemView(p.b) });
 
+/** Most candidates one Jev request carries; a longer list is split over several requests. */
+export const MAX_ASK_CANDIDATES = 5;
+
+/** One Jev request: an item and the items its pairs name as candidates. Each answer belongs to the pair `ref`. */
+export type DupeAsk = { ref: string; repo: string; item: PairItem; candidates: { ref: string; other: PairItem }[] };
+
+/** The name of a candidate's question in the request and its answer. */
+export const askKey = (c: { other: PairItem }): string => `same_${c.other.number}`;
+
+/** What Jev sees of a request: the item and its candidates. */
+export const askView = (a: DupeAsk): Record<string, unknown> => ({ ...itemView(a.item), candidates: a.candidates.map((c) => itemView(c.other)) });
+
+/**
+ * Groups pairs into requests, one item each: the item in the most unasked pairs takes up to MAX_ASK_CANDIDATES of them, and so on
+ * until every pair is in one request. The pairs keep their order within a request.
+ */
+export function groupPairs(pairs: readonly DupePair[]): DupeAsk[] {
+  const left = new Set(pairs);
+  const out: DupeAsk[] = [];
+  while (left.size) {
+    const count = new Map<number, number>();
+    for (const p of left) for (const n of [p.a.number, p.b.number]) count.set(n, (count.get(n) ?? 0) + 1);
+    const [number] = [...count].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0]!;
+    const take = [...left].filter((p) => p.a.number === number || p.b.number === number).slice(0, MAX_ASK_CANDIDATES);
+    for (const p of take) left.delete(p);
+    const first = take[0]!;
+    out.push({ ref: `${first.repo}#${number}`, repo: first.repo, item: first.a.number === number ? first.a : first.b,
+      candidates: take.map((p) => ({ ref: p.ref, other: p.a.number === number ? p.b : p.a })) });
+  }
+  return out;
+}
+
 export const pairRef = (repo: string, a: number, b: number): string => `${repo}#${Math.min(a, b)}~${Math.max(a, b)}`;
 
 export type PairAnswer = { ref: string; verdict: PairVerdict; reason: string };

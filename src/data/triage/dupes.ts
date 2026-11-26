@@ -8,6 +8,7 @@ import { retiredColumns } from "../../db/retired-names.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { Ref } from "../keys.ts";
 import { addAudit } from "../control/audit.ts";
+import { setting, writeSetting } from "../control/settings.ts";
 import { loadItems, loadMergedClosures } from "../mirror/index.ts";
 import { dupeEdgeRows, dupeMemberRows, onEdgeExpr, uncheckedCountRows, uncheckedPairRows } from "./cross.ts";
 import type { CanonInfo, ComparisonPut, DupeGroupPut, DupeSignal, DupeState, Pair, PairKey, PairVerdictPut, RefKey, ScanContext } from "./types.ts";
@@ -44,6 +45,21 @@ export async function loadScanContext(db: Db, refs: Ref[]): Promise<ScanContext>
     for (const s of scans) ctx.scans.set(refKey(s.repo, Number(s.number)), s.hash);
   }
   return ctx;
+}
+
+/**
+ * Clears the scan marks once when the scan cut-off differs from the one they were made at, so every item is scanned again at the new
+ * one. Stored pairs and their verdicts stay. SQLite does the same on connect (src/db.ts); this covers Postgres. Returns whether it cleared.
+ */
+export async function resetScansForCutoff(db: Db, cutoff: number): Promise<boolean> {
+  const key = "dupes_scan_threshold", cut = String(cutoff);
+  if (await setting(db, key) === cut) return false;
+  const q = queryDb(db), k = q.k as any;
+  await db.write(async () => {
+    await q.run(k.deleteFrom("duplicate_scans"));
+    await writeSetting(db, key, cut);
+  });
+  return true;
 }
 
 /**

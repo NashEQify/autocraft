@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { VectorIndex } from "../src/embed/vectors.ts";
 import { checkPairs, type PairKey } from "../src/dupes/check.ts";
+import type { DupeAsk } from "../src/dupes/pair.ts";
 import { runDupes } from "../src/dupes/index.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
@@ -36,7 +37,7 @@ test("pairs of a repo no Task Runner takes are neither sent to Jev nor counted a
 
   let jev = 0, haiku = 0;
   const handled: number[] = [];
-  const check = { jev: async () => (jev++, 0.5), haiku: async () => (haiku++, null), now: () => new Date(T0) };
+  const check = { jev: async (a: DupeAsk) => (jev++, Object.fromEntries(a.candidates.map((c) => [c.ref, 0.5]))), haiku: async () => (haiku++, null), now: () => new Date(T0) };
   const s = await runDupes(w.db, { onHandled: (n) => handled.push(n) }, () => {}, { index, check });
   assert.deepEqual([jev, haiku, s.checked, handled.length], [0, 0, 0, 0], "no pair was sent and none counted");
 
@@ -67,7 +68,7 @@ test("a stopped dupes job keeps the answers it got, and the next one asks only t
   const checked = async () => (await w.db.all(w.db.k.selectFrom("duplicate_pairs").select("a").where("checked_at", "is not", null))).length;
 
   const asked: string[] = [], handled: number[] = [], progress: string[] = [];
-  const check = { jev: async (p: { ref: string }) => { asked.push(p.ref); return 0.01; }, haiku: async () => null, now: () => new Date(T0) };
+  const check = { jev: async (a: DupeAsk) => { asked.push(...a.candidates.map((c) => c.ref)); return Object.fromEntries(a.candidates.map((c) => [c.ref, 0.01])); }, haiku: async () => null, now: () => new Date(T0) };
   const first = await runDupes(w.db, { timeUp: async () => asked.length > 0, onHandled: (x) => handled.push(x), progress: async (t) => void progress.push(t) }, () => {}, { index, check });
   assert.ok(asked.length > 0 && asked.length < rows.length, "the first slice runs whole, the next one does not start");
   assert.deepEqual([await checked(), first.checked, handled.at(-1), first.left], [asked.length, asked.length, asked.length, rows.length - asked.length]);
@@ -82,4 +83,25 @@ test("a stopped dupes job keeps the answers it got, and the next one asks only t
   const left = rows.length - asked.length; // more than one slice: the count adds up over them
   await runDupes(w.db, { onHandled: (x) => handled.push(x) }, () => {}, { index, check });
   assert.deepEqual([await checked(), new Set(asked).size, asked.length, handled.at(-1)], [rows.length, rows.length, rows.length, left]);
+});
+
+test("an item with three candidates makes one Jev request, and a pair Jev is unsure of still goes to Haiku", async () => {
+  const w = await (await world()).repo();
+  for (let i = 1; i <= 4; i++) await w.issue(i, { title: `crash ${i}` });
+  await fillEmbedHashes(w.db);
+  await runnerOf(w.db);
+  const keys: PairKey[] = [];
+  for (const b of [2, 3, 4]) keys.push({ repo: "app", a: 1, b, a_hash: await hashOf(w.db, 1), b_hash: await hashOf(w.db, b), similarity: 0.9 });
+  await w.db.run(w.db.k.insertInto("duplicate_pairs").values(keys.map((k) => ({ ...k, created_at: T0 }))));
+  const asks: DupeAsk[] = [], haiku: string[] = [];
+  const check = {
+    jev: async (a: DupeAsk) => (asks.push(a), { "app#1~2": 0.5, "app#1~3": 0.97, "app#1~4": 0.02 }),
+    haiku: async (ps: { ref: string }[]) => (haiku.push(...ps.map((p) => p.ref)), JSON.stringify(ps.map((p) => ({ ref: p.ref, verdict: "distinct", reason: "" })))),
+    now: () => new Date(T0),
+  };
+  const c = await checkPairs(w.db, keys, check);
+  assert.equal(asks.length, 1);
+  assert.equal(asks[0]!.candidates.length, 3);
+  assert.deepEqual(haiku, ["app#1~2"]);
+  assert.deepEqual([c.checked, c.verdicts.duplicate, c.verdicts.distinct], [3, 1, 2]);
 });
