@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listSnapshotRepos } from "../data/external/index.ts";
 import { diffCacheDir } from "../review/diff.ts";
-import { buildSnapshot, snapshotFile } from "./snapshot.ts";
+import { buildSnapshot, errorLine, SNAPSHOT_FAILED, snapshotFile } from "./snapshot.ts";
 import { openDb, TOOLS } from "./server/tools.ts";
 import { handle } from "./server/mcp.ts";
 
@@ -45,7 +45,16 @@ export function itemTools(): { mounts: Mount[]; mcpServers: Record<string, McpSe
 }
 
 async function snapshot(): Promise<void> {
-  const r = await buildSnapshot();
+  let r: Awaited<ReturnType<typeof buildSnapshot>>;
+  try {
+    r = await buildSnapshot();
+  } catch (e) {
+    console.error(e);
+    // Last, so the end of the output the runner's snapshot keeper keeps holds it: the line it logs as the reason.
+    console.error(`${SNAPSHOT_FAILED}${errorLine(e)}`);
+    process.exitCode = 1;
+    return;
+  }
   console.log(`${snapshotFile()}: ${r.items} items, ${r.comments} comments, ${r.bytes} bytes${r.rebuilt ? " (rebuilt)" : ""}, changed ${JSON.stringify(r.changed)}`);
 }
 

@@ -549,12 +549,24 @@ function hasVersion(file: string): boolean {
   }
 }
 
+/** Starts the line by which `item-tools snapshot` reports a failed build. */
+export const SNAPSHOT_FAILED = "item snapshot failed: ";
+
+/** An error's message and those of its causes, on one line. */
+export function errorLine(e: unknown): string {
+  const parts: string[] = [];
+  for (let c: unknown = e; c !== undefined && c !== null && parts.length < 5; c = (c as { cause?: unknown }).cause) {
+    parts.push(String((c as Error)?.message ?? c).replace(/\s+/g, " ").trim());
+  }
+  return parts.join("; cause: ");
+}
+
 /** Updates the snapshot after a run that changed what it copies; a failure is logged, never thrown into the run. */
 export async function refreshSnapshot(log: (line: string) => void = console.log, db?: Db): Promise<void> {
   try {
     const r = await buildSnapshot(db);
     log(`item snapshot${r.rebuilt ? " (rebuilt)" : ""}: ${r.items} items, ${r.comments} comments, changed ${r.changed.items}/${r.changed.comments}/${r.changed.embeddings} (items/comments/embeddings), ${Math.round(r.bytes / 1e6)} MB`);
   } catch (e) {
-    log(`item snapshot failed: ${String((e as Error).message).slice(0, 200)}`);
+    log(`${SNAPSHOT_FAILED}${errorLine(e).slice(0, 1000)}`);
   }
 }
