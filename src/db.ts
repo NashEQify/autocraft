@@ -422,6 +422,13 @@ const BASE_INDEXES = [
 // Columns of the module state that moved out of settings and of the set-based loaders (src/data/<module>). Old keys stay
 // next to the new ones: a re-keyed table keeps its old key columns until the code that reads them is gone.
 const STATE_COLUMNS: [table: string, column: string, type: string][] = [
+  // Webhook-first sync: delivery health, the backstop poll and GitHub's delivery list (src/mirror.ts pollReason).
+  ["sync_state", "webhook_at", "TEXT"],
+  ["sync_state", "webhook_started_at", "TEXT"],
+  ["sync_state", "polled_at", "TEXT"],
+  ["sync_state", "poll_missed_at", "TEXT"],
+  ["sync_state", "poll_missed", "TEXT"],
+  ["sync_state", "deliveries_checked_at", "TEXT"],
   // Statements, round trips and database time of a job, and the effects (GitHub writes, model calls, builds) it made.
   ["jobs", "db_statements", "INTEGER"],
   ["jobs", "db_round_trips", "INTEGER"],

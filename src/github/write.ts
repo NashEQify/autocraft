@@ -20,7 +20,7 @@ import { advisoryMade, byUs, commentMade, issueMade, nodeCommentMade, reviewMade
 import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
 import { AppError, appJwt, call, GITHUB_API } from "./app.ts";
-import type { AppSecrets } from "../dash/server/config.ts";
+import type { AppOwner, AppSecrets } from "../dash/server/config.ts";
 import { currentJobId } from "../agents/call.ts";
 import { resumedRun } from "../runner/resuming.ts";
 import { createHash } from "node:crypto";
@@ -1165,4 +1165,13 @@ export function removeInstallation(w: Writer, o: { app: Pick<AppSecrets, "client
   const gone = (e: unknown): boolean => { if (e instanceof AppError && e.status === 404) return true; throw e; };
   return recorded(w, identity, "app-install-removed", o.account, { installation: o.installationId, account: o.account, accountId: o.accountId, found: o.found },
     () => call(o.apiBase ?? GITHUB_API, `/app/installations/${o.installationId}`, appJwt(o.app), "DELETE").then(() => false, gone), (already) => (already ? { already: true } : {}), undefined, undefined, o.account);
+}
+
+/**
+ * Asks GitHub to send a webhook delivery that failed again (`POST /app/hook/deliveries/{id}/attempts`), as the app itself; audited as
+ * `webhook-redeliver` on the delivery's GUID. A redelivery is safe to receive twice: it queues re-reads, and a comment's command once.
+ */
+export function redeliverWebhook(w: Writer, o: { app: Pick<AppSecrets, "clientId" | "privateKey"> & { owner?: AppOwner | null }; id: number; guid: string; event: string; apiBase?: string }): Promise<void> {
+  return recorded(w, "app", "webhook-redeliver", o.guid, { delivery: o.id, event: o.event },
+    () => call(o.apiBase ?? GITHUB_API, `/app/hook/deliveries/${o.id}/attempts`, appJwt(o.app), "POST").then(() => undefined), undefined, undefined, undefined, o.app.owner?.login);
 }
