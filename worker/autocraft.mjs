@@ -2156,7 +2156,7 @@ export const holdRetryDelay = (rand = Math.random) => Math.round(HOLD_RETRY_MS *
 const USAGE_ERROR_RETRY_MS = scaled(30_000);
 /** The last good reading keeps counting this long when a new read fails or is refused, while every window keeps the reserve plus LAST_GOOD_MARGIN free. */
 export const LAST_GOOD_MS = 15 * 60_000;
-export const LAST_GOOD_MARGIN = 10;
+export const LAST_GOOD_MARGIN = 3;
 /** The longest a process waits for another process's usage read. */
 const USAGE_LOCK_WAIT_MS = 20_000;
 export const STATUS_EVERY_MS = scaled(5 * 60_000);
