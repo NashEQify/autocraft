@@ -72,6 +72,12 @@ export function premergeFix(f: PrFacts): "fix" | "running" | "used" | "none" {
   return row.fixesSafe && f.pushable && pushAllowed(f, "fixup") ? "fix" : "none";
 }
 
+/**
+ * A merge leg that the pre-merge review's defects stopped at `head` gives way to a fix-up round when one can be made there now, as for
+ * a fresh stop: a stop made while the rule gave those defects no round (a defect without fix text, or fewer rounds) is lifted.
+ */
+export const premergeStopLifts = (f: PrFacts | null | undefined, head: string): boolean => !!f && f.head === head && premergeFix(f) === "fix";
+
 /** Why nothing merges the PR, whoever approves it: only CI's answer on a head lets it merge, and only the default branch is merged into. */
 const unmergeable = (f: PrFacts): string[] => [
   ...(f.ci === "none" && f.repoFacts.noCi ? ["the repo has no CI checks"] : []),

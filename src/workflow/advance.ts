@@ -24,7 +24,7 @@ import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
 import { CIFIX_NO_LOG_REASON } from "../core/rules.ts";
 import type { StopCode } from "../core/codes.ts";
-import { conflictPath, decidePr } from "../core/decide.ts";
+import { conflictPath, decidePr, premergeStopLifts } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { loadItemFacts } from "../core/issue-facts.ts";
 import { acceptedHeads, agreedAt, approvedHead, chainsOwn, isAccepted, neededReview, pushesSince, type RecordedPush } from "../core/evidence.ts";
@@ -164,6 +164,12 @@ function endedLeg(pass: Pass, w: ItemWorkflow, since: string, resumed: string | 
   const ended: EndedLeg = { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
   if (HOLD_ENDS.includes(codeOf(ended)) && resumed !== null && r.updated_at <= resumed) return null;
   return ended;
+}
+
+/** The workflow's newest merge leg ended at `head` on the pre-merge review's defects. */
+function premergeStopped(pass: Pass, w: ItemWorkflow, head: string): boolean {
+  const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
+  return !!r && ENDED_LEG.includes(r.state) && r.head === head && premergeStop({ reason: r.reason ?? r.state, code: r.reason_code as StopCode | null });
 }
 
 const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -452,6 +458,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     await closeQuestion(t("the author's new commits are reviewed first, and the merge stays approved."));
     repushed = false;
   }
+  // A stop at the pre-merge review's defects that a fix-up round now repairs at this head: the round takes its place, as for a fresh stop.
+  if (w.state === "blocked" && w.approvedBy !== null && w.blocker === "major-finding" && head && premergeStopped(pass, w, head) && premergeStopLifts(pass.facts.get(ref), head)) {
+    await closeQuestion(t("the pre-merge review's defects get an automatic fix-up first, and the merge stays approved."));
+    repushed = false;
+  }
   if (repushed && (!head || w.recHead === null || ownChain(pass, ref, w.recHead, head))) {
     // Nor does it wait when what the question is about went: the approval covers the head, or our pushes on it, as it did.
     const now = pass.facts.get(ref);
@@ -534,7 +545,8 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const conflict = f?.head === head && f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
   const stopped = approved ? endedLeg(pass, w, since, resumed) : null;
   // Once CI is green at the head, a leg that red CI ended says nothing any more: a new one starts.
-  const ended = stopped && codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null ? null : stopped;
+  // Nor does a leg the pre-merge review's defects ended, once a fix-up round repairs them at the head.
+  const ended = stopped && ((codeOf(stopped) === "ci-failed" && f?.head === head && causeWent({ code: "red-ci" }, f, approved) !== null) || (premergeStop(stopped) && premergeStopLifts(f, head))) ? null : stopped;
   const blockerRec = (x: Found, parts: readonly PlanPart[]): Recommendation => {
     const o = { approved, review: view, parts: plan, conflict }, now = f?.head === head ? f : null;
     const rec = (now && ended && x.params.reason === ended.reason ? legStop(codeOf(ended), now, o) : null) ?? atBlocker(x, view, parts, w.entry === "merge");
