@@ -1,16 +1,14 @@
 // `/autocraft link`, `unlink`, `stats` and `status`. Replies are visible to the caller only. Everything they say about
 // items and counts comes from the public status layer (src/public/status.ts).
-import { addSentAlerts, loadShownQuestions } from "../data/discord/index.ts";
 import { audit } from "./audit.ts";
 import { publicRepoNames, publicStats, publicStatus, type PublicStats, type PublicStatus } from "../public/status.ts";
 import type { Call, Interactions } from "./interactions.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { forgetReporter } from "./file-issue.ts";
 import { forgetLink, loginOf, redeemLinkCode } from "./links.ts";
-import { PERM_WRITE_TTL, cachedWrite } from "../dash/server/sessions.ts";
 import { t } from "../i18n/index.ts";
-import { parse } from "../workflow/parse.ts";
-import { READ_OWN_MAX, refsIn, runText, type ReadDeps } from "../workflow/read.ts";
+import type { ReadDeps } from "../workflow/read.ts";
+import { prepareDo, runDo } from "./do.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
 import { plain } from "./reply.ts";
 import type { Db } from "../db/index.ts";
@@ -40,8 +38,19 @@ export function formatStatus(s: PublicStatus): string {
 export function doHelp(): string[] {
   return [
     t("`/autocraft do text:<command>` sends a command to AutoCraft as your linked login. Name items as repo#number, with a list after a colon: `merge: photocraft#123 photocraft#456`."),
-    ...COMMANDS.map((c) => `\`${c.usage}\`: ${t(c.short)}`),
-    t("Weight words: {words}.", { words: WEIGHT_HELP.map((w) => `${t(w.word)} (${t(w.weight)})`).join(", ") }),
+    t("Commands: {commands}. Weight words: {words}. Help in the dashboard says what each does.", {
+      commands: COMMANDS.map((c) => `\`${c.usage}\``).join(", "),
+      words: WEIGHT_HELP.map((w) => `${t(w.word)} (${t(w.weight)})`).join(", "),
+    }),
+  ];
+}
+
+/** The @-command lines of Help: commands in a channel, replies to messages that name items, and the thread. */
+export function atHelp(): string[] {
+  return [
+    t("`@AutoCraft review photocraft#123` in a watched channel sends the command in public, as `/autocraft do` does."),
+    t("Reply to a message that names items with `@AutoCraft review` (or `review all`) for all of them, or name one for that one only. Replies to posts of bots and webhooks, such as GitHub's integration, do not pick up their links."),
+    t("AutoCraft confirms in a thread and posts each item's status and result there. In the thread, `@AutoCraft fix-up and merge`, or a reply to its message, acts on the thread's items."),
   ];
 }
 
@@ -51,10 +60,11 @@ export const HELP = [
   "`/autocraft search` opens a form. Pick the app and describe the problem or the idea to see matching issues; if none fits, AutoCraft helps write a new issue and opens it on GitHub, ready to submit.",
   "`/autocraft status item:photocraft#123` shows where an issue or pull request is.",
   ...doHelp(),
+  ...atHelp(),
   "`/autocraft stats` shows counts for the public repos.",
   "`/autocraft link` and `unlink` connect this Discord account to your AutoCraft login and remove the link (the code is under Link Discord in the dashboard menu).",
   "`/autocraft alerts on|off` turns on direct messages about workflows that need your answer, once linked.",
-  "Mention @AutoCraft with a question in a watched channel, or reply to a message and mention it, to get matching issues.",
+  "Mention @AutoCraft with a question in a watched channel, or reply to a message and mention it, to get matching issues; text that starts with a command word is a command instead.",
   "Right-click a message, then Apps › Find issue, to search with that message's text.",
   "AutoCraft's bot reaction on a message means AutoCraft counted it for the issues it names.",
 ].join("\n");
@@ -116,16 +126,8 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     const login = await loginOf(db, keys, call.userId);
     if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft link.") }));
-    const text = call.option("text") ?? "";
-    const parsed = parse(text);
-    // Discord has no item the text was written on, so the items come from the list in the text; text the parser cannot read is read by a model (runText).
-    const userHash = keys.hash("author", call.userId);
-    const shown = await loadShownQuestions(db, userHash);
-    const result = await runText(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord", { parsed, items: [], asked: ({ workflow }) => shown.get(workflow.id) },
-      { text, own: refsIn(text).slice(0, READ_OWN_MAX), named: true, ...(deps.read ? { deps: deps.read } : {}) });
-    // The reply shows the question that took the answered one's place, as an alert does.
-    const sentAt = new Date().toISOString();
-    await addSentAlerts(db, result.items.flatMap((o) => (o.question ? [{ userHash, ...o.question, sentAt }] : [])));
+    // Discord has no item the text was written on, so the items come from the list in the text.
+    const result = await runDo(db, keys, prepareDo(call.option("text") ?? ""), { userId: call.userId, login }, deps.read);
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });
   });
   ix.command("autocraft help", null, async (call) => {

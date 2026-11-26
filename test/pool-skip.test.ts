@@ -13,6 +13,7 @@ import { setJevEnabled } from "../src/agents/jev.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
+import { setManualOnly } from "../src/remote/manual-only.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 
@@ -38,6 +39,25 @@ test("a pool skips a unit nobody may take and runs the later ones", async () => 
   const t = await runTiered(db, PRIORITY, photo);
   assert.deepEqual([...t.skipped], ["photocraft#7"]);
   assert.equal(t.alone.size + t.haiku.size, 0, "a skipped item is not one Haiku decided alone");
+});
+
+test("a pool waiting for room wakes when a Task Runner's user changes a setting, and not before", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
+  await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
+  const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
+  await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  const room = poolRoom(db, () => ["deckcraft"], () => [{ repo: "deckcraft", number: 1 }]);
+  await room.room(0);
+  const stop = new AbortController();
+  let woke = false;
+  const wait = room.changed(5, stop.signal).then(() => { woke = true; });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(woke, false, "nothing that moves the room changed");
+  const at = Date.now();
+  await setManualOnly(db, "olga", true);
+  await wait;
+  stop.abort();
+  assert.ok(Date.now() - at < 1_000, "the setting is seen at the next poll of the counters");
 });
 
 test("batches hold one repo's items in the order of their first item", async () => {

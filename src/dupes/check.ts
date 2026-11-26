@@ -71,9 +71,12 @@ export type CheckCounts = { checked: number; jev: number; haiku: number; haikuAl
 
 type Verdicted = { key: PairKey; jev: number | null; haiku: PairVerdict | null; verdict: PairVerdict };
 
-/** Stores the verdicts in one write; the canonical item of each duplicate comes from one load of its items. */
-async function store(db: Db, rows: Verdicted[], at: string): Promise<void> {
-  if (!rows.length) return;
+/**
+ * Stores the verdicts and the kept-answer changes in one write; the canonical item of each duplicate comes from one load of its
+ * items, read before the write.
+ */
+async function store(db: Db, rows: Verdicted[], at: string, unsure: { keep: { ref: string; hash: string; answer: string; at: string }[]; drop: string[] }): Promise<void> {
+  if (!rows.length && !unsure.keep.length && !unsure.drop.length) return;
   const dups = rows.filter((r) => r.verdict === "duplicate");
   const info = dups.length ? await canonInfoAll(db, dups.flatMap((r) => [{ repo: r.key.repo, number: r.key.a }, { repo: r.key.repo, number: r.key.b }])) : new Map();
   const canonical = (r: Verdicted): number => {
@@ -84,10 +87,14 @@ async function store(db: Db, rows: Verdicted[], at: string): Promise<void> {
     }).sort(compareCanonical);
     return both[0]!.number;
   };
-  await savePairVerdicts(db, rows.map((r): PairVerdictPut => ({
+  const puts = rows.map((r): PairVerdictPut => ({
     repo: r.key.repo, a: r.key.a, b: r.key.b, a_hash: r.key.a_hash, b_hash: r.key.b_hash, jev_p: r.jev, haiku: r.haiku, verdict: r.verdict,
     canonical: r.verdict === "duplicate" ? canonical(r) : null, checked_at: at,
-  })));
+  }));
+  await db.write(async () => {
+    await savePairVerdicts(db, puts);
+    await saveUnsure(db, { promptId: DUPES_JEV.id, ...unsure });
+  });
 }
 
 /** Jev's kept answers (jev_unsure) to the pairs' current requests, by pair ref, and the hash of the request each pair is in. */
@@ -143,13 +150,16 @@ export async function checkPairs(db: Db, keys: PairKey[], deps: CheckDeps, o: Ch
   }), (await loadLiveConfig(db)).jevParallel);
   const at = deps.now().toISOString();
   const keep = new Set(kept.answers.keys());
-  const save = async (rows: Verdicted[]): Promise<void> => {
-    await store(db, rows, at);
+  /** Stores settled pairs, drops their kept Jev answers, and keeps the answers of `unsettled` (Jev unsure, Haiku still to ask). */
+  const save = async (rows: Verdicted[], unsettled: string[] = []): Promise<void> => {
+    const drop = rows.map((r) => pairRef(r.key.repo, r.key.a, r.key.b)).filter((ref) => keep.has(ref));
+    await store(db, rows, at, { drop, keep: unsettled.map((ref) => ({ ref, hash: kept.hashOf.get(ref)!, answer: JSON.stringify(jevP.get(ref)), at })) });
+    for (const ref of drop) keep.delete(ref);
+    for (const ref of unsettled) keep.add(ref);
     for (const r of rows) {
       c.checked++;
       c.verdicts[r.verdict] = (c.verdicts[r.verdict] ?? 0) + 1;
     }
-    await saveUnsure(db, { promptId: DUPES_JEV.id, keep: [], drop: rows.map((r) => pairRef(r.key.repo, r.key.a, r.key.b)).filter((ref) => keep.delete(ref)) });
   };
   const row = (ref: string, haiku: PairVerdict | null, verdict: PairVerdict): Verdicted => ({ key: pairs.get(ref)!.k, jev: jevP.get(ref) ?? null, haiku, verdict });
   const second: string[] = [];
@@ -160,10 +170,7 @@ export async function checkPairs(db: Db, keys: PairKey[], deps: CheckDeps, o: Ch
     if (v) first.push(row(ref, null, v));
     else second.push(ref);
   }
-  await save(first);
-  const fresh = second.filter((ref) => !keep.has(ref) && jevP.get(ref) !== null);
-  await saveUnsure(db, { promptId: DUPES_JEV.id, drop: [], keep: fresh.map((ref) => ({ ref, hash: kept.hashOf.get(ref)!, answer: JSON.stringify(jevP.get(ref)), at })) });
-  for (const ref of fresh) keep.add(ref);
+  await save(first, second.filter((ref) => !keep.has(ref) && jevP.get(ref) !== null));
   const batches = await repoBatches(db, second, HAIKU.limits.perCall, (r) => pairs.get(r)!.pair.repo, (r) => pairRefs(pairs.get(r)!.pair));
   await pool(batches.map((batch) => async () => {
     // One entry per batch pair; a pair without a valid answer stays in `rest` and is asked again.

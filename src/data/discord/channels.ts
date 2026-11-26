@@ -6,18 +6,18 @@ import type { CategoryRow, ChannelBrief, ChannelReport, ChannelRow, StatusRow } 
 
 const lastBy = <T>(rows: readonly T[], key: (r: T) => string): T[] => [...new Map(rows.map((r) => [key(r), r] as const)).values()];
 
-/** Watched channels (a channel is watched when it or its parent is); absent otherwise. 1 statement per 10,000 ids. */
-export async function loadWatchedChannels(db: Db, channelIds: string[]): Promise<Map<string, { guildId: string }>> {
+/** Watched channels (a channel is watched when it or its parent is), with the parent of a thread or forum post; absent otherwise. 1 statement per 10,000 ids. */
+export async function loadWatchedChannels(db: Db, channelIds: string[]): Promise<Map<string, { guildId: string; parentId: string | null }>> {
   const q = queryDb(db);
-  const out = new Map<string, { guildId: string }>();
+  const out = new Map<string, { guildId: string; parentId: string | null }>();
   for (const ids of kx.chunks([...new Set(channelIds)])) {
-    const rows = await q.all(q.k.selectFrom("main.discord_channels as c").select(["c.channel_id", "c.guild_id"])
+    const rows = await q.all(q.k.selectFrom("main.discord_channels as c").select(["c.channel_id", "c.guild_id", "c.parent_id"])
       .where(kx.inList(db, "c.channel_id", ids))
       .where((eb) => eb.or([
         eb("c.watched", "=", 1),
         eb.exists(eb.selectFrom("main.discord_channels as p").select(eb.lit(1).as("one")).whereRef("p.channel_id", "=", "c.parent_id").where("p.watched", "=", 1)),
       ])), { label: "discord.loadWatchedChannels" });
-    for (const r of rows) out.set(r.channel_id, { guildId: r.guild_id });
+    for (const r of rows) out.set(r.channel_id, { guildId: r.guild_id, parentId: r.parent_id });
   }
   return out;
 }

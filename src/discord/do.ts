@@ -1,0 +1,62 @@
+// A command written in Discord, run the same way from `/autocraft do` and from an @-command (src/discord/at-commands.ts): the workflow
+// parser, the model reading of text it cannot read with its refusal rules (src/workflow/read.ts runText), the sender's linked login
+// with their live write permission, and the questions the sender's alerts showed. `/autocraft do` has no items of its own, so the text
+// must name them; an @-command may have context items (the replied-to message's, or its thread's), which a command naming none acts on.
+import { addSentAlerts, loadShownQuestions } from "../data/discord/index.ts";
+import { PERM_WRITE_TTL, cachedWrite } from "../dash/server/sessions.ts";
+import type { Db } from "../db/index.ts";
+import type { CommandResult } from "../workflow/apply.ts";
+import { parse } from "../workflow/parse.ts";
+import { READ_OWN_MAX, refsIn, runText, type ReadDeps } from "../workflow/read.ts";
+import type { ItemRef, Parsed } from "../workflow/types.ts";
+import type { DiscordKeys } from "./keys.ts";
+
+/** "all", "both", "all of them" at the end: every context item, which is what a command naming no item acts on anyway. */
+const ALL_TAIL = /[\s,]+(?:all(?:\s+of\s+(?:them|these|those))?|them\s+all|both(?:\s+of\s+them)?|everything)\s*[.!]*\s*$/i;
+
+export type DoText = {
+  text: string;
+  parsed: Parsed;
+  /** Items the text names. */
+  named: ItemRef[];
+  /** Items the message is about without naming them. */
+  context: ItemRef[];
+  /** The repo a bare `#n` takes: the context items' one repo. */
+  repo?: string;
+};
+
+/** Parses the text against its context items. `review all` with context items reads as `review`. */
+export function prepareDo(raw: string, context: readonly ItemRef[] = []): DoText {
+  const repos = new Set(context.map((i) => i.repo));
+  const repo = repos.size === 1 ? [...repos][0] : undefined;
+  const opts = repo ? { repo } : {};
+  let text = raw.trim();
+  let parsed = parse(text, opts);
+  const named = refsIn(text, repo);
+  if (parsed.kind === "ambiguous" && context.length && !named.length) {
+    const cut = text.replace(ALL_TAIL, "");
+    const p = cut !== text ? parse(cut, opts) : null;
+    if (p && p.kind !== "ambiguous") { text = cut; parsed = p; }
+  }
+  return { text, parsed, named, context: [...context], ...(repo ? { repo } : {}) };
+}
+
+/** The items the command acts on: those it names, else its context items. */
+export const targetsOf = (d: DoText): ItemRef[] =>
+  d.parsed.kind !== "ambiguous" && d.parsed.items?.length ? d.parsed.items : d.named.length ? d.named : d.context;
+
+/** Runs the text as the sender's linked login, through the command core. */
+export async function runDo(db: Db, keys: DiscordKeys, d: DoText, sender: { userId: string; login: string }, read?: ReadDeps): Promise<CommandResult> {
+  const { login } = sender;
+  const userHash = keys.hash("author", sender.userId);
+  const shown = await loadShownQuestions(db, userHash);
+  // Text that names items is read as a list, as `/autocraft do` reads it; otherwise the context items are the message's own.
+  const byName = d.named.length > 0 || !d.context.length;
+  const result = await runText(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord",
+    { parsed: d.parsed, items: byName ? [] : d.context, asked: ({ workflow }) => shown.get(workflow.id) },
+    { text: d.text, own: (byName ? d.named : d.context).slice(0, READ_OWN_MAX), named: byName, ...(d.repo ? { parse: { repo: d.repo } } : {}), ...(read ? { deps: read } : {}) });
+  // The reply shows the question that took the answered one's place, as an alert does.
+  const sentAt = new Date().toISOString();
+  await addSentAlerts(db, result.items.flatMap((o) => (o.question ? [{ userHash, ...o.question, sentAt }] : [])));
+  return result;
+}

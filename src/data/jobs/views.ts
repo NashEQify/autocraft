@@ -274,6 +274,13 @@ export async function loadJobState(db: Db, id: number): Promise<{ state: JobStat
   return (await q.get(q.k.selectFrom("jobs").select(["state", "summary", "error"]).$narrowType<{ state: JobState }>().where("id", "=", id))) ?? null;
 }
 
+/** The newest finished job of `step` (done or failed: either may have written), by id; null when none has ended. */
+export async function loadLastEndedJob(db: Db, step: string): Promise<number | null> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("jobs").select("id").where("step", "=", step).where("ended_at", "is not", null).orderBy("id", "desc").limit(1));
+  return r ? Number(r.id) : null;
+}
+
 /** The probes (`step`, `repo`) that have a running job; keys are `step\0repo`. */
 export async function isRunning(db: Db, probes: { step: string; repo: string }[]): Promise<Set<string>> {
   if (!probes.length) return new Set();

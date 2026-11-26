@@ -648,6 +648,30 @@ export interface DiscordFilingRepos {
   added_at: string;
 }
 
+export interface DiscordFollowPosts {
+  target_hash: string;
+  repo: string;
+  number: number;
+  status_hash: string;
+  result_key: Generated<string>;
+  result_hash: Generated<string>;
+  link_hash: Generated<string>;
+  sealed: Generated<string>;
+  at: string;
+}
+
+export interface DiscordFollows {
+  target_hash: string;
+  repo: string;
+  number: number;
+  kind: string;
+  channel_hash: string;
+  sealed: string;
+  command: string;
+  login: string;
+  at: string;
+}
+
 export interface DiscordHiddenRepos {
   name: string;
   hidden_by: string | null;
@@ -2601,6 +2625,8 @@ export interface DB {
   discord_events: DiscordEvents;
   discord_filed: DiscordFiled;
   discord_filing_repos: DiscordFilingRepos;
+  discord_follow_posts: DiscordFollowPosts;
+  discord_follows: DiscordFollows;
   discord_hidden_repos: DiscordHiddenRepos;
   discord_link_codes: DiscordLinkCodes;
   discord_links: DiscordLinks;
@@ -2808,6 +2834,8 @@ export interface DB {
   "main.discord_events": DiscordEvents;
   "main.discord_filed": DiscordFiled;
   "main.discord_filing_repos": DiscordFilingRepos;
+  "main.discord_follow_posts": DiscordFollowPosts;
+  "main.discord_follows": DiscordFollows;
   "main.discord_hidden_repos": DiscordHiddenRepos;
   "main.discord_link_codes": DiscordLinkCodes;
   "main.discord_links": DiscordLinks;
@@ -3019,6 +3047,8 @@ export const COLUMNS = {
   discord_events: ["at", "kind"],
   discord_filed: ["repo", "number", "login", "reporter", "at"],
   discord_filing_repos: ["name", "owner", "added_by", "added_at"],
+  discord_follow_posts: ["target_hash", "repo", "number", "status_hash", "result_key", "result_hash", "link_hash", "sealed", "at"],
+  discord_follows: ["target_hash", "repo", "number", "kind", "channel_hash", "sealed", "command", "login", "at"],
   discord_hidden_repos: ["name", "hidden_by", "hidden_at"],
   discord_link_codes: ["code_hash", "login", "expires_at"],
   discord_links: ["user_hash", "login", "linked_at"],

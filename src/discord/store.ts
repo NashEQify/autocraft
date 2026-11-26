@@ -58,9 +58,12 @@ export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage
   }]);
 }
 
-/** Mention rows only: our replies live in Discord and are deleted with it (src/discord/replies.ts). */
-export const forgetMessages = async (db: Db, keys: DiscordKeys, ids: string[]): Promise<number> =>
-  await dc.removeMentionsOfMessages(db, ids.map((id) => keys.hash("message", id)));
+/** Mention rows, and what a deleted command reply of the bot followed. Returns the mention rows removed; our ping replies live in Discord and are deleted with it (src/discord/replies.ts). */
+export async function forgetMessages(db: Db, keys: DiscordKeys, ids: string[]): Promise<number> {
+  const hashes = ids.map((id) => keys.hash("message", id));
+  await dc.removeFollows(db, hashes);
+  return await dc.removeMentionsOfMessages(db, hashes);
+}
 
 /** For channels that are gone (deleted, or their server removed the bot): their replies went with them, so only the rows are removed. */
 export async function forgetChannels(db: Db, keys: DiscordKeys, channelIds: string[]): Promise<number> {

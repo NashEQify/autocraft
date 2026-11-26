@@ -2,6 +2,7 @@ export * from "./alerts.ts";
 export * from "./channels.ts";
 export * from "./events.ts";
 export * from "./filing.ts";
+export * from "./follows.ts";
 export * from "./mentions.ts";
 export * from "./replies.ts";
 export * from "./setup.ts";
