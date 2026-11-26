@@ -116,6 +116,14 @@ test("the snapshot built from Postgres has the rows of the one built from SQLite
     assert.deepEqual(dump(file), dump(fresh2));
     assert.deepEqual(srcRows(file), srcRows(fresh2));
 
+    // An item frozen right after its edit (Postgres freezes eagerly) is still read as written since the last refresh.
+    await pdb.prepare("UPDATE items SET title = 'Fix kerning, frozen' WHERE repo = 'photocraft' AND number = 7").run();
+    await pdb.prepare("VACUUM (FREEZE) items").run();
+    const frozen = await pdb.prepare(`SELECT xmin::text::bigint < (SELECT relfrozenxid::text::bigint FROM pg_class WHERE oid = 'items'::regclass) AS f
+      FROM items WHERE repo = 'photocraft' AND number = 7`).get() as { f: unknown };
+    assert.ok(frozen.f, "the edited row is frozen");
+    assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 1, comments: 0, embeddings: 0 });
+
     // A repository turned private after its changed items were compared: they are not read again, so they leave the file.
     await pdb.prepare("UPDATE items SET title = 'Fix kerning again' WHERE repo = 'photocraft' AND number = 7").run();
     const hidden = await writeSnapshotFromDb(pdb, file, 2, {
