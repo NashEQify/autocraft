@@ -13,7 +13,7 @@ import { loadConfig } from "../src/dash/server/config.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { bundleOf, claimCall, enqueueCall, submitCall, type Caller } from "../src/remote/calls.ts";
-import { saveStore } from "../src/transcripts/index.ts";
+import { saveStore, transcriptsStored } from "../src/transcripts/index.ts";
 import { PROTOCOL_VERSION, type TaskBundle } from "../src/remote/protocol.ts";
 import type { AgentRunDetail, TranscriptView } from "../web/src/api/types.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -65,6 +65,7 @@ before(async () => {
   ];
   const transcript = gzipSync(events.map((event) => JSON.stringify({ at, event })).join("\n")).toString("base64");
   assert.deepEqual(await submitCall(db, lease!.secret, { ok: true, text: "{\"verdict\": \"ok\"}", model: "claude-opus-4", usage: { inputTokens: 10, outputTokens: 5 }, transcript, durationMs: 1000 }), { accepted: true });
+  await transcriptsStored();
   runId = Number((await db.get(db.k.selectFrom("remote_calls").select("run_id").where("id", "=", lease!.id)))!.run_id);
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
   const s = await startServer({ config, db, provider: new FakeProvider(permsFile), routes: apiRoutes() });
