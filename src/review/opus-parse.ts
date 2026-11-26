@@ -71,6 +71,8 @@ export type OpusPr = {
   unapplied_fixes?: UnappliedFix[];
   /** Present only when a person settled that the change belongs in the app (src/review/opus.ts scopeSettled): the review does not reopen scope. */
   scope_settled?: { answer: string; by: string | null; note: string | null };
+  /** Present only when the PR's author pushed commits after a person approved its merge: the head they approved; the reply then says whether the new commits stay within it. */
+  author_commits?: { approved_head: string };
   /** Present only when our pipeline pushed commits to the PR since `earlier_opus`'s head: kind, sha, note and the fixes each was meant to make. */
   pipeline_commits?: { kind: string; sha: string; note: string; fixes_meant: string[] }[];
   diff: string;
@@ -224,7 +226,12 @@ export type ReviewFix = { file: string; change: string; title?: string; major?: 
 /** What the review recommends: one sentence, and what a yes runs (the fixes it makes, by number from 1; whether it then merges or closes). */
 export type ReviewRecommendation = { text: string; fix: number[]; merge: boolean; close: boolean };
 /** Lines the change has outside what the pull request sets out to do, and the review's one recommendation. */
-export type ReviewWorkflow = { outside_purpose: { lines: number; note: string } | null; recommendation: ReviewRecommendation | null };
+export type ReviewWorkflow = {
+  outside_purpose: { lines: number; note: string } | null; recommendation: ReviewRecommendation | null;
+  /** Asked only when the author pushed after a person approved the merge (`OpusPr.author_commits`): whether those commits stay within what was approved. */
+  author_commits?: AuthorCommits | null;
+};
+export type AuthorCommits = { in_scope: boolean; note: string };
 
 export const PART_TITLE_CHARS = 80;
 export const OUTSIDE_NOTE_CHARS = 200;
@@ -251,7 +258,10 @@ export function parseReviewWorkflow(r: Record<string, unknown>, partOf: (n: numb
   const usable = keepRec && !!text && fix.every((n) => n !== null) && (fix.length > 0 || merge || close);
   const exact = fix.every((n, i) => n === named[i]);
   const rec = usable ? { text: exact ? text! : "", fix: fix as number[], merge, close } : null;
-  return outside || rec ? { outside_purpose: outside, recommendation: rec } : null;
+  const a = r.author_commits as { in_scope?: unknown; note?: unknown } | null | undefined;
+  const author = a && typeof a === "object" && typeof a.in_scope === "boolean"
+    ? { in_scope: a.in_scope, note: typeof a.note === "string" ? a.note.replace(/\s+/g, " ").trim().slice(0, OUTSIDE_NOTE_CHARS) : "" } : null;
+  return outside || rec || author ? { outside_purpose: outside, recommendation: rec, ...(author ? { author_commits: author } : {}) } : null;
 }
 
 export const OPUS_REASON_WORDS = 60;

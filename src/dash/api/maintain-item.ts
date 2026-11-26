@@ -11,7 +11,7 @@ import { t } from "../../i18n/index.ts";
 import { STUCK_OPTIONS } from "../../implement/stuck.ts";
 import { loadMaintainItem } from "../../data/views/maintain-item.ts";
 import { loadQuiet } from "../../data/security/index.ts";
-import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
+import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepNamesOf, stepsAt, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
 import { openQuestion } from "../../workflow/asked.ts";
 import { isLive } from "../../workflow/store.ts";
 import type { StoredEvent } from "../../data/workflow/types.ts";
@@ -34,7 +34,7 @@ const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", 
  */
 export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
   if (wf.state === "stopped" || wf.state === "closed" || wf.state === "backlog") return null;
-  const names = stepsFor(wf.entry, wf.approvedBy !== null);
+  const names = stepNamesOf(wf);
   // A fix-up fixes what a review found; an implementation's parts and the options of its question are no fix-up.
   const kept = wf.plan.filter((p) => p.state !== "dropped" && p.source !== "implement").map((p) => p.n);
   const notes: Record<number, string> = {};

@@ -5,7 +5,9 @@
 // recommendation (question.ts). The runner runs it on each tick its inputs changed, before the pre-approval pass.
 //
 // A person answers the recommendation with a command (apply.ts), and nothing here writes to GitHub. While an item waits for its
-// answer nothing moves, unless the author pushes: the question is about commits that are no longer the head, so it is made again. The
+// answer nothing moves, unless the author pushes: the question is about commits that are no longer the head, so it is made again.
+// The author's commits on a PR approved for merge go through a review round: Opus reviews them, and only a review that finds them
+// beyond what was approved asks the approver. The
 // pass loads every workflow's facts at once and writes what changed in one write at its end, a stop at a blocker at once with the end
 // of its merge leg (block.ts). A workflow a person changed meanwhile (held, answered, approved) keeps what they did: the pass's write
 // leaves it out and the next pass looks at it again. Each pass first starts the workflows of PRs the automatic merge rule stopped for a
@@ -39,7 +41,7 @@ import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
-import { listText, stepsFor, type StepName } from "./status.ts";
+import { listText, ROUND_STEP, stepsFor, type StepName } from "./status.ts";
 import { RULE_STARTER, type Blocker, type ItemWorkflow, type PlanPart, type Recommendation } from "./types.ts";
 import { candidatePr, workOf } from "./work.ts";
 
@@ -144,10 +146,14 @@ const HOLD_ENDS: readonly StopCode[] = ["person", "workflow-ended"];
 /** The reason of a leg the pass itself ended for the question it made (blockWorkflow). */
 const OWN_CANCEL = `cancelled by ${ACTOR}`;
 
+/** Leg ends that say only that someone else pushed: the workflow itself judges the new head (the review round), and a new leg starts at a head it accepts. */
+const PUSH_ENDS: readonly StopCode[] = ["author-push", "head-back"];
+
 /** The merge leg of the workflow that ended after `since` (and none active), with its reason. One a hold ended says nothing once someone resumed the item. */
 function endedLeg(pass: Pass, w: ItemWorkflow, since: string, resumed: string | null): EndedLeg | null {
   const r = [...pass.legs.values()].flat().filter((l) => l.workflow_id === w.id).sort((a, b) => b.id - a.id)[0];
   if (!r || !ENDED_LEG.includes(r.state) || r.updated_at <= since || r.reason === OWN_CANCEL) return null;
+  if (w.kind === "pr" && PUSH_ENDS.includes(codeOf({ reason: r.reason ?? r.state, code: r.reason_code as StopCode | null }))) return null;
   const ended: EndedLeg = { reason: r.reason ?? r.state, code: r.reason_code as StopCode | null };
   if (HOLD_ENDS.includes(codeOf(ended)) && resumed !== null && r.updated_at <= resumed) return null;
   return ended;
@@ -434,6 +440,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   // Waiting for a person: nothing moves until they answer, the cause of their question goes, or someone else pushes past the head their question was made at. Then the
   // question goes and the item is looked at like a running one; `recHead` stays, so that the next question says why it is asked.
   let repushed = w.state === "blocked" || w.state === "recommending";
+  // A stop at the author's commits made before they went through the review round: the round takes its place.
+  if (w.state === "blocked" && w.kind === "pr" && w.blocker === "author-commits" && w.blockerParams?.round === undefined && w.rec) {
+    await closeQuestion(t("the author's new commits are reviewed first, and the merge stays approved."));
+    repushed = false;
+  }
   if (repushed && (!head || w.recHead === null || ownChain(pass, ref, w.recHead, head))) {
     // Nor does it wait when what the question is about went: the approval covers the head, or our pushes on it, as it did.
     const now = pass.facts.get(ref);
@@ -522,6 +533,27 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const rec = (now && ended && x.params.reason === ended.reason ? legStop(codeOf(ended), now, o) : null) ?? atBlocker(x, view, parts, w.entry === "merge");
     return onConflict(now && !x.params.premerge ? fixable(rec, now, o) : rec, conflict);
   };
+  // The review round of the author's new commits on an approved PR: the approval stays, and the merge leg starts again at a head the
+  // round accepts. A review carried to the head (the PR's own diff is unchanged) accepts it without a model call, and so does a review that
+  // finds the commits within what was approved; one that finds them beyond it asks the approver, naming its public finding. A merge entry
+  // owes the review as one a person asked for, so the planner makes it and the new leg waits for it.
+  if (w.kind === "pr" && authorPush && approved) {
+    if (stored && (stored.mode === "carried" || stored.workflow?.author_commits?.in_scope !== false)) {
+      Object.assign(patch, { baseHead: head, acceptedHead: head });
+      authorPush = null;
+    } else {
+      let round: Found | null = null;
+      if (stored) round = { blocker: "author-commits", params: { from: authorPush.from, to: head, round: "out-of-scope", ...(stored.public_summary ? { finding: stored.public_summary } : {}) } };
+      else if (read?.head === head && read.reviewHold?.kind === "failed" && read.reviewHold.until === undefined) {
+        round = { blocker: "other", params: { reason: t("the review of the author's new commits failed"), round: "review-failed" } };
+      }
+      if (round) return await block({ ...patch, blocker: round.blocker, blockerParams: round.params, rec: ask(blockerRec(round, plan), head), recAt: pass.at, recHead: head }, patch);
+      const owes = w.reviewAskedAt !== null && !(pass.reviews.get(ref) ?? []).some((r) => r.at > w.reviewAskedAt!);
+      if (w.entry === "merge" && !owes) patch.reviewAskedAt = pass.at;
+      step = ROUND_STEP;
+      return settle(patch);
+    }
+  }
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.

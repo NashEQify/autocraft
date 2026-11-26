@@ -73,7 +73,7 @@ export function mergeApproved(f: MergeInputs): MayResult {
   const w = f.workflow;
   if (w?.live) {
     if (w.blocker) return refuse("blocked", `The workflow asks again: ${w.blocker}`);
-    if (w.baseHead === null || !chainsOwn(f.pushes, w.baseHead, f.head)) return refuse("unaccepted-head", "The author pushed commits after the workflow started; the workflow asks again before merging.");
+    if (w.baseHead === null || !chainsOwn(f.pushes, w.baseHead, f.head)) return refuse("unaccepted-head", "The author pushed commits after the workflow accepted the head; they are reviewed before the merge.");
     if (w.approvedBy === null && w.entry !== "merge") return refuse("not-approved", ENDS_WITH_RECOMMENDATION);
     return person(w.approvedBy ?? w.startedBy);
   }

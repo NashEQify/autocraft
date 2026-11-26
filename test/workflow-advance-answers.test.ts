@@ -101,13 +101,14 @@ test("a blocked item asks again at each head the author pushes, once, and goes o
     const db = w.db;
     await w.pr(2, { label: "feature" });
     assert.equal((await answer(w, entry)).outcome, "run");
-    if (entry === "merge") await w.synced(2, "theirs1");
+    if (entry === "merge") { await w.synced(2, "theirs1"); await w.outOfScope(2, "theirs1"); }
     else await review2(w, "sha2", "hold");
     await advanceWorkflows(db);
     const first = (await liveWorkflow(db, "app", 2))!;
     assert.deepEqual([first.state, first.blocker], ["blocked", entry === "merge" ? "author-commits" : "major-finding"]);
 
     await w.synced(2, "theirs2");
+    await w.outOfScope(2, "theirs2");
     assert.equal((await answer(w, "yes")).outcome, "refused", entry);
     for (let i = 0; i < 2; i++) await advanceWorkflows(db);
     const again = (await liveWorkflow(db, "app", 2))!;
@@ -123,12 +124,15 @@ test("a blocked item asks again at each head the author pushes, once, and goes o
   }
 });
 
-test("a yes to the author's commits on a merge entry has a model review them first; the word merge approves them as they are", async () => {
+test("the author's commits on a merge entry are reviewed in the round before the merge queue takes them; past a finding beyond the approval, merge goes on", async () => {
   for (const verdict of ["take", "hold"]) {
-    const w = await authorPushed();
-    assert.equal((await answer(w, "yes")).outcome, "run");
+    const w = await approvedReview();
+    await w.pr(2, { label: "feature" });
+    assert.equal((await answer(w, "merge")).outcome, "run");
+    await w.synced(2, "theirs");
     await ticks(w);
-    assert.deepEqual([(await leg2(w)).state, (await leg2(w)).head], ["review", "theirs"]);
+    const round = (await liveWorkflow(w.db, "app", 2))!;
+    assert.deepEqual([round.state, round.blocker, round.step], ["running", null, "review new commits"]);
     assert.ok((await planned2(w)).includes("review"));
     await reviewNow(w, "theirs", verdict);
     await ticks(w);
@@ -251,7 +255,7 @@ test("the merge leg a question ended is no reason to ask again after an answer t
   assert.deepEqual([on.state, on.blocker], ["running", null]);
 });
 
-test("no answer ends the review a push of ours owes a merge entry: past a large fix, a failing step, or the author's commits on top", async () => {
+test("no answer ends the review a push of ours owes a merge entry: past a large fix, a failing step, or the author's commits on top, whose round reviews it", async () => {
   const started = async () => {
     const w = await approvedReview();
     await w.pr(2, { label: "feature" });
@@ -293,18 +297,24 @@ test("no answer ends the review a push of ours owes a merge entry: past a large 
   w = await started();
   await pushNow(w, "sha2", "ours");
   await w.synced(2, "theirs");
+  await w.outOfScope(2, "theirs");
   await advanceWorkflows(w.db);
   assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "author-commits");
   await pause();
   assert.equal((await answer(w, "merge")).outcome, "run");
-  await owes(w, "under the author's commits");
+  // The review round's review at the author's head read our push under it: that is the review it owes.
+  await (await w.verified(2)).premerge(2, "clean");
+  await ticks(w);
+  assert.deepEqual([(await leg2(w)).state, (await leg2(w)).head, (await planned2(w)).includes("review")], ["queued", "theirs", false], "under the author's commits");
+  w.close();
 });
 
 test("a head the author restores is the approved one: the merge goes on and nobody is asked", async () => {
   const w = await approvedReview();
   await w.synced(1, "theirs");
   await advanceWorkflows(w.db);
-  assert.deepEqual([(await liveWorkflow(w.db, "app", 1))!.blocker, await legState(w)], ["author-commits", "cancelled"]);
+  const round = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([round.state, round.blocker, round.step], ["running", null, "review new commits"]);
   await w.synced(1, "sha1");
   await advanceWorkflows(w.db);
   const wf = (await liveWorkflow(w.db, "app", 1))!;
@@ -317,6 +327,7 @@ test("an answer to a question that was asked anew since is refused and shows the
       const w = await authorPushed();
       const first = (await liveWorkflow(w.db, "app", 2))!;
       await w.synced(2, "theirs2");
+      await w.outOfScope(2, "theirs2");
       await advanceWorkflows(w.db);
       const second = (await liveWorkflow(w.db, "app", 2))!;
       assert.equal(second.recHead, "theirs2");

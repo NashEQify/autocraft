@@ -412,6 +412,11 @@ const parseReasons = (s: string | null): string[] => {
 };
 
 /** The base branch a cached diff was computed against; null when unknown. */
+/** The diff cached for this head, or null when none is; never fetched. */
+export function cachedDiffText(repo: string, number: number, head: string): string | null {
+  try { return readFileSync(join(diffCacheDir(), repo, `${number}-${head}.diff`), "utf8"); } catch { return null; }
+}
+
 export function cachedDiffBase(repo: string, number: number, head: string): string | null {
   const f = join(diffCacheDir(), repo, `${number}-${head}.diff.base`);
   try { return existsSync(f) ? readFileSync(f, "utf8") : null; } catch { return null; }

@@ -66,7 +66,7 @@ test("an approved PR on hold merges nothing; another maintainer's resume goes on
   }
 });
 
-test("the author's commits while it is held are asked about after a resume", async () => {
+test("the author's commits while it is held are reviewed after a resume", async () => {
   const w = await fresh();
   await run(w, "merge");
   await settle(w);
@@ -76,7 +76,7 @@ test("the author's commits while it is held are asked about after a resume", asy
   await run(w, "resume", OTHER);
   await settle(w);
   const wf = (await liveWorkflow(w.db, "app", 1))!;
-  assert.deepEqual([wf.state, wf.blocker, wf.approvedBy], ["blocked", "author-commits", OTHER]);
+  assert.deepEqual([wf.state, wf.blocker, wf.step, wf.approvedBy], ["running", null, "review new commits", OTHER]);
   assert.ok(!await mayMerge(w));
 });
 
@@ -112,7 +112,7 @@ test("a question that closes by itself does not while the item is held; resumed,
     assert.deepEqual((await liveWorkflow(w.db, "app", 1))!.rec, rec);
     await settle(w);
     const now = (await liveWorkflow(w.db, "app", 1))!;
-    assert.deepEqual([now.id, now.state, now.blocker, now.approvedBy], head === "sha1" ? [id, "running", null, OTHER] : [id, "blocked", "author-commits", OTHER]);
+    assert.deepEqual([now.id, now.state, now.blocker, now.approvedBy, now.step === "review new commits"], [id, "running", null, OTHER, head !== "sha1"]);
     await run(w, "backlog");
   }
 });

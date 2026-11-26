@@ -214,14 +214,15 @@ test("what a person settles on GitHub is asked about; a yes looks again, and onc
   }
 });
 
-test("a question whose cause went stays one where the author pushed meanwhile", async () => {
+test("a question whose cause went does not close by itself where the author pushed meanwhile: the commits go to the review round", async () => {
   const w = await started("review and merge");
   await checks(w, { overall: "none" });
   await settle(w);
   await w.synced(1, "theirs");
   await settle(w);
   const x = await wf(w);
-  assert.deepEqual([x.state, x.blocker, x.approvedBy], ["blocked", "author-commits", MAINT]);
+  assert.deepEqual([x.state, x.blocker, x.step, x.approvedBy], ["running", null, "review new commits", MAINT]);
+  assert.doesNotMatch(String((await eventsOf(w.db, "app", 1)).at(-1)?.line ?? ""), /closed without an answer/);
 });
 
 test("an approver who can act again goes on with their approval, unasked; where the merge itself was refused for their access, once it is to be tried again", async () => {

@@ -135,7 +135,7 @@ export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permiss
   const writes = need === "merge" || need === "push" || a.kind === "implement";
   const gone = GOES_ON.has(a.kind) ? null : standingRefusal(f, a, writes);
   if (gone) return gone;
-  if (pr && writes && !headAccepted(pr)) return unapproved("unaccepted-head", `The author pushed commits after the workflow started; the workflow asks again before ${need === "merge" ? "merging" : "AutoCraft pushes"}.`);
+  if (pr && writes && !headAccepted(pr)) return unapproved("unaccepted-head", `The author pushed commits after the workflow accepted the head; they are reviewed before ${need === "merge" ? "the merge" : "AutoCraft pushes"}.`);
   if (commander !== null) return { ok: true, as: "app", by: { kind: "person", login: commander } };
   if (!need) return { ok: true, as: "app", by: null };
   if (pr && (need === "merge" || need === "push")) {

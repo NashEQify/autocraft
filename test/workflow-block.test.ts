@@ -206,6 +206,7 @@ test("the accepted head of a PR follows its start, our pushes and an answer; a r
   const heads = async () => { const x = (await liveWorkflow(db, "app", 1))!; return [x.baseHead, x.acceptedHead]; };
   assert.deepEqual(await heads(), ["sha1", "sha1"]);
   await w.synced(1, "theirs");
+  await w.outOfScope(1, "theirs");
   await advanceWorkflows(db);
   assert.deepEqual(await heads(), ["sha1", "sha1"]);
   await pause();

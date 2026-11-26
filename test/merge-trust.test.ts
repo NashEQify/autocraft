@@ -100,7 +100,7 @@ test("a push of ours keeps the merge approval, whatever made it and wherever the
   }
 });
 
-test("someone else's commits end the leg and ask, also under a push of ours or after one", async () => {
+test("someone else's commits end the leg and go to the review round, also under a push of ours or after one", async () => {
   const w = (current = await (await (await world()).repo()).acting());
   const after = STATES.map((state, i) => ({ n: 1 + i, state, entry: "review" as const }));
   const under = STATES.map((state, i) => ({ n: 4 + i, state, entry: "merge" as const }));
@@ -113,7 +113,7 @@ test("someone else's commits end the leg and ask, also under a push of ours or a
   await tick(w);
   for (const c of [...after, ...under]) {
     const wf = (await liveWorkflow(w.db, "app", c.n))!;
-    assert.deepEqual([wf.state, wf.blocker, (await legOf(w, c.n)).state], ["blocked", "author-commits", "cancelled"], `${c.n}`);
+    assert.deepEqual([wf.state, wf.blocker, wf.step, (await legOf(w, c.n)).state], ["running", null, "review new commits", "cancelled"], `${c.n}`);
   }
 });
 
