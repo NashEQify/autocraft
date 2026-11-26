@@ -697,6 +697,11 @@ export interface DiscordMentions {
   signal: Generated<number>;
 }
 
+export interface DiscordOptouts {
+  user_hash: string;
+  opted_out_at: string;
+}
+
 export interface DiscordReplies {
   ping_hash: string;
   quoted_hash: string | null;
@@ -2629,6 +2634,7 @@ export interface DB {
   discord_link_codes: DiscordLinkCodes;
   discord_links: DiscordLinks;
   discord_mentions: DiscordMentions;
+  discord_optouts: DiscordOptouts;
   discord_replies: DiscordReplies;
   discord_status: DiscordStatus;
   download_deltas: DownloadDeltas;
@@ -2838,6 +2844,7 @@ export interface DB {
   "main.discord_link_codes": DiscordLinkCodes;
   "main.discord_links": DiscordLinks;
   "main.discord_mentions": DiscordMentions;
+  "main.discord_optouts": DiscordOptouts;
   "main.discord_replies": DiscordReplies;
   "main.discord_status": DiscordStatus;
   "main.download_deltas": DownloadDeltas;
@@ -3051,6 +3058,7 @@ export const COLUMNS = {
   discord_link_codes: ["code_hash", "login", "expires_at"],
   discord_links: ["user_hash", "login", "linked_at"],
   discord_mentions: ["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"],
+  discord_optouts: ["user_hash", "opted_out_at"],
   discord_replies: ["ping_hash", "quoted_hash", "channel_hash", "sealed"],
   discord_status: ["id", "state", "detail", "at"],
   download_deltas: ["asset_id", "t", "span", "delta"],
