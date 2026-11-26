@@ -5,8 +5,9 @@
 import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import { loadArtifacts } from "../../data/build/index.ts";
-import { ensureMainConversation, linkMessage, loadConversationsOfItem, loadMessages, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
+import { ensureMainConversation, linkMessage, loadConversationsOfItem, loadMessages, setMessageRefusal, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
 import { loadThreads } from "../../data/conversations/index.ts";
+import { loadItems } from "../../data/mirror/index.ts";
 import { loadScreenshotRuns } from "../../data/merge/index.ts";
 import type { CardRow, ThreadTurn } from "../../data/conversations/types.ts";
 import { loadItemTraceStamp, type ItemTraceRows } from "../../data/views/trace.ts";
@@ -20,7 +21,6 @@ import { ENTRY_LABEL } from "../../workflow/vocab.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow, type PlanPart, type Recommendation } from "../../workflow/types.ts";
 import type { Req } from "../types.ts";
-import { queryDb } from "../../db/query-db.ts";
 import { parse } from "../../workflow/parse.ts";
 import { recordSaid } from "../../workflow/said.ts";
 import { HttpError } from "../server/util.ts";
@@ -58,7 +58,7 @@ async function base(db: Db, req: Req): Promise<Base> {
   const history = histories.get(key) ?? [];
   const legRow = legs.get(key)?.[0];
   const leg = legRow ? { workflowId: legRow.workflow_id, state: legRow.state } : null;
-  const said = [...messages.values()].flat().map((m) => [m.id, m.at, m.workflowEventId, m.turnId]);
+  const said = [...messages.values()].flat().map((m) => [m.id, m.at, m.workflowEventId, m.turnId, m.payload]);
   const stamp = fingerprint(c, JSON.stringify(["chat", c.veiled, canReply, discordKeys() !== null]), [...sources, convs.map((x) => [x.id, x.title]), said, history, leg]);
   return { c, convs, messages, history, leg, canReply, reader: req.user.login, stamp };
 }
@@ -317,28 +317,24 @@ export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; line
   if (typeof b.text !== "string" || !b.text.trim()) throw new HttpError(400, "text is required");
   if (b.text.length > TEXT_MAX) throw new HttpError(400, `text is over ${TEXT_MAX} characters`);
   const text = b.text;
+  if (!(await loadItems(db, [{ repo, number: n }], "ref")).has(`${repo}#${n}`)) throw new HttpError(404, `${repo}#${n} is not an item AutoCraft has read`);
   const mainId = await ensureMainConversation(db, repo, n, req.user.login);
   if (b.conversation !== MAIN && String(b.conversation) !== String(mainId)) throw new HttpError(404, "only the main conversation takes messages");
   const parsed = parse(text, { repo });
   const lines: string[] = [];
   if (parsed.kind === "ambiguous" && parsed.understood === "" && text.includes("?")) {
     await assertAskRate(db, req.user.login);
-    const [said] = await recordSaid(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }] });
+    const [said] = await recordSaid(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }], by: { canWrite: (r) => req.user.canWrite(r), role: req.user.role } });
     const asked = await askOpus(db, req, repo, n, text);
     if (said) {
       if ("turnId" in asked) await linkMessage(db, said.id, { turnId: asked.turnId });
-      else await setRefusal(db, said.id, asked.refusal);
+      else await setMessageRefusal(db, said.id, asked.refusal);
     }
     if ("refusal" in asked) lines.push(asked.refusal);
   } else {
     lines.push(...(await runItemText(db, req, repo, n, text, parsed, null)).lines);
   }
   return { chat: await readChat(db, req), lines };
-}
-
-async function setRefusal(db: Db, id: number, refusal: string): Promise<void> {
-  const q = queryDb(db);
-  await db.write(() => q.run(q.k.updateTable("main.chat_messages").set({ payload: JSON.stringify({ refusal }) }).where("id", "=", id)));
 }
 
 /**

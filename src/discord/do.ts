@@ -62,8 +62,9 @@ export async function runDo(db: Db, keys: DiscordKeys, d: DoText, sender: { user
   // Text that names items is read as a list, as `/autocraft do` reads it; otherwise the context items are the message's own.
   const byName = d.named.length > 0 || !d.context.length;
   const own = (byName ? d.named : d.context).slice(0, READ_OWN_MAX);
-  const said = { login, via: "discord" as const, text: d.written, items: [...own, ...(d.parsed.kind !== "ambiguous" ? d.parsed.items ?? [] : [])], payload: { msgHash: keys.hash("message", sender.messageId) } };
-  const result = await saying(db, said, () => runText(db, { login, ...writeAccess(db, login, permission) }, "discord",
+  const write = writeAccess(db, login, permission);
+  const said = { login, via: "discord" as const, text: d.written, items: [...own, ...(d.parsed.kind !== "ambiguous" ? d.parsed.items ?? [] : [])], by: { canWrite: write.canWrite }, payload: { msgHash: keys.hash("message", sender.messageId) } };
+  const result = await saying(db, said, () => runText(db, { login, ...write }, "discord",
     { parsed: d.parsed, items: byName ? [] : d.context, asked: ({ workflow }) => shown.get(workflow.id) },
     { text: d.text, own, named: byName, ...(d.repo ? { parse: { repo: d.repo } } : {}), ...(read ? { deps: read } : {}) }));
   // The reply shows the question that took the answered one's place, as an alert does.

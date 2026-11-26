@@ -370,7 +370,7 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const req = reqOf(user);
   const repos = new Set(await allVisibleRepos(env.db, req));
   const parsed = parse(a.text as string, { repo: r.repo });
-  const done = await saying(env.db, { login: user.login, via: "agent", text: a.text as string, items: [{ repo: r.repo, number: r.number }] }, () => runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo), writeError: async (repo) => await user.permissionError?.(repo) ?? null }, "agent", {
+  const done = await saying(env.db, { login: user.login, via: "agent", text: a.text as string, items: [{ repo: r.repo, number: r.number }], by: { canWrite: (repo) => user.canWrite(repo), role: user.role, visible: async (repo) => repos.has(repo) } }, () => runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo), writeError: async (repo) => await user.permissionError?.(repo) ?? null }, "agent", {
     parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo), asked: ({ ref }) => (ref === refText(r) ? a.asked as string | undefined : null),
   }, { text: a.text as string, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo } }));
   const text = done.lines.join("\n");

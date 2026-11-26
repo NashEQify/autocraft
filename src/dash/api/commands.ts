@@ -65,8 +65,9 @@ export async function itemCommand(db: Db, req: Req): Promise<CommandResult> {
 
 /** Text written on one item through the command core, stored as the person's message in the item's chat. */
 export async function runItemText(db: Db, req: Req, repo: string, n: number, text: string, parsed: Parsed, asked: string | null): Promise<CommandResult> {
-  return await saying(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }] }, async () =>
-    await runText(db, actorOf(req), "dashboard", { parsed, items: [{ repo, number: n }], visible: await visibleFn(db, req), asked: ({ ref }) => (ref === `${repo}#${n}` ? asked : null) },
+  const visible = await visibleFn(db, req);
+  return await saying(db, { login: req.user.login, via: "dashboard", text, items: [{ repo, number: n }], by: { canWrite: actorOf(req).canWrite, role: req.user.role, visible } }, async () =>
+    await runText(db, actorOf(req), "dashboard", { parsed, items: [{ repo, number: n }], visible, asked: ({ ref }) => (ref === `${repo}#${n}` ? asked : null) },
       { text, own: [{ repo, number: n }], named: false, parse: { repo } }));
 }
 
@@ -79,8 +80,9 @@ export async function listCommand(db: Db, req: Req): Promise<CommandResult> {
   if (Math.max(items.length, parsed.kind !== "ambiguous" ? parsed.items?.length ?? 0 : 0) > ITEMS_MAX) throw new HttpError(400, `at most ${ITEMS_MAX} items in one command`);
   const asked = obj(obj(req.json).asked);
   const own = items.length ? items : refsIn(text).slice(0, ITEMS_MAX);
-  return await saying(db, { login: req.user.login, via: "dashboard", text, items: own }, async () =>
-    await runText(db, actorOf(req), "dashboard", { parsed, items, visible: await visibleFn(db, req), asked: ({ ref }) => timeOf(Object.hasOwn(asked, ref) ? asked[ref] : null) },
+  const visible = await visibleFn(db, req);
+  return await saying(db, { login: req.user.login, via: "dashboard", text, items: own, by: { canWrite: actorOf(req).canWrite, role: req.user.role, visible } }, async () =>
+    await runText(db, actorOf(req), "dashboard", { parsed, items, visible, asked: ({ ref }) => timeOf(Object.hasOwn(asked, ref) ? asked[ref] : null) },
       { text, own, named: !items.length }));
 }
 

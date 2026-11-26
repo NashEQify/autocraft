@@ -143,3 +143,18 @@ export async function linkMessage(db: Db, id: number, link: { workflowEventId?: 
   const q = queryDb(db);
   await db.write(() => q.run(q.k.updateTable("main.chat_messages").set(set).where("id", "=", id)));
 }
+
+/**
+ * Keeps the reply to a said message that produced no event or turn (a refused command, a question Opus could not take) in its payload
+ * as `refusal`, beside what the payload holds already. Joins the caller's `db.write`.
+ */
+export async function setMessageRefusal(db: Db, id: number, refusal: string): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    const row = await q.get(q.k.selectFrom("main.chat_messages").select("payload").where("id", "=", id));
+    if (!row) return;
+    const was = parse(row.payload as string | null);
+    const payload = was && typeof was === "object" && !Array.isArray(was) ? { ...(was as Record<string, unknown>), refusal } : { refusal };
+    await q.run(q.k.updateTable("main.chat_messages").set({ payload: JSON.stringify(payload) }).where("id", "=", id));
+  });
+}

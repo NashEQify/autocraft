@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { insertRun, finishRun } from "../src/agents/runs.ts";
+import { listCommand } from "../src/dash/api/commands.ts";
 import { itemChat, postChat, postChatWithdraw } from "../src/dash/api/item-chat.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import type { Req } from "../src/dash/types.ts";
@@ -146,6 +147,30 @@ test("a command written in the chat is stored as the person's message, linked to
   const i = entries.findIndex((e) => e.t === "said" && e.body === "weight low");
   assert.ok(i >= 0, "the bubble is in the chat");
   assert.equal(entries[i + 1]?.t, "reply", "the command's reply follows it");
+});
+
+test("a command list is stored only on items its sender may write to: never for a viewer, and not on another owner's repo or an unknown item", async () => {
+  const db = await seed();
+  const k = db.k as any;
+  await db.run(k.insertInto("tracked_repos").values({ name: "photocraft", workflow: "new" }).onConflict((oc: any) => oc.column("name").doUpdateSet({ workflow: "new" })));
+  const send = (role: "maintainer" | "viewer", text: string): Req => ({
+    ...req("viewer"), method: "POST", params: {}, json: { text },
+    user: { login: role === "maintainer" ? "mia" : "guest", role, canWrite: async () => role === "maintainer", canRead: async () => true },
+  });
+  const said = async (body: string) => await db.all(k.selectFrom("chat_messages as m").innerJoin("chat_conversations as c", "c.id", "m.conversation_id")
+    .select(["c.repo", "c.number", "m.payload"]).where("m.body", "=", body)) as { repo: string; number: number; payload: string | null }[];
+
+  await listCommand(db, send("viewer", "hold: photocraft#7"));
+  assert.deepEqual(await said("hold: photocraft#7"), [], "a viewer's words are stored nowhere");
+
+  const text = "hold: otherorg/photocraft#7, photocraft#7, photocraft#99";
+  const res = await listCommand(db, send("maintainer", text));
+  const rows = await said(text);
+  assert.deepEqual(rows.map((r) => `${r.repo}#${r.number}`), ["photocraft#7"], "only the tracked item the maintainer may write to");
+  assert.equal((await db.all(k.selectFrom("chat_conversations").select("id").where("number", "=", 99))).length, 0, "no conversation for an item AutoCraft never read");
+  const mine = res.items.find((o) => o.repo === "photocraft" && o.number === 7);
+  assert.ok(mine && mine.outcome !== "run");
+  assert.equal((JSON.parse(rows[0]!.payload ?? "{}") as { refusal?: string }).refusal, mine.line, "a refused command keeps its reply on the message");
 });
 
 test("a maintainer's message waiting for Opus can be withdrawn from the chat, and then says who withdrew it", async () => {

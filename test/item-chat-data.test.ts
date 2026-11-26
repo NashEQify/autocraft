@@ -33,8 +33,13 @@ test("the backfill turns earlier commands, messages and an open recommendation i
     { workflow_id: wf!, repo: "app", number: 1, login: "mira", via: "discord", kind: "started", parsed: command, line: "ok", at: AT },
     { workflow_id: wf!, repo: "app", number: 1, login: "mira", via: "discord", kind: "approved", parsed: command, line: "ok", at: AT },
   ]));
-  await q(d).run(q(d).k.insertInto("main.github_commands").values({ comment_id: 55, repo: "app", number: 1, pr: 1, command: "answer", login: "olu", github_id: 9, created_at: AT, requested_at: AT, state: "done", parsed: command }));
-  await q(d).run(q(d).k.insertInto("main.comments").values({ repo: "app", number: 1, id: "C1", kind: "comment", author: "olu", created_at: AT, body: "@app merge please" }));
+  // As intake and the mirror write them: the command keeps the database id and a parsed time, the mirror the node id and GitHub's time.
+  await q(d).run(q(d).k.insertInto("main.github_commands").values({ comment_id: 55, repo: "app", number: 1, pr: 1, command: "answer", login: "olu", github_id: 9, created_at: new Date(AT).toISOString(), requested_at: AT, state: "done", parsed: command }));
+  const node = (id: number): string => `IC_${Buffer.from([0x93, 0x00, 0xce, 0x12, 0x34, 0x56, 0x78, id]).toString("base64url")}`;
+  await q(d).run(q(d).k.insertInto("main.comments").values([
+    { repo: "app", number: 1, id: node(54), kind: "comment", author: "olu", created_at: AT, body: "@app hold" },
+    { repo: "app", number: 1, id: node(55), kind: "comment", author: "olu", created_at: AT, body: "@app merge please" },
+  ]));
   await q(d).run(q(d).k.insertInto("main.conversation_turns").values({ repo: "app", number: 1, kind: "maintainer", login: "olu", at: AT, body: "Why the hold?", block: "b", status: "answered", seq: 1 }));
 
   await chatBackfill(d);

@@ -26,7 +26,6 @@ import { elect, LOST_LEADER_EXIT } from "../db/leader.ts";
 import { assertFence, FencedError, isFenced, setFence } from "../db/fence.ts";
 import { dropRetired } from "../db/retired.ts";
 import { holdsToItems } from "../db/holds-to-items.ts";
-import { chatBackfill } from "../db/chat-backfill.ts";
 import { switchOver } from "../db/switch-over.ts";
 import { inClusterApi } from "../build/kube-api.ts";
 import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
@@ -112,7 +111,6 @@ async function serve(): Promise<void> {
   if (held) console.log(`runner: ${held} merge holds of an earlier release became held items`);
   const linked = await linkRepeatedFindings(db);
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
-  await chatBackfill(db);
   const fixes = await autoFixConfirmed(db);
   if (fixes) console.log(`runner: started the private fix of ${fixes} confirmed security findings`);
   stalls.step("the worker API start");

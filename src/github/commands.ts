@@ -73,7 +73,7 @@ export async function queueCommand(db: Db, repo: string, event: string, payload:
   const parsed = parseComment(comment.body, await commentNames(db, slug), { repo });
   if (!parsed) return false;
   const url = typeof comment.html_url === "string" && comment.html_url.startsWith("https://") ? comment.html_url : undefined;
-  await recordSaid(db, { login, via: "github", text: typeof comment.body === "string" ? comment.body.slice(0, 65_536) : "", items: [{ repo, number }], githubCommentId: commentId, ...(url ? { payload: { url } } : {}) });
+  await recordSaid(db, { login, via: "github", text: typeof comment.body === "string" ? comment.body.slice(0, 65_536) : "", items: [{ repo, number }], by: null, githubCommentId: commentId, ...(url ? { payload: { url } } : {}) });
   return await queueCommands(db, [{
     comment_id: commentId, repo, number, pr: issue.pull_request ? 1 : 0, login, github_id: githubId,
     created_at: new Date(created).toISOString(), requested_at: now.toISOString(), parsed: JSON.stringify(parsed),

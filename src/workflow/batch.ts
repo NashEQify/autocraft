@@ -24,7 +24,7 @@ const isHeld = (o: ItemOutcome): boolean => o.outcome === "run" || o.refusal ===
 /** Sends the word to one item; a refusal is thrown, but for the ones `passes` takes. */
 async function sendTo(db: Db, actor: Actor, via: Surface, word: "hold" | "resume", repo: string, number: number, run: Exec | undefined, passes: (o: ItemOutcome) => boolean): Promise<ItemOutcome> {
   const r = await (via === "cli" && actor.login
-    ? saying(db, { login: actor.login, via: "cli", text: word, items: [{ repo, number }] }, () => runCommand(db, actor, via, { parsed: command(word), items: [{ repo, number }], ...(run ? { exec: run } : {}) }))
+    ? saying(db, { login: actor.login, via: "cli", text: word, items: [{ repo, number }], by: null }, () => runCommand(db, actor, via, { parsed: command(word), items: [{ repo, number }], ...(run ? { exec: run } : {}) }))
     : runCommand(db, actor, via, { parsed: command(word), items: [{ repo, number }], ...(run ? { exec: run } : {}) }));
   const o = r.items[0];
   if (!o || !passes(o)) throw new ControlError(r.lines.join(" "));

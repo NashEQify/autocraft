@@ -6,6 +6,7 @@
 // second run adds nothing. Paged by source id. Runs on SQLite in connect()'s backfill (src/db.ts) and on Postgres as a step of migratePg
 // (src/db/pg-triggers.ts); a database at the current stamp is not migrated. `chatBackfill` runs it on an open database of either engine.
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import { commentDatabaseId } from "../data/conversations/statements.ts";
 import { CHAT_AUTHOR, conversationTitle, parsedText, recommendedMessage } from "../workflow/chat.ts";
 import { ASKING_STATES, RULE_STARTER, type Parsed, type PlanPart, type Recommendation } from "../workflow/types.ts";
 import { ENTRY_LABEL } from "../workflow/vocab.ts";
@@ -93,23 +94,37 @@ function* steps(m: string): Steps {
   yield* paged(m, `SELECT x.id AS cursor, x.login, x.at, x.body, c.id AS conv FROM ${m}conversation_turns x ${MAIN(m)}
       WHERE x.kind IN ('operator', 'maintainer') AND NOT EXISTS (SELECT 1 FROM ${m}chat_messages h WHERE h.turn_id = x.id) AND x.id > ? ORDER BY x.id LIMIT ${PAGE}`,
     (rows) => rows.map((r) => said(r.conv, r.login, "dashboard", String(r.body), r.at, { turn_id: Number(r.cursor) })));
-  // A GitHub command's text is its comment, matched by author and time (the command row keeps GitHub's numeric id, the mirror the node id).
-  // Its confirmation is the first event of the commenter on the item between the delivery and its handling.
-  yield* paged(m, `SELECT x.comment_id AS cursor, x.login, x.created_at, x.command, x.parsed, x.ref_repo, x.ref_number, c.id AS conv,
-        (SELECT k.body FROM ${m}comments k WHERE k.repo = x.repo AND k.number = x.number AND k.author = x.login AND k.created_at = x.created_at LIMIT 1) AS body,
-        (SELECT MIN(e.id) FROM ${m}workflow_events e WHERE x.state = 'done' AND x.done_at IS NOT NULL AND e.repo = x.repo AND e.number = x.number AND e.login = x.login
-          AND e.via = 'github' AND e.at >= x.requested_at AND e.at <= x.done_at AND e.kind IN ${list(PERSON_KINDS)}) AS event
-      FROM ${m}github_commands x ${MAIN(m)}
-      WHERE NOT EXISTS (SELECT 1 FROM ${m}chat_messages h WHERE h.github_comment_id = x.comment_id) AND x.comment_id > ? ORDER BY x.comment_id LIMIT ${PAGE}`,
-    (rows) => rows.map((r) => {
+  // A GitHub command's text is its comment: the command row keeps GitHub's database id, the mirror the comment's node id, which holds
+  // that id (commentDatabaseId). Its confirmation is the first event of the commenter on the item between the delivery and its handling.
+  for (let after = -1; ;) {
+    const rows = yield {
+      sql: `SELECT x.comment_id AS cursor, x.login, x.created_at, x.command, x.parsed, x.ref_repo, x.ref_number, c.id AS conv,
+          (SELECT MIN(e.id) FROM ${m}workflow_events e WHERE x.state = 'done' AND x.done_at IS NOT NULL AND e.repo = x.repo AND e.number = x.number AND e.login = x.login
+            AND e.via = 'github' AND e.at >= x.requested_at AND e.at <= x.done_at AND e.kind IN ${list(PERSON_KINDS)}) AS event
+        FROM ${m}github_commands x ${MAIN(m)}
+        WHERE NOT EXISTS (SELECT 1 FROM ${m}chat_messages h WHERE h.github_comment_id = x.comment_id) AND x.comment_id > ? ORDER BY x.comment_id LIMIT ${PAGE}`,
+      args: [after],
+    };
+    if (!rows.length) break;
+    const ids = rows.map((r) => Number(r.cursor));
+    const comments = yield {
+      sql: `SELECT k.id, k.body FROM ${m}comments k JOIN ${m}github_commands x ON k.repo = x.repo AND k.number = x.number
+        WHERE x.comment_id IN (${ids.map(() => "?").join(", ")})`,
+      args: ids,
+    };
+    const bodies = new Map(comments.flatMap((k) => { const id = commentDatabaseId(String(k.id)); return id !== null && k.body !== null ? [[id, String(k.body)] as const] : []; }));
+    yield insert(m, rows.map((r) => {
       const words = r.command === "merge-queue" ? "merge"
         : r.command === "autorepin" ? (r.ref_number === null ? "autorepin off" : `autorepin ${str(r.ref_repo)}#${Number(r.ref_number)}`)
         : parsedText(json<Parsed | null>(r.parsed, null), String(r.command));
-      const body = str(r.body);
+      const body = bodies.get(String(r.cursor)) ?? null;
       return said(r.conv, r.login, "github", body ?? words, r.created_at, {
         github_comment_id: Number(r.cursor), workflow_event_id: r.event === null ? null : Number(r.event), ...(body === null ? { payload: JSON.stringify({ reconstructed: true }) } : {}),
       });
     }));
+    after = Math.max(...ids);
+    if (rows.length < PAGE) break;
+  }
   // One command can write several events at one moment: the first stands for it.
   yield* paged(m, `SELECT x.id AS cursor, x.login, x.via, x.kind, x.parsed, x.at, c.id AS conv FROM ${m}workflow_events x ${MAIN(m)}
       WHERE x.via IN ${list(SURFACES)} AND x.kind IN ${list(PERSON_KINDS)} AND x.login <> ${lit(RULE_STARTER)}
