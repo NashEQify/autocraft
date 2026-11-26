@@ -102,8 +102,8 @@ export type RecommendInput = {
   mergeApproved: boolean;
   /** Our pushes to the PR are approved and its branch accepts them. */
   canPush: boolean;
-  /** On a PR approved for merge whose review found what does not block it: how many fixes still block it, and how many points are filed as follow-ups. */
-  followUps?: { blocking: number; later: number } | null;
+  /** On a PR approved for merge whose review found what does not block it: how many fixes still block it, how many points are follow-ups, and whether they will be filed. */
+  followUps?: { blocking: number; later: number; filed: boolean } | null;
 };
 
 const WAIT = "Recommendation: wait for maintainer feedback.";
@@ -111,11 +111,10 @@ const WAIT = "Recommendation: wait for maintainer feedback.";
 /** The closing line of the review. Plain wording only: no rule details, tiers or account names. */
 export function recommendation(r: RecommendInput): string {
   const fu = r.followUps?.later ? r.followUps : null;
-  if (fu && !fu.blocking) return "Recommendation: merge after CI and checks pass; the follow-ups above will be filed as an issue.";
   if (fu) {
-    return r.canPush
-      ? "Recommendation: merge after the fixes above, which may be pushed to this branch; the follow-ups will be filed as an issue."
-      : "Recommendation: merge after the fixes above; the follow-ups will be filed as an issue.";
+    const filed = fu.filed ? (fu.blocking ? "; the follow-ups will be filed as an issue" : "; the follow-ups above will be filed as an issue") : "";
+    if (!fu.blocking) return `Recommendation: merge after CI and checks pass${filed}.`;
+    return r.canPush ? `Recommendation: merge after the fixes above, which may be pushed to this branch${filed}.` : `Recommendation: merge after the fixes above${filed}.`;
   }
   switch (r.verdict) {
     case "take":
@@ -152,9 +151,9 @@ export type ReviewPostInput = {
   recommendation: string;
   /**
    * On a PR approved for merge whose review found what does not block it: the titles of the fixes made before the merge, and of the
-   * points filed as a follow-up issue instead. With no fix left the verdict line says that nothing blocks the approved merge.
+   * points filed as a follow-up issue instead (`notFiled`: why they will not be). With no fix left the verdict line says that nothing blocks the approved merge.
    */
-  followUps?: { fixes: string[]; later: string[] } | null;
+  followUps?: { fixes: string[]; later: string[]; notFiled?: string | null } | null;
 };
 
 export function reviewBody(r: ReviewPostInput): string {
@@ -181,7 +180,7 @@ export function reviewBody(r: ReviewPostInput): string {
     const lines = xs.slice(0, MAX_POINTS).flatMap((x) => { const line = clean(x, PART_LINE_MAX); return line ? [`- ${line}`] : []; });
     return lines.length ? `${title}\n${lines.join("\n")}\n\n` : "";
   };
-  const fuBlock = fu ? list("Fixes before the merge:", fu.fixes) + list("Follow-ups, to be filed as an issue:", fu.later) : "";
+  const fuBlock = fu ? list("Fixes before the merge:", fu.fixes) + list(fu.notFiled ? `Follow-ups (not filed: ${clean(fu.notFiled, PART_LINE_MAX).replace(/[.:]+$/, "")}):` : "Follow-ups, to be filed as an issue:", fu.later) : "";
   const fixed = NOTE_RESERVE + head.length + rec.length + foot.length + summary.length + claimBlock.length + fuBlock.length + 8;
   const kept: string[] = [];
   let used = fixed;

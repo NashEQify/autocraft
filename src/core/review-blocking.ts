@@ -13,12 +13,28 @@ export const fixesToMake = <F extends Fix>(fixes: readonly F[], dropped: readonl
 /** The fixes of a PR approved for merge that do not block it and no person dropped: filed as follow-ups, not made. */
 export const followUpFixes = <F extends Fix>(fixes: readonly F[], dropped: readonly string[] | undefined): F[] => keptFixes(fixes, dropped).filter(notBlocking);
 
-/** A hold on a PR approved for merge whose reason does not block: the PR goes on as on a take, and the reason is filed as a follow-up. */
-export const holdGoesOn = (verdict: string, hold: Blocking | null | undefined, approved: boolean): boolean => approved && verdict === "hold" && !!hold && hold.class === null;
+/**
+ * A hold on a PR approved for merge whose reason does not block: the PR goes on as on a take, and the reason is filed as a follow-up.
+ * A hold that waits for other items (`blockedBy`) always stops it, so it never merges ahead of what it depends on.
+ */
+export const holdGoesOn = (verdict: string, hold: Blocking | null | undefined, approved: boolean, blockedBy: readonly string[] = []): boolean =>
+  approved && verdict === "hold" && !!hold && hold.class === null && !blockedBy.length;
 
 /** The verdict the pipeline acts on: a take-fix with no fix left to make, or a hold that goes on, is a take. */
-export const verdictToAct = <V extends string>(verdict: V, fixes: readonly Fix[], dropped: readonly string[] | undefined, approved: boolean, hold?: Blocking | null): V | "take" =>
-  holdGoesOn(verdict, hold, approved) || (verdict === "take-fix" && fixes.length > 0 && fixesToMake(fixes, dropped, approved).length === 0) ? "take" : verdict;
+export const verdictToAct = <V extends string>(verdict: V, fixes: readonly Fix[], dropped: readonly string[] | undefined, approved: boolean, hold?: Blocking | null, blockedBy: readonly string[] = []): V | "take" =>
+  holdGoesOn(verdict, hold, approved, blockedBy) || (verdict === "take-fix" && fixes.length > 0 && fixesToMake(fixes, dropped, approved).length === 0) ? "take" : verdict;
+
+/** A review as the follow-up rules read it: its verdict, fixes, hold class and the items a hold waits for. */
+export type ReviewForFollowUps<F extends Fix> = { verdict: string; fixes: readonly F[]; hold?: Blocking | null; blockedBy?: readonly string[] };
+
+/**
+ * What the review of a PR approved for merge files as follow-ups: its fixes that do not block it and nobody dropped, and the reason of
+ * a hold that goes on (null when the hold gave none: there is nothing to file).
+ */
+export const reviewFollowUps = <F extends Fix>(r: ReviewForFollowUps<F>, dropped: readonly string[] | undefined): { fixes: F[]; hold: string | null } => ({
+  fixes: r.verdict === "take-fix" ? followUpFixes(r.fixes, dropped) : [],
+  hold: holdGoesOn(r.verdict, r.hold, true, r.blockedBy) && r.hold!.why.trim() ? r.hold!.why : null,
+});
 
 /**
  * The planned parts of a review's plan (src/workflow/recommend.ts planOf numbers them from 1 in the order of `fixes`) that the pipeline

@@ -2051,20 +2051,32 @@ CREATE TABLE IF NOT EXISTS premerge_reviews (
   PRIMARY KEY (repo, number, head_oid)
 );
 
--- The follow-up issue of a PR a maintainer approved for merge (src/premerge/followups.ts): one row per PR head and source whose
--- review found something that does not stop the merge. source: review (the Opus review's fixes and hold that do not block) or
--- premerge (the pre-merge review's defects that do not block). The first row's write opens the PR's one issue (issue_number, url);
--- a later row comments on it. state: filing (written before the write), filed, or failed (note: why GitHub refused it).
+-- The follow-up issue of a PR a maintainer approved for merge (src/premerge/followups.ts): one row per PR head whose pre-merge
+-- review found defects that do not stop the merge. The first row's write opens the PR's one issue (issue_number, url); a later
+-- head's row comments on it. state: filing (written before the write), filed, or failed (note: why GitHub refused it).
 CREATE TABLE IF NOT EXISTS premerge_followups (
   repo TEXT NOT NULL, number INTEGER NOT NULL,
-  source TEXT NOT NULL,
   head_oid TEXT NOT NULL,
   issue_number INTEGER,
   url TEXT,
   state TEXT NOT NULL,
   at TEXT NOT NULL,
   note TEXT,
-  PRIMARY KEY (repo, number, source, head_oid)
+  PRIMARY KEY (repo, number, head_oid)
+);
+
+-- The review side of the same follow-up issue (src/premerge/followups.ts): one row per reviewed head of a PR approved for merge
+-- whose Opus review had fixes, or a hold, that do not block the merge (src/core/review-blocking.ts). The issue is the one of
+-- premerge_followups or this table, whichever opened it; a later row comments on it. state as in premerge_followups.
+CREATE TABLE IF NOT EXISTS review_followups (
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  head_oid TEXT NOT NULL,
+  issue_number INTEGER,
+  url TEXT,
+  state TEXT NOT NULL,
+  at TEXT NOT NULL,
+  note TEXT,
+  PRIMARY KEY (repo, number, head_oid)
 );
 
 -- What the merge rule reads from a PR's cached diff at one head (src/review/diff.ts), written by the code that writes or

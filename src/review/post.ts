@@ -11,7 +11,8 @@ import { auditIdentity, githubIdentity } from "../github/identity.ts";
 import { ownerOf } from "../owners.ts";
 import { planned, runnable } from "../core/select.ts";
 import { isQueueState, type PrFacts } from "../core/plan.ts";
-import { fixesToMake, followUpFixes, holdGoesOn } from "../core/review-blocking.ts";
+import { fixesToMake, reviewFollowUps } from "../core/review-blocking.ts";
+import { mayRun } from "../core/authority.ts";
 import { partTitle } from "../workflow/work.ts";
 import { CLI_BY, mergeAllowed, pushAllowed, type By } from "../core/gates.ts";
 import { Client, GithubError, type Querier } from "../mirror.ts";
@@ -73,7 +74,7 @@ async function postsDue(db: Db, repo: string, by: By): Promise<{ due: PostCandid
         verdict: o.sourceVerdict, sure: o.sure, summary: pub.summary, points: pub.points, claims: o.claims, head: o.reviewedAt, owner: ownerOf(repo), fixedIn: o.fixedIn, followUps: fu,
         recommendation: recommendation({
           verdict: o.verdict, queue: o.verdict === "take" && isQueueState(plan.state) ? { path: plan.path, state: plan.state } : null, mergeApproved: mergeAllowed(f), canPush: f.pushable && pushAllowed(f, "fixup"),
-          followUps: fu ? { blocking: fu.fixes.length, later: fu.later.length } : null,
+          followUps: fu ? { blocking: fu.fixes.length, later: fu.later.length, filed: !fu.notFiled } : null,
         }),
       }),
     });
@@ -85,10 +86,14 @@ async function postsDue(db: Db, repo: string, by: By): Promise<{ due: PostCandid
  * On a PR approved for merge, what the review's post lists apart: the fixes made before the merge, and the fixes and hold that do not
  * block it and are filed as a follow-up issue (src/core/review-blocking.ts). Null elsewhere, or when nothing is filed.
  */
-function postFollowUps(o: PostSource, f: PrFacts): { fixes: string[]; later: string[] } | null {
+function postFollowUps(o: PostSource, f: PrFacts): { fixes: string[]; later: string[]; notFiled: string | null } | null {
   if (!f.workflow?.approved) return null;
-  const later = [...followUpFixes(o.fixes, f.workflow.dropped).map(partTitle), ...(holdGoesOn(o.sourceVerdict, o.hold, true) ? [o.hold!.why || "The question the review raised"] : [])];
-  return later.length ? { fixes: fixesToMake(o.fixes, f.workflow.dropped, true).map(partTitle), later } : null;
+  const fu = reviewFollowUps({ verdict: o.sourceVerdict, fixes: o.fixes, hold: o.hold, blockedBy: o.blockedBy }, f.workflow.dropped);
+  const later = [...fu.fixes.map(partTitle), ...(fu.hold ? [fu.hold] : [])];
+  if (!later.length) return null;
+  // The same gate as the filing itself (src/core/decide.ts reviewFollowUpsDue): a refused one says why.
+  const may = mayRun({ facts: f, action: { kind: "followups", head: f.head } }, "pipeline");
+  return { fixes: fixesToMake(o.fixes, f.workflow.dropped, true).map(partTitle), later, notFiled: may.ok ? null : may.why.text };
 }
 
 /** Whether an edit failed because the review no longer exists or the token may not edit it. */

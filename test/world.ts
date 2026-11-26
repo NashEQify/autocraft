@@ -12,7 +12,7 @@ const base = (): Omit<PrFacts, "may"> => ({
   author: "dev", authorIsPipeline: false, tier: "whitelisted", lines: 20, size: "S", label: "bugfix", needsDecisionFlag: false,
   inScope: true, integration: false, batchPr: false, heldBacklog: false, score: 100,
   repoFacts: { commentApproved: true, ciApproved: true, noCi: false, mainRed: false, implementOn: true },
-  review: { head: HEAD, at: REVIEW_AT, verdict: "take", unsure: false, reason: "ok", fixes: 0, followUps: 0, stale: false, staleActionable: false },
+  review: { head: HEAD, at: REVIEW_AT, verdict: "take", unsure: false, reason: "ok", fixes: 0, followUps: 0, leadsToHead: true, stale: false, staleActionable: false },
   post: { postable: true, posted: { head: HEAD, at: "2026-11-04T10:01:00.000Z", opusAt: REVIEW_AT } },
   checksHere: true, checksOpen: true, ci: "success", mergeable: "MERGEABLE", unknown: null, runs: null,
   lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false,

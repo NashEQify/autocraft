@@ -69,43 +69,90 @@ test("a later head of ours with the same follow-up posts nothing, and its merge 
   w.close();
 });
 
-/** A review-and-merge start whose review is an unsure take-fix with one major fix of the class given. */
-async function reviewedTakeFix(blocking: { class: "regression" | null; why: string }): Promise<World> {
-  const w = await unstarted(false);
-  await run(w, "review and merge");
-  await settle(w);
-  const fixes = [{ file: "src/lib.rs", change: "rename a to b", title: "Clearer name", major: true, blocking }];
-  await reviewed(w, 1, { verdict: "take-fix", sure: false, fixes });
+type Fix = { file: string; change: string; title: string; major?: boolean; blocking: { class: "regression" | null; why: string } };
+const NOT_BLOCKING_FIX: Fix = { file: "src/lib.rs", change: "rename a to b", title: "Clearer name", major: true, blocking: { class: null, why: "The old name works the same as on the base branch." } };
+const BLOCKING_FIX: Fix = { file: "src/io.rs", change: "check the bound", title: "Bound check", blocking: { class: "regression", why: "Empty lists that load on the base branch panic." } };
+
+/** A review-and-merge start whose review at `head` is the one given (newer than the start). */
+async function approvedReview(o: { head?: string; verdict: "take-fix" | "hold"; fixes?: Fix[]; hold?: string; blockedBy?: string[]; w?: World }): Promise<World> {
+  let w = o.w;
+  if (!w) {
+    w = await unstarted(false);
+    await run(w, "review and merge");
+    await settle(w);
+  }
+  const head = o.head ?? "sha1";
+  await reviewed(w, 1, { head, verdict: o.verdict, sure: false, fixes: o.fixes ?? [] });
+  const workflow = { outside_purpose: null, recommendation: null, ...(o.hold ? { hold: { class: null, why: o.hold } } : {}) };
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ workflow: JSON.stringify(workflow), blocked_by: JSON.stringify(o.blockedBy ?? []) }).where("head_oid", "=", head));
   await settle(w);
   return w;
 }
 
-test("on an approved PR, a review whose fixes all do not block runs no fix-up and stops nothing: the fixes are filed and the PR merges", async () => {
-  const w = await reviewedTakeFix({ class: null, why: "The old name works the same as on the base branch." });
-  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
-  const due = await kinds(w);
-  assert.ok(due.includes("followups") && !due.includes("fixup:review") && !due.includes("merge"), due.join(", "));
+/** Runs the follow-up step once; returns its summary and the bodies it posted. */
+async function file(w: World) {
   const bodies: string[] = [];
   const exec = async (_c: string, args: string[], o?: { input?: string }) => { bodies.push(o?.input ?? ""); return { code: 0, stdout: args[1] === "create" ? "https://github.com/storytold/app/issues/77\n" : "", stderr: "" }; };
   const s = await runPremergeFollowups(w.db, { repo: "app" }, () => {}, { exec, now: () => new Date(), lane: appLane(w.gh.querier) });
+  return { s, posted: bodies.join("\n") };
+}
+
+/** Our own push of the review's fix-up, from `from` to `to`. */
+async function ourPush(w: World, from: string, to: string): Promise<void> {
+  await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: from, to_head: to, state: "pushed", attempt: 1, created_at: new Date().toISOString(), source: "review" }));
+  await w.synced(1, to);
+  await settle(w);
+}
+
+test("on an approved PR, a review whose fixes all do not block runs no fix-up and stops nothing: the fixes are filed and the PR merges", async () => {
+  const w = await approvedReview({ verdict: "take-fix", fixes: [NOT_BLOCKING_FIX] });
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  const due = await kinds(w);
+  assert.ok(due.includes("followups") && !due.includes("fixup:review") && !due.includes("merge"), due.join(", "));
+  const { s, posted } = await file(w);
   assert.deepEqual(s.filed, ["app#1"]);
-  assert.match(bodies.join("\n"), /Clearer name/);
+  assert.match(posted, /Clearer name/);
   await settle(w);
   await mergesAsPerson(w);
   w.close();
 });
 
-test("on an approved PR, a blocking review fix runs the fix-up and files nothing", async () => {
-  const w = await reviewedTakeFix({ class: "regression", why: "Callers of the old name stop building." });
-  const due = await kinds(w);
-  assert.ok(due.includes("fixup:review") && !due.includes("followups"), due.join(", "));
+test("on an approved PR, a blocking fix runs the fix-up, and the fix beside it is filed once that push moved the head", async () => {
+  const w = await approvedReview({ verdict: "take-fix", fixes: [BLOCKING_FIX, NOT_BLOCKING_FIX] });
+  assert.ok((await kinds(w)).includes("fixup:review"), (await kinds(w)).join(", "));
+  // The fix-up pushes before the follow-up step runs; the new head is not reviewed yet.
+  await ourPush(w, "sha1", "sha2");
+  const plan = await w.prPlan(1);
+  assert.ok(plan.actions.some((a) => a.kind === "followups" && a.head === "sha2" && a.params?.reviewHead === "sha1"), JSON.stringify(plan.actions));
+  const { s, posted } = await file(w);
+  assert.deepEqual(s.filed, ["app#1"]);
+  assert.match(posted, /Clearer name/);
+  assert.doesNotMatch(posted, /Bound check/);
+  assert.equal((await kinds(w)).includes("followups"), false);
   w.close();
+});
+
+test("each hold that does not block an approved PR is filed with its own reason, and one that waits for another item stops it", async () => {
+  const w = await approvedReview({ verdict: "hold", hold: "Whether the menu should keep its old order is a design choice." });
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  assert.match((await file(w)).posted, /old order/);
+  await ourPush(w, "sha1", "sha2");
+  await approvedReview({ w, head: "sha2", verdict: "hold", hold: "The shortcut label is not translated yet." });
+  const second = await file(w);
+  assert.deepEqual(second.s.commented, ["app#1"]);
+  assert.match(second.posted, /shortcut label/);
+
+  const blocked = await approvedReview({ verdict: "hold", hold: "Stacked on another pull request.", blockedBy: ["app#2"] });
+  const due = await kinds(blocked);
+  assert.ok(!due.includes("followups") && !due.includes("merge"), due.join(", "));
+  w.close();
+  blocked.close();
 });
 
 test("the posted review of an approved PR tells the fixes made before the merge from the follow-ups, and with none to make says nothing blocks it", () => {
   const post = (fixes: string[]) => {
     const followUps = { fixes, later: ["Clearer name"] };
-    const rec = recommendation({ verdict: "take-fix", queue: null, mergeApproved: true, canPush: false, followUps: { blocking: fixes.length, later: 1 } });
+    const rec = recommendation({ verdict: "take-fix", queue: null, mergeApproved: true, canPush: false, followUps: { blocking: fixes.length, later: 1, filed: true } });
     return reviewBody({ verdict: "take-fix", sure: true, summary: "S.", points: ["P."], head: "abc1234", recommendation: rec, followUps });
   };
   const none = post([]), some = post(["Check the bound"]);

@@ -34,7 +34,7 @@ import { standingFor } from "./standing.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import type { WorkflowFact } from "../data/workflow/types.ts";
 import { settlerOf } from "../workflow/work.ts";
-import { fixesToMake, followUpFixes, holdGoesOn, verdictToAct } from "./review-blocking.ts";
+import { fixesToMake, reviewFollowUps, verdictToAct } from "./review-blocking.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { Db } from "../db/index.ts";
@@ -402,7 +402,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   // On a PR approved for merge only the review's blocking fixes are made and only a blocking hold stops it; the rest are filed as follow-ups.
   const approved = !!wfFact?.approved;
   const fixes = latest ? fixesToMake(latest.fixes, wfFact?.dropped, approved) : [];
-  const verdict = wentOn ? "take" : latest && verdictToAct(latest.verdict, latest.fixes, wfFact?.dropped, approved, latest.workflow?.hold);
+  const verdict = wentOn ? "take" : latest && verdictToAct(latest.verdict, latest.fixes, wfFact?.dropped, approved, latest.workflow?.hold, latest.blocked_by);
 
   const take = mx || verdict === "take" || verdict === "take-fix";
   const chain = take ? pushChainOf(patch.pushes, qh) : [qh];
@@ -410,7 +410,8 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     const unsure = take && (!latest!.sure || chain.some((h) => d.review.unsureHeads.has(`${ref}@${h}`)));
     base.review = {
       head: qh, at: qAt, verdict: verdict!, unsure, reason: latest!.reason ?? "", fixes: fixes.length,
-      followUps: approved ? (latest!.verdict === "take-fix" ? followUpFixes(latest!.fixes, wfFact?.dropped).length : 0) + (holdGoesOn(latest!.verdict, latest!.workflow?.hold, approved) ? 1 : 0) : 0,
+      followUps: approved ? (({ fixes: x, hold }) => x.length + (hold ? 1 : 0))(reviewFollowUps({ ...latest!, hold: latest!.workflow?.hold, blockedBy: latest!.blocked_by }, wfFact?.dropped)) : 0,
+      leadsToHead: !!head && (qh === head || pushChainOf(patch.pushes, head).includes(qh)),
       stale: c.stale.has(`${ref}@${qh}`), staleActionable: c.staleActionable.has(`${ref}@${qh}`),
     };
     // A stale review does not carry: it has not read the discussion as it is now.
@@ -478,10 +479,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   }
   if (state !== "OPEN") return base;
 
-  const filed = d.review.premergeFollowups.get(ref);
-  if (filed?.length) {
-    const headsOf = (source: string) => filed.filter((x) => x.source === source).map((x) => x.head_oid);
-    base.followUps = { heads: headsOf("premerge"), reviewHeads: headsOf("review"), issue: filed.findLast((x) => x.issue_number !== null)?.issue_number ?? null };
+  const pmFiled = d.review.premergeFollowups.get(ref) ?? [], rvFiled = d.review.reviewFollowups.get(ref) ?? [];
+  if (pmFiled.length || rvFiled.length) {
+    const issue = [...pmFiled, ...rvFiled].filter((x) => x.issue_number !== null).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).at(-1)?.issue_number ?? null;
+    base.followUps = { heads: pmFiled.map((x) => x.head_oid), reviewHeads: rvFiled.map((x) => x.head_oid), issue };
   }
   if (pmRow) {
     const all = findingsOf(pmRow), approved = !!wfFact?.approved;

@@ -599,7 +599,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.
     // On an approved PR a hold or part that does not block is filed as a follow-up and stops nothing.
     review: fresh ? {
-      verdict: holdGoesOn(fresh.verdict, fresh.workflow?.hold, approved) ? "take" : fresh.verdict, sure: fresh.sure,
+      verdict: holdGoesOn(fresh.verdict, fresh.workflow?.hold, approved, fresh.blocked_by) ? "take" : fresh.verdict, sure: fresh.sure,
       majors: leg === "fixup" ? [] : partsToMake(plan, fresh.fixes, approved).filter((p) => p.major).map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0,
     } : null,
     failures: failures(pass, ref, since, head, f),

@@ -293,7 +293,7 @@ type PassFacts = {
   actors: Map<number, string[]>;
   /** The reviewed heads of merge entries. */
   mergeEntryReviews: Map<string, HeadReview[]>;
-  reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string; fixes: ReviewFinding[]; hold: Blocking | null }>;
+  reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string; fixes: ReviewFinding[]; hold: Blocking | null; blockedBy: string[] }>;
   /** Who still counts on the repo, of the people the legs act for, keyed by permKey. */
   stands: Map<string, Standing>;
   /** The repo's optional checks. */
@@ -338,7 +338,7 @@ async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFa
   return {
     items, checks, merge, fixResults, pushes, mergeEntryReviews, workflows, actors: wfFacts.actors, stands, optional, stale,
     syncedAt: new Map(repos.map((r) => [r, repoRows.get(r)?.synced_at ?? null])),
-    reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes, hold: v.workflow?.hold ?? null }])),
+    reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes, hold: v.workflow?.hold ?? null, blockedBy: v.blocked_by }])),
   };
 }
 
@@ -382,7 +382,7 @@ async function onConflict(db: Db, p: Row, head: string, f: PrFacts | null): Prom
 function keptVerdict(p: Row, head: string, pf: PassFacts, approval = true): string | null {
   const r = pf.reviews.get(`${refOf(p.repo, p.number)}@${head}`);
   const w = p.workflow_id === null ? undefined : pf.workflows.get(p.workflow_id);
-  return r ? verdictToAct(r.verdict, r.fixes, w?.dropped, approval && (w ? w.approved : true), r.hold) : null;
+  return r ? verdictToAct(r.verdict, r.fixes, w?.dropped, approval && (w ? w.approved : true), r.hold, r.blockedBy) : null;
 }
 
 type ReviewRead = { kind: "none" | "stale" | "take" | "takefix"; unsure: boolean; at?: string; /** A take-fix or hold whose findings do not block the approved merge: they are filed as follow-ups. */ followUps?: true } | { kind: "bad"; stop: Stop; unsure: boolean; at: string };

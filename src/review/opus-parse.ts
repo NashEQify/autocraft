@@ -370,7 +370,8 @@ const squash = (s: string) => s.replace(/\s+/g, " ").trim();
  * The problems of a reply that the model can fix itself: a reference mention in a fix, a summary or why over its cap,
  * a why of more than one sentence, an unapplied fix a take ignores. Null when the reply is not a valid review (the whole call is asked again then).
  */
-export function lintOpusReply(text: string, ref: string, unapplied: readonly UnappliedFix[] = [], body = ""): LintProblem[] | null {
+/** `classed`: the prompt asked for blocking classes (the maintainer-workflow rule was sent), so a missing one is a problem. */
+export function lintOpusReply(text: string, ref: string, unapplied: readonly UnappliedFix[] = [], body = "", classed = false): LintProblem[] | null {
   const parsed = parseOpusReply(text, ref, true, new Set(), true);
   if (!parsed) return null;
   const r = replyObject(text) as Record<string, unknown>;
@@ -387,9 +388,9 @@ export function lintOpusReply(text: string, ref: string, unapplied: readonly Una
   const classes = `{"class": ${BLOCKING_CLASSES.map((c) => `"${c}"`).join(" | ")} | null, "why": "<one sentence>"}`;
   (Array.isArray(r.fixes) ? r.fixes : []).forEach((f: { file?: unknown; change?: unknown; blocking?: unknown }, i) => {
     for (const k of ["file", "change"] as const) if (typeof f?.[k] === "string" && REFERENCE_LEAK.test(f[k] as string)) out.push({ field: `fixes[${i}].${k}`, message: "mentions the reference folder or one of its pages; state the behaviour in your own words" });
-    if (parsed.verdict === "take-fix" && f && typeof f === "object" && !blockingOf(f.blocking)) out.push({ field: `fixes[${i}].blocking`, message: `is missing; give ${classes}` });
+    if (classed && parsed.verdict === "take-fix" && f && typeof f === "object" && !blockingOf(f.blocking)) out.push({ field: `fixes[${i}].blocking`, message: `is missing; give ${classes}` });
   });
-  if (parsed.verdict === "hold" && r.verdict === "hold" && !blockingOf(r.blocking)) out.push({ field: "blocking", message: `is missing for the hold; give ${classes}` });
+  if (classed && parsed.verdict === "hold" && r.verdict === "hold" && !blockingOf(r.blocking)) out.push({ field: "blocking", message: `is missing for the hold; give ${classes}` });
   if (typeof r.summary === "string" && wordCount(r.summary) > SUMMARY_MAX_WORDS) out.push({ field: "summary", message: `has ${wordCount(r.summary)} words; at most ${SUMMARY_MAX_WORDS}, in 2 or 3 sentences` });
   if (typeof r.why === "string" && squash(r.why)) {
     if (wordCount(r.why) > WHY_MAX_WORDS) out.push({ field: "why", message: `has ${wordCount(r.why)} words; at most ${WHY_MAX_WORDS}, in one sentence` });
@@ -408,15 +409,17 @@ export function publicTexts(text: string): { field: string; text: string }[] {
   const pc = parseClaims(r?.claims, new Set(), true);
   const claimTexts = (pc?.claims ?? []).flatMap((c, k) => { const i = pc!.indexes[k]!; return [{ field: `claims[${i}].claim`, text: c.claim }, ...(c.evidence ? [{ field: `claims[${i}].evidence`, text: c.evidence }] : [])]; });
   const claimFixes = (Array.isArray(r?.claims) ? r.claims : []).flatMap((c: { fix?: { change?: unknown } } | null, i) => (typeof c?.fix?.change === "string" && c.fix.change.trim() ? [{ field: `claims[${i}].fix.change`, text: c.fix.change }] : []));
-  const fixes = (Array.isArray(r?.fixes) ? r.fixes : []).slice(0, OPUS_MAX_FIXES).flatMap((f: { change?: unknown; title?: unknown; blocking?: { why?: unknown } } | null, i) => [
+  // A blocking reason as the parse keeps it (one line, cut), so a text the lint flags is the text the parse matches.
+  const whyOf = (b: unknown): string => blockingOf(b)?.why ?? "";
+  const fixes = (Array.isArray(r?.fixes) ? r.fixes : []).slice(0, OPUS_MAX_FIXES).flatMap((f: { change?: unknown; title?: unknown; blocking?: unknown } | null, i) => [
     ...(typeof f?.change === "string" && f.change.trim() ? [{ field: `fixes[${i}].change`, text: f.change }] : []),
     // A title is posted with the review of a PR approved for merge, and in its follow-up issue.
     ...(typeof f?.title === "string" && f.title.trim() ? [{ field: `fixes[${i}].title`, text: f.title }] : []),
     // A reason that does not block is filed in the follow-up issue.
-    ...(typeof f?.blocking?.why === "string" && f.blocking.why.trim() ? [{ field: `fixes[${i}].blocking.why`, text: f.blocking.why }] : []),
+    ...(whyOf(f?.blocking) ? [{ field: `fixes[${i}].blocking.why`, text: whyOf(f?.blocking) }] : []),
   ]);
-  const hw = (r as { blocking?: { why?: unknown } } | null)?.blocking?.why;
-  if (typeof hw === "string" && hw.trim()) fixes.push({ field: "blocking.why", text: hw });
+  const hw = whyOf((r as { blocking?: unknown } | null)?.blocking);
+  if (hw) fixes.push({ field: "blocking.why", text: hw });
   const p = r?.public;
   if (!p || typeof p !== "object") return [...claimTexts, ...claimFixes, ...fixes];
   return [

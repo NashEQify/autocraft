@@ -1902,7 +1902,6 @@ export interface Preapprovals {
 export interface PremergeFollowups {
   repo: string;
   number: number;
-  source: string;
   head_oid: string;
   issue_number: number | null;
   url: string | null;
@@ -2164,6 +2163,17 @@ export interface ReviewBlockers {
   repo: string;
   number: number;
   head_oid: string;
+}
+
+export interface ReviewFollowups {
+  repo: string;
+  number: number;
+  head_oid: string;
+  issue_number: number | null;
+  url: string | null;
+  state: string;
+  at: string;
+  note: string | null;
 }
 
 export interface ReviewGates {
@@ -2861,6 +2871,7 @@ export interface DB {
   reporter_tokens: ReporterTokens;
   repos: Repos;
   review_blockers: ReviewBlockers;
+  review_followups: ReviewFollowups;
   review_gates: ReviewGates;
   review_posts: ReviewPosts;
   review_state: ReviewState;
@@ -3079,6 +3090,7 @@ export interface DB {
   "main.reporter_tokens": ReporterTokens;
   "main.repos": Repos;
   "main.review_blockers": ReviewBlockers;
+  "main.review_followups": ReviewFollowups;
   "main.review_gates": ReviewGates;
   "main.review_posts": ReviewPosts;
   "main.review_state": ReviewState;
@@ -3280,7 +3292,7 @@ export const COLUMNS = {
   pr_files: ["repo", "number", "head", "path", "additions", "deletions", "change_type"],
   pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
-  premerge_followups: ["repo", "number", "source", "head_oid", "issue_number", "url", "state", "at", "note"],
+  premerge_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
@@ -3301,6 +3313,7 @@ export const COLUMNS = {
   reporter_tokens: ["reporter", "github_id", "login", "token_enc", "version", "updated_at", "status"],
   repos: ["name", "owner", "visibility", "default_branch", "open_prs", "open_issues", "synced_at", "high_water", "reconciled_at"],
   review_blockers: ["b_repo", "b_number", "repo", "number", "head_oid"],
+  review_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
   review_gates: ["repo", "number", "blocked", "by_login", "read_at", "failures"],
   review_posts: ["repo", "number", "review_id", "head_oid", "posted_at", "edited_at", "posted_as", "opus_at"],
   review_state: ["repo", "number", "stale_at", "rerun_day", "rerun_count", "fail_head", "fail_count", "fail_at"],

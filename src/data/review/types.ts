@@ -67,6 +67,8 @@ export type ReviewFacts = {
   premerge: Map<HeadRef, PremergeRow>;
   /** premerge_followups rows of each PR, oldest first. */
   premergeFollowups: Map<RefKey, PremergeFollowupRow[]>;
+  /** review_followups rows of each PR, oldest first. */
+  reviewFollowups: Map<RefKey, PremergeFollowupRow[]>;
   postmerge: Map<RefKey, { at: string; error: string | null }>;
   marks: Map<RefKey, ReviewMarks>;
   discussion: Map<RefKey, DiscussionStat>;

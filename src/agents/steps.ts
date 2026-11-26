@@ -188,7 +188,7 @@ export const REVIEW_OPUS: ClaudeStep<OpusPr, OpusValue, ReferenceCtx> = {
   provider: "claude", id: "review.opus",
   toPrompt: (x) => [x], size: () => 1,
   lint: { fields: ["summary", "why", "public texts", "claims", "fixes"], make: (x, c) => async (text, stage) => {
-    const own = lintOpusReply(text, x.ref, x.unapplied_fixes, x.body);
+    const own = lintOpusReply(text, x.ref, x.unapplied_fixes, x.body, x.workflow === true);
     if (own === null) return null;
     // The review's public text and fixes reach GitHub without a person reading them: they may not carry the owner statements it was shown.
     const texts = opusTexts(text), stated = statementProblems(texts, x.statements);
