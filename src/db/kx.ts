@@ -293,6 +293,14 @@ export function ciEq(d: D, a: Ex, b: Ex): RawBuilder<SqlBool> {
 }
 
 /**
+ * `ciEq` for a text column that has an index on `col COLLATE NOCASE` (on Postgres the index holds `lower(col)`): Postgres
+ * compares `lower(a) = lower(b)`, which that index serves, where ciEq's citext cast of the column keeps every index out of use.
+ */
+export function nocaseEq(d: D, a: Ex, b: Ex): RawBuilder<SqlBool> {
+  return pgOf(d) ? sql`lower(${x(a)}) = lower(${x(b)})` : sql`${x(a)} = ${x(b)} COLLATE NOCASE`;
+}
+
+/**
  * `e` sorted and grouped case-insensitively as SQLite's NOCASE does (ASCII letters folded to lower case, then by code
  * point), for `orderBy(...)` and `groupBy(...)`. On Postgres it is `lower(e)` by code point: citext would sort in the
  * database's collation. Compare with `ciEq` or `inList(..., "citext")`.

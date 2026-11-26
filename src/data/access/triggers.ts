@@ -17,6 +17,12 @@ registerTriggerSource("access",
   { table: "sessions", ops: ["INSERT","DELETE"] },
 );
 
+// Who is an operator decides whose words become owner statements (src/data/conversations/statements.ts).
+registerTriggerSource("statement-sources",
+  { table: "access", ops: ["INSERT", "DELETE"] },
+  { table: "access", ops: ["UPDATE"], when: "old.login IS NOT new.login OR old.role IS NOT new.role" },
+);
+
 // Planner input no other input topic reports (src/db/plan-inputs.ts). A permission's refresh while it is fresh, the app's keys and sessions are not.
 const permission = permissionMoved(PERM_READ_TTL);
 registerTriggerSource("plan-inputs",

@@ -14,6 +14,12 @@ registerTriggerSource("items",
   { table: "comments" },
 );
 
+// An operator's comment may become an owner statement (src/data/conversations/statements.ts).
+registerTriggerSource("statement-sources",
+  { table: "comments", ops: ["INSERT", "UPDATE"], when: "EXISTS (SELECT 1 FROM access sa WHERE sa.login = new.author AND sa.role = 'operator')",
+    pg: "EXISTS (SELECT 1 FROM access sa WHERE sa.login = new.author::citext AND sa.role = 'operator')" },
+);
+
 registerTriggerSource("checks",
   { table: "pr_checks" },
 );

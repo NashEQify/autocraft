@@ -6,8 +6,10 @@ import {
   addHeld, addTurns, collectStatements, failCards, loadCards, loadHeld, loadQueue, loadStatementPools, loadStatements, loadStatementViews, loadStatementWork, markCard, markHeld, saveConversations, setStatementVectors,
   sweepRunningCards,
 } from "../../src/data/conversations/index.ts";
+import { statementSources } from "../../src/data/conversations/statements.ts";
+import { statementsDue } from "../../src/memory/statements.ts";
 import { expectFlat } from "../helpers/query-count.ts";
-import { AT, both, conv, dialects, flat, person } from "./conversations-helpers.ts";
+import { AT, both, conv, dialects, flat, openApp, person } from "./conversations-helpers.ts";
 
 const card = (n: number, o: { repo?: string; state?: string; queued_at?: string | null; acted_at?: string | null } = {}) => ({
   turn_id: 1, repo: o.repo ?? "o/a", number: n, kind: "comment", params: "{}", text: null, description: `card ${n}`, state: o.state ?? "queued", queued_at: o.queued_at === undefined ? AT : o.queued_at, acted_at: o.acted_at ?? null,
@@ -97,5 +99,40 @@ for (const dialect of dialects()) {
       await q.run(q.k.insertInto("main.owner_statements").values(Array.from({ length: n }, (_, i) => ({ source_kind: "conversation", source_id: String(i), repo: `o/r${i}`, number: i + 1, author: "op", text: "text", at: AT, embedding: new Uint8Array([1]), model: "m" }))));
       return async () => { await loadStatementPools(db, Array.from({ length: n }, (_, i) => `o/r${i}`), ["m"]); await loadStatements(db, Array.from({ length: n }, (_, i) => i + 1)); await loadStatementViews(db, Array.from({ length: n }, (_, i) => i + 1)); };
     }), 2, 40);
+  });
+}
+
+both("statementsDue collects what operators wrote since it last looked, also after a role change, in any letter case", async ({ db }) => {
+  const q = queryDb(db);
+  const comment = (id: string, author: string) => q.run(q.k.insertInto("main.comments").values({ repo: "o/a", number: 1, id, kind: "comment", author, created_at: AT, body: "we never vendor dictionaries in an app" }));
+  const collected = async () => (await q.all(q.k.selectFrom("main.owner_statements").select("source_id").orderBy("source_id"))).map((r) => r.source_id);
+  await q.run(q.k.insertInto("main.access").values({ login: "Op", role: "operator" }));
+  assert.equal(await statementsDue(db, "m1"), false);
+  await comment("c1", "op");
+  await comment("c2", "Guest");
+  assert.equal(await statementsDue(db, "m1"), true);
+  assert.deepEqual(await collected(), ["c1"]);
+  await q.run(q.k.insertInto("main.access").values({ login: "guest", role: "operator" }));
+  await statementsDue(db, "m1");
+  assert.deepEqual(await collected(), ["c1", "c2"], "a new operator's earlier comments are collected");
+});
+
+if (dialects().includes("postgres")) {
+  test("the owner-statement candidates reach comments through an author lookup, not a walk of every comment (postgres)", async () => {
+    const { t, db } = await openApp("postgres");
+    try {
+      const q = queryDb(db);
+      const c = statementSources(db).compile();
+      // Tables this small are scanned whatever the indexes: with scans disabled, the planner reaches comments through an author lookup
+      // when an index serves the join, and otherwise walks them all (a disabled scan, or a full walk of another index).
+      const plan = await db.write(async () => {
+        await q.script("SET LOCAL enable_seqscan = off");
+        return (await q.all<Record<string, string>>({ compile: () => ({ ...c, sql: `EXPLAIN ${c.sql}` }) })).map((r) => Object.values(r)[0]!);
+      });
+      const reads = plan.flatMap((line, i) => (/ on comments c\b/.test(line) ? [plan[i + 1] ?? ""] : []));
+      assert.ok(reads.length > 0 && reads.every((cond) => /Cond: .*\bauthor\b/.test(cond)), plan.join("\n"));
+    } finally {
+      await t.close();
+    }
   });
 }

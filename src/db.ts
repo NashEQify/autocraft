@@ -385,6 +385,9 @@ const BASE_INDEXES = [
   "CREATE TRIGGER IF NOT EXISTS main.decisions_answered_role AFTER UPDATE OF answered_by ON decisions BEGIN UPDATE decisions SET answered_role = (SELECT role FROM access WHERE login = NEW.answered_by) WHERE id = NEW.id; END",
   "CREATE INDEX IF NOT EXISTS main.comments_mention ON comments(created_at) WHERE mentions_pipeline = 1",
   "CREATE INDEX IF NOT EXISTS main.comments_author_item ON comments(author, repo, number)",
+  // Operators' comments and conversation turns by login without letter case: the owner-statement candidates (src/data/conversations/statements.ts).
+  "CREATE INDEX IF NOT EXISTS main.comments_author_nocase ON comments(author COLLATE NOCASE)",
+  "CREATE INDEX IF NOT EXISTS main.conversation_turns_operator ON conversation_turns(login COLLATE NOCASE) WHERE kind = 'operator'",
   "CREATE INDEX IF NOT EXISTS main.dupe_carries_item ON dupe_carries(repo, number)",
   "CREATE INDEX IF NOT EXISTS main.classifications_alone ON classifications(at) WHERE classifier = 'haiku' AND input_hash IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS main.jobs_step_repo ON jobs(step, repo, id)",

@@ -443,10 +443,13 @@ export function pgListener(pg: typeof Pg.default, url: string): Listener {
   let closed = false, failures = 0, warned = false;
   let retry: NodeJS.Timeout | undefined;
 
-  // The connection keeps the process alive only while something listens, so a process can end once its waits are over.
+  /** Subscriptions that are not `background`. */
+  let waits = 0;
+  // The connection keeps the process alive only while something waits for a notification, so a process can end once its
+  // waits are over; a background subscription (a cache) never holds it.
   const hold = (): void => {
     const c = client as (Pg.Client & { ref?: () => void; unref?: () => void }) | null;
-    if (fns.size) c?.ref?.();
+    if (waits) c?.ref?.();
     else c?.unref?.();
   };
   const dispatch = (channel: string, payload: string | null): void => {
@@ -516,24 +519,27 @@ export function pgListener(pg: typeof Pg.default, url: string): Listener {
   };
 
   return {
-    listen(channel, fn) {
+    listen(channel, fn, o) {
       if (!CHANNEL.test(channel)) throw new Error(`db: bad channel name ${channel}`);
       if (closed) throw new Error("db: the handle is closed");
       let set = fns.get(channel);
       if (!set) fns.set(channel, set = new Set());
       set.add(fn);
+      const waiting = !o?.background;
+      if (waiting) waits++;
       hold();
       if (client) void sync(client);
       else void connect();
       return {
         listening: () => client !== null && active.has(channel),
         off: () => {
-          set.delete(fn);
+          if (!set.delete(fn)) return;
+          if (waiting) waits--;
+          hold();
           if (set.size || fns.get(channel) !== set) return;
           fns.delete(channel);
           active.delete(channel);
           if (client) void client.query(`UNLISTEN ${channel}`).catch(() => undefined);
-          hold();
         },
       };
     },
