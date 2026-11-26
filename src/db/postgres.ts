@@ -11,6 +11,7 @@ import type { DB, DbRole, Row } from "./index.ts";
 import { bindParams, parseParams, rewriteForPostgres, rewriteScriptForPostgres, type ParsedParams } from "./params.ts";
 import { plainSchema, SCOPED_SCHEMA } from "./scoped.ts";
 import { fenceSql } from "./fence.ts";
+import { COLUMNS } from "./types.ts";
 
 /**
  * Connections per process role: the database allows 100 direct connections, shared by every process of the instance, and each
@@ -405,10 +406,12 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     },
     script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(rewriteScriptForPostgres(text, opts.scope))))),
     // Each read becomes `(select coalesce(json_agg(agg), '[]') from (<read>) as agg) AS qN`, as Kysely's jsonArrayFrom
-    // helper writes it; the compiler puts the parentheses around a SELECT inside raw SQL.
+    // helper writes it; the compiler puts the parentheses around a SELECT inside raw SQL. CTEs the reads share head the statement.
     fuse: (kysely, nodes) => {
-      const parts = nodes.map((n, i) => k.sql`(select coalesce(json_agg(agg), '[]') from ${{ toOperationNode: () => n }} as agg) as ${k.sql.ref(`q${i}`)}`);
-      return k.sql<Row>`select ${k.sql.join(parts)}`.compile(kysely);
+      const { shared, reads } = hoistShared(nodes);
+      const parts = reads.map((n, i) => k.sql`(select coalesce(json_agg(agg), '[]') from ${{ toOperationNode: () => n }} as agg) as ${k.sql.ref(`q${i}`)}`);
+      const head = shared ? k.sql`${{ toOperationNode: () => shared }} ` : k.sql``;
+      return k.sql<Row>`${head}select ${k.sql.join(parts)}`.compile(kysely);
     },
     configure: (b, mode) => (mode === "read" ? b.setIsolationLevel("repeatable read").setAccessMode("read only") : b.setIsolationLevel("read committed")),
     // A pool of its own: the search path is a startup parameter of each connection, never a session SET.
@@ -420,6 +423,39 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     close: () => kysely.destroy(),
   };
   return engine;
+}
+
+/**
+ * The CTEs that two or more reads of a wave declare alike (same name, query and parameters), moved to one WITH at the head of the fused
+ * statement, so Postgres plans and runs each once; `reads` are the reads without them. A read gives up only a leading run of its CTEs: a
+ * later CTE may refer to an earlier one, and one left in place shadows a hoisted CTE of its name. Two different CTEs of one name are
+ * never both hoisted, nor one named as a table, which would shadow the table in every read.
+ */
+export function hoistShared(nodes: readonly K.OperationNode[]): { shared: K.WithNode | undefined; reads: K.OperationNode[] } {
+  const ctes = (n: K.OperationNode): readonly K.CommonTableExpressionNode[] => {
+    const w = n.kind === "SelectQueryNode" ? (n as K.SelectQueryNode).with : undefined;
+    return w && !w.recursive ? w.expressions : [];
+  };
+  const keyOf = (c: K.CommonTableExpressionNode): string => JSON.stringify(c, (_, v: unknown) => (typeof v === "bigint" ? `${v}n` : v));
+  const nameOf = (c: K.CommonTableExpressionNode): string => c.name.table.table.identifier.name;
+  const uses = new Map<string, number>();
+  for (const n of nodes) for (const key of new Set(ctes(n).map(keyOf))) uses.set(key, (uses.get(key) ?? 0) + 1);
+  const hoisted = new Map<string, K.CommonTableExpressionNode>();
+  const byName = new Map<string, string>();
+  const reads = nodes.map((n) => {
+    const list = ctes(n);
+    let i = 0;
+    for (; i < list.length; i++) {
+      const c = list[i]!, key = keyOf(c), name = nameOf(c);
+      if ((uses.get(key) ?? 0) < 2 || (byName.get(name) ?? key) !== key || Object.hasOwn(COLUMNS, name)) break;
+      byName.set(name, key);
+      hoisted.set(key, c);
+    }
+    if (i === 0) return n;
+    const s = n as K.SelectQueryNode;
+    return { ...s, with: i < list.length ? { ...s.with!, expressions: list.slice(i) } : undefined } as K.SelectQueryNode;
+  });
+  return { shared: hoisted.size ? ({ kind: "WithNode", expressions: [...hoisted.values()] } as K.WithNode) : undefined, reads };
 }
 
 /** Channel names a handle may listen on: plain lower-case identifiers, so LISTEN needs no quoting. */

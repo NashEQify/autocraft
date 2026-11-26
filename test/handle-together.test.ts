@@ -33,6 +33,31 @@ test("reads issued together return what they return alone, as copies of their ow
   }
 });
 
+test("reads of a wave that declare the same leading CTE share one copy of it; a CTE of that name with other content stays in its read", async () => {
+  const { tdb, db, k } = await open();
+  try {
+    const marked = (min: number) => (db.k as any).with("m", () => k.selectFrom("t").select(["id", "v"]).where("id", ">=", min));
+    const reads = () => Promise.all([
+      db.all(marked(2).selectFrom("m").select("v").orderBy("v")),
+      db.all(marked(2).selectFrom("m").select("id").orderBy("id")),
+      db.all(marked(3).selectFrom("m").select("v")),
+    ]);
+    const alone = await reads();
+    const texts: string[] = [];
+    const stop = db.observe((e) => { if (e.kind === "query") texts.push(e.sql); });
+    const fused = await db.together(reads);
+    stop();
+    assert.deepEqual(fused, alone);
+    if (db.dialect === "postgres") {
+      const wave = texts.find((t) => t.includes("json_agg")) ?? "";
+      assert.ok(wave.startsWith('with "m" as'), wave);
+      assert.equal(wave.match(/"m" as \(/g)?.length, 2, `the shared CTE once at the head, the other kept in its read: ${wave}`);
+    }
+  } finally {
+    await tdb.close();
+  }
+});
+
 test("a wave reads one snapshot on SQLite while another connection commits between its reads", async () => {
   const { tdb, db, k } = await open("sqlite");
   try {
