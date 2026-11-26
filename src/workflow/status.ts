@@ -260,13 +260,10 @@ function singleCommand(rest: string): string | null {
   return found.length === 1 ? found[0]!.word : null;
 }
 
-/** How to write a part-naming word that came without its part (`fix and merge`), or null when the leftover is something else. */
+/** How to write a part-naming word that came without its part (`drop and merge`), or null when the leftover is something else. */
 function partHint(rest: string): string | null {
   const word = rest.trim().toLowerCase();
-  const c = COMMANDS.find((x) => x.answer && [x.word, ...x.aliases].includes(word));
-  if (!c) return null;
-  const line = t("“{word}” names a part of the plan, as in “{example}”.", { word, example: `${word} 1` });
-  return c.word === "fix" ? `${line} ${t("To start a fix-up, write “fix-up”.")}` : line;
+  return COMMANDS.some((x) => x.answer && [x.word, ...x.aliases].includes(word)) ? t("“{word}” names a part of the plan, as in “{example}”.", { word, example: `${word} 1` }) : null;
 }
 
 function ambiguityText(understood: string, a: Ambiguity, mention?: string, proposed?: string): string {

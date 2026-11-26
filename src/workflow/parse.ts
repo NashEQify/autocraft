@@ -3,6 +3,7 @@
 // what it did read, and nothing runs from it; resolve.ts then applies the item's state.
 //
 //   fix-up and merge, urgent         combined commands; a weight word anywhere (urgent, high, low, or weight <1-10>)
+//   fix and merge                    fix alone is fix-up
 //   fix 1 and 2, drop 3, then merge  an answer naming plan parts by number
 //   drop export dialog               a part named by words from its title (resolve.ts matches them)
 //   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
@@ -493,7 +494,9 @@ function readWords(src: string, marks: readonly { tok: string }[] = [], code: re
       return;
     }
     const c = commandOf(text) ?? commandOf(typoOf(text) ?? "");
-    if (c && c.word !== "drop" && c.word !== "fix" && c.word !== "autorepin") push({ word: c.word });
+    // `fix` with no part is the fix-up: it fixes every finding nobody dropped, which is what "fix them all" asks for too.
+    if (c?.word === "fix") push({ word: "fix-up" });
+    else if (c && c.word !== "drop" && c.word !== "autorepin") push({ word: c.word });
     else unknown.push(seg);
   };
   for (const raw of s.split(/\s*[,;\n]\s*|[.!]+\s+|\s+(?:and\s+then|then|and|&)\s+/i)) readSeg(raw);
