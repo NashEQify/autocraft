@@ -218,6 +218,8 @@ function RecentRuns({ selected }: { selected?: number }) {
   const refused = staff && f.refused === "1";
   const window = refused ? ((f.window as RefusalWindow | undefined) ?? "7d") : undefined;
   const recent = useRecent({ state: (f.state as AgentRunState | undefined) ?? "recent", step: f.step, repo: f.repo, limit: 50, ...(refused && { refused, window }) });
+  // A run open in the detail panel leaves the list narrow; the panel shows its model, Task Runner and tokens, so the list drops them for the items.
+  const open = selected !== undefined;
   useNow(recent.rows.some((r) => r.state === "running") ? 1000 : undefined);
   return (
     <Block flush title="Recent runs" aside="newest first">
@@ -225,43 +227,47 @@ function RecentRuns({ selected }: { selected?: number }) {
       {window && <RefusalCounts window={window} />}
       <ErrorLine error={recent.error} className="p-4" />
       <div className="overflow-x-auto">
-        <table className="num w-full md:min-w-[640px] text-sm">
+        <table className="num w-full text-sm">
           <thead className="bg-ink/[0.03] text-xs text-ink/55">
             <tr>
-              <th className="h-8 px-3 text-left font-medium">Started</th>
+              <th className="h-8 px-3 text-left font-medium max-md:hidden">Started</th>
               <th className="h-8 px-3 text-left font-medium">Step</th>
-              {!refused && <th className="h-8 px-3 text-left font-medium max-md:hidden">Model</th>}
-              <th className="h-8 px-3 text-left font-medium max-md:hidden">Task Runner</th>
+              {!refused && !open && <th className="h-8 px-3 text-left font-medium max-md:hidden">Model</th>}
+              {!open && <th className="h-8 px-3 text-left font-medium max-md:hidden">Task Runner</th>}
               {refused && <th className="h-8 px-3 text-left font-medium max-md:hidden">{t("Retry")}</th>}
               <th className="h-8 px-3 text-left font-medium">Items</th>
-              {!refused && <th className="h-8 px-3 text-right font-medium max-md:hidden">Tokens</th>}
+              {!refused && !open && <th className="h-8 px-3 text-right font-medium max-md:hidden">Tokens</th>}
               {!refused && <th className="h-8 px-3 text-left font-medium max-md:hidden">State</th>}
             </tr>
           </thead>
           <tbody>
             {recent.rows.map((r) => (
               <tr key={r.id} className={cn("relative border-t border-line hover:bg-ink/[0.03]", selected === r.id && "bg-accent/10")}>
-                <td className="relative z-10 whitespace-nowrap px-3 py-1.5 text-ink/70" title={r.startedAt}>
-                  <span className={cn("mr-1.5 inline-block size-2 rounded-full md:hidden", r.state === "failed" ? "bg-bad" : r.state === "running" ? "bg-accent" : "bg-ok")} role="img" aria-label={STATE_LABEL[r.state]} />
-                  <TimeAgo iso={r.startedAt} /><span className="max-md:hidden"> ago</span>
+                <td className="relative z-10 whitespace-nowrap px-3 py-1.5 text-ink/70 max-md:hidden" title={r.startedAt}>
+                  <TimeAgo iso={r.startedAt} />
                 </td>
-                <td className="whitespace-nowrap px-3 code text-xs">
+                <td className="whitespace-nowrap px-3 py-1.5 code text-xs">
                   <Link to={`/agents/${r.id}${location.search}`} className="after:absolute after:inset-0">
                     {r.step}
                   </Link>
+                  {/* Phones: the state and start time under the step, so the items get the width. */}
+                  <div className="mt-0.5 flex items-center gap-1.5 font-sans text-ink/60 md:hidden">
+                    <span className={cn("inline-block size-2 rounded-full", r.state === "failed" ? "bg-bad" : r.state === "running" ? "bg-accent" : "bg-ok")} role="img" aria-label={STATE_LABEL[r.state]} />
+                    <TimeAgo iso={r.startedAt} />
+                  </div>
                   {refused && r.refusal && (
                     <div className="mt-0.5 flex items-center gap-1 font-sans text-ink/55 md:hidden">
                       {t("Retry")} <RetryOutcome refusal={r.refusal} />
                     </div>
                   )}
                 </td>
-                {!refused && <td className="px-3 max-md:hidden">{r.model}</td>}
-                <td className="whitespace-nowrap px-3 text-ink/70 max-md:hidden">{r.provider === "jev" ? "–" : r.via ? <RemoteVia via={r.via} /> : "–"}</td>
+                {!refused && !open && <td className="px-3 max-md:hidden">{r.model}</td>}
+                {!open && <td className="whitespace-nowrap px-3 text-ink/70 max-md:hidden">{r.provider === "jev" ? "–" : r.via ? <RemoteVia via={r.via} compact /> : "–"}</td>}
                 {refused && <td className="whitespace-nowrap px-3 max-md:hidden">{r.refusal && <RetryOutcome refusal={r.refusal} />}</td>}
-                <td className="px-3 md:min-w-40">
+                <td className="px-3 md:min-w-60">
                   <Items r={r} max={2} />
                 </td>
-                {!refused && <td className="px-3 text-right max-md:hidden">{tokensOf(r) === null ? "–" : num(tokensOf(r)!)}</td>}
+                {!refused && !open && <td className="px-3 text-right max-md:hidden">{tokensOf(r) === null ? "–" : num(tokensOf(r)!)}</td>}
                 {!refused && (
                   <td className="px-3 max-md:hidden">
                     <Badge tone={STATE_TONE[r.state]}>{STATE_LABEL[r.state]}</Badge>
