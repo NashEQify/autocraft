@@ -58,6 +58,12 @@ test("label, Discord and sort qualifiers combine, negation and paging hold, pres
     const facets = await loadFacets(db, scope);
     assert.equal(facets.labels[0], "bug");
     assert.ok(facets.authors.includes("eve"));
+
+    // A row only the automatic merge rule started asks nobody: it is stopped, not waiting on a person.
+    const wf = (number: number, startedBy: string) => ({ repo: "app", number, kind: "issue", entry: "review", state: "recommending", started_by: startedBy, started_at: at(1), started_via: "github", updated_at: at(1) });
+    await db.run(db.k.insertInto("main.item_workflows").values([wf(2, "automatic merge rule"), wf(3, "ann")] as never));
+    assert.deepEqual(await numbers("autocraft:waiting"), [3]);
+    assert.deepEqual(await numbers("autocraft:stopped"), [2]);
   } finally {
     await db.close?.();
   }

@@ -76,13 +76,14 @@ function useBrowseUrl() {
 const AUTOCRAFT_WORD: Record<BrowseAutocraft, { label: string; tone: Tone } | null> = {
   running: { label: "Working", tone: "accent" },
   waiting: { label: "Waiting", tone: "warn" },
+  stopped: { label: "Stopped by the rule", tone: "neutral" },
   held: { label: "Held", tone: "neutral" },
   backlog: { label: "Backlog", tone: "neutral" },
   done: { label: "Done", tone: "ok" },
   none: null,
 };
 const AUTOCRAFT_TITLE: Record<BrowseAutocraft, string> = {
-  running: "AutoCraft is working on it", waiting: "AutoCraft waits for a person", held: "Held", backlog: "In the Backlog", done: "AutoCraft is done with it", none: "Not started",
+  running: "AutoCraft is working on it", waiting: "AutoCraft waits for a person", stopped: "Stopped by the automatic merge rule; a maintainer's yes takes it over", held: "Held", backlog: "In the Backlog", done: "AutoCraft is done with it", none: "Not started",
 };
 const priorityTone = (p: string): Tone => (p === "P0" ? "bad" : p === "P1" ? "warn" : "neutral");
 

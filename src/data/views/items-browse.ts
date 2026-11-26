@@ -81,6 +81,8 @@ function facts(db: Db, scope: BrowseScope, inner: (eb: kx.AnyEb) => Expression<S
       rank("$.type").as("classified"),
       eb.case().when("i.kind", "=", "pr").then(kx.jsonNum(db, "i.closing_issues", "$[0]")).else(eb.ref("cl.pr")).end().as("linked"),
       eb.case()
+        // A row only the automatic merge rule started asks nobody (src/workflow/asked.ts): it is stopped, not waiting on a person.
+        .when(eb.and([eb("w.state", "in", [...ASKING_STATES]), eb("w.started_by", "=", RULE_STARTER), eb("w.approved_by", "is", null)])).then("stopped")
         .when("w.state", "in", [...ASKING_STATES]).then("waiting")
         .when("w.state", "in", LIVE_STATES).then("running")
         .when("lw.state", "=", "stopped").then("held")

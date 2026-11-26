@@ -89,7 +89,7 @@ One list over every item of the visible repos, narrowed to the picked project. T
 | `has:` / `no:` | `pr`, `label`, `priority`, `area`, `kind`, `discord`, `response` (a comment by a maintainer of the repo) |
 | `ci:` | `green`, `red`, `pending` |
 | `review:clean` | the model review of the current head is a sure take |
-| `autocraft:` | `running`, `waiting` (for a person), `held`, `backlog`, `done`, `none` |
+| `autocraft:` | `running`, `waiting` (for a person), `stopped` (only the automatic merge rule started it and it stopped: it asks nobody), `held`, `backlog`, `done`, `none` |
 | `sort:` | `updated` (default), `created`, `comments` (comments and reactions), `priority`, `discord`; `-asc` reverses |
 
 - **Words or Meaning.** By meaning, the words are embedded and matched by similarity (at most 100 hits, best first); the qualifiers still filter the hits and no sort applies.

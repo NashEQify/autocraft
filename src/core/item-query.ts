@@ -26,7 +26,7 @@ export const KINDS: Record<string, string> = {
   bug: "bugfix", perf: "performance", feature: "missing feature", extra: "small extra", plugin: "plugin candidate", infra: "infra",
 };
 export const KIND_NAMES: Record<string, string> = Object.fromEntries(Object.entries(KINDS).map(([k, v]) => [v, k]));
-export const AUTOCRAFT_STATES = ["running", "waiting", "held", "backlog", "done", "none"] as const;
+export const AUTOCRAFT_STATES = ["running", "waiting", "stopped", "held", "backlog", "done", "none"] as const;
 export const PRIORITIES = ["P0", "P1", "P2", "P3", "P4"] as const;
 export const SIZES = ["S", "M", "L", "XL"] as const;
 export const CI_STATES = ["green", "red", "pending"] as const;
