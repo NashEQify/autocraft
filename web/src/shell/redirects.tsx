@@ -24,11 +24,12 @@ function DecisionRedirect() {
   return <RedirectTo to={item ? itemPath(item.repo, item.number) : "/"} search="" />;
 }
 
-/** The old Needs page: its Stopped tab is the Work queue's waiting list, the rest is Home. */
+/** The old Needs page: its Stopped tab is the Work queue's waiting list, the rest is the reader's own items. */
 function NeedsRedirect() {
   const q = new URLSearchParams(useLocation().search);
   const repo = q.get("repo");
-  return <RedirectTo to={q.get("tab") === "stopped" ? "/queue" : "/"} search={repo ? `?repo=${encodeURIComponent(repo)}` : ""} />;
+  if (q.get("tab") === "stopped") return <RedirectTo to="/queue" search={repo ? `?repo=${encodeURIComponent(repo)}` : ""} />;
+  return <RedirectTo to="/items" search={`?filter=mine${repo ? `&repo=${encodeURIComponent(repo)}` : ""}`} />;
 }
 
 /** A project's home is Home narrowed to the repo. */
