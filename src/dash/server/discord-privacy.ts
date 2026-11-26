@@ -16,7 +16,7 @@ export function discordPrivacyPage(nonce: string, contact: string): string {
 <h2>Sharing</h2>
 <p>Search text, issue drafts and messages that mention an issue or pull request (to check whether they ask for attention) may be processed by an AI service provider. They are not stored or sold. An issue the bot files for you is public on GitHub and names you by your Discord name.</p>
 <h2>Opting out</h2>
-<p>Run <code>/autocraft optout</code> and the bot stops recording your messages: it no longer counts them as references, checks them for requests for attention or reacts to them. The records of your earlier messages that the bot can tie to you are deleted. Commands and searches you send to the bot still work, because you asked for them. <code>/autocraft optin</code> turns recording back on.</p>
+<p>Run <code>/autocraft account action:optout</code> and the bot stops recording your messages: it no longer counts them as references, checks them for requests for attention or reacts to them. The records of your earlier messages that the bot can tie to you are deleted. Commands and searches you send to the bot still work, because you asked for them. <code>/autocraft account action:optin</code> turns recording back on.</p>
 <h2>Deletion</h2>
 <p>Deleting a message removes its record. Unlink your account with <code>/autocraft unlink</code>. For other requests, contact ${who}.</p>`);
 }

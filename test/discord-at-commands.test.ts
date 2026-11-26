@@ -90,7 +90,7 @@ test("a sender with no linked login gets one short reply and nothing runs", asyn
   await say("u-2", "u99", "<@100> merge photocraft#4");
   assert.deepEqual(await started(), before);
   assert.equal(rest.sent.length, sent + 1);
-  assert.match(rest.sent.at(-1)!.body.content!, /\/autocraft link/);
+  assert.match(rest.sent.at(-1)!.body.content!, /\/autocraft account action:link/);
 });
 
 test("an item of a private repo shows a status line and its link, never the recommendation", async () => {
@@ -119,7 +119,7 @@ test("text that starts with a command word but reads as ambiguous goes to search
   await own.dispatch("MESSAGE_CREATE", m);
   await own.idle();
   assert.equal(searched.length, 1);
-  assert.ok(!rest.sent.slice(sent).some((s) => /\/autocraft link/.test(s.body.content ?? "")));
+  assert.ok(!rest.sent.slice(sent).some((s) => /\/autocraft account action:link/.test(s.body.content ?? "")));
 });
 
 test("a replayed message runs its command once", async () => {
