@@ -180,7 +180,7 @@ export function reviewBody(r: ReviewPostInput): string {
     const lines = xs.slice(0, MAX_POINTS).flatMap((x) => { const line = clean(x, PART_LINE_MAX); return line ? [`- ${line}`] : []; });
     return lines.length ? `${title}\n${lines.join("\n")}\n\n` : "";
   };
-  const fuBlock = fu ? list("Fixes before the merge:", fu.fixes) + list(fu.notFiled ? `Follow-ups (not filed: ${clean(fu.notFiled, PART_LINE_MAX).replace(/[.:]+$/, "")}):` : "Follow-ups, to be filed as an issue:", fu.later) : "";
+  const fuBlock = fu ? list("Fixes before the merge:", fu.fixes) + list(fu.notFiled ? "Follow-ups (not filed by AutoCraft):" : "Follow-ups, to be filed as an issue:", fu.later) : "";
   const fixed = NOTE_RESERVE + head.length + rec.length + foot.length + summary.length + claimBlock.length + fuBlock.length + 8;
   const kept: string[] = [];
   let used = fixed;
