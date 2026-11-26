@@ -32,7 +32,6 @@ import type { Req } from "../src/dash/types.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { awaitCall, claimCall, enqueueCall } from "../src/remote/calls.ts";
 import { planned } from "../src/core/select.ts";
-import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { applyProposals, detectAutopilot } from "../src/runner/autopilot.ts";
 import { JobLogCopy } from "../src/runner/job-log.ts";
 import { Runner } from "../src/runner/runner.ts";
