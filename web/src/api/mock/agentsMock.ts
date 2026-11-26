@@ -208,10 +208,14 @@ export function createAgentsMock(): Pick<Api, "agents" | "rates" | "transcriptSt
         return wait(store);
       },
       clear() {
-        store = { ...store, saved: null, active: { kind: "local", source: "default", dir: LOCAL_DIR, endpoint: null, bucket: null, prefix: "", accessKeyId: null } };
+        store = { ...store, saved: null, active: null };
         return wait(store);
       },
-      test: (input) => wait({ ok: true, detail: (input ?? store.active).kind === "s3" ? `Wrote, read and deleted a probe object in ${input?.kind === "s3" ? input.bucket : store.active.bucket}.` : `Wrote, read and deleted a probe file in ${LOCAL_DIR}.` }, 300),
+      test(input) {
+        const kind = (input ?? store.active)?.kind;
+        if (!kind) return wait({ ok: false, detail: "Transcripts are off: no store is configured." }, 300);
+        return wait({ ok: true, detail: kind === "s3" ? `Wrote, read and deleted a probe object in ${input?.kind === "s3" ? input.bucket : store.active?.bucket}.` : `Wrote, read and deleted a probe file in ${LOCAL_DIR}.` }, 300);
+      },
     },
     rates: (w) => wait(rates(w), 80),
   };

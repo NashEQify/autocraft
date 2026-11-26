@@ -261,7 +261,7 @@ export type TaskBundle = {
   mcpServers: string[];
   /** Whether the helper keeps the harness session after the call: a follow-up turn (lint fix, check reminder, resume) may continue it. */
   keepSession: boolean;
-  /** The server stores the call's full session (Submit.transcript): the helper sends it with the submit, whatever the outcome. */
+  /** The server stores the call's full session (Submit.transcript), set only on an instance with a transcript store: the helper sends it with the submit, whatever the outcome. */
   transcript?: boolean;
   /** A follow-up turn: resume this helper's session of the parent call instead of starting one. The helper resumes with the session id it recorded; the hints never carry `--resume`. */
   resume?: { parentCallId: number };

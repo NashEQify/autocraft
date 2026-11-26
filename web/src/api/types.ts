@@ -1326,6 +1326,7 @@ export type AgentRunDetail = AgentRun & {
   tools: AgentRunTool[];     // tool uses in order
   textsHidden?: boolean;     // prompt, output and tool arguments are withheld from this user (viewers)
   transcripts?: AgentRunTranscript[]; // full transcripts, one per Task Runner attempt; absent for viewers
+  transcriptsOff?: boolean;  // this instance has no transcript store (operators and maintainers only)
 };
 /** A stored full transcript of one attempt of a call: its summary; the events are read with `agents.transcript`. */
 export type AgentRunTranscript = {
@@ -1350,9 +1351,9 @@ export type TranscriptEntry = {
   sub?: boolean;             // from a subagent (the explorer)
 };
 export type TranscriptView = { runId: number; transcript: AgentRunTranscript; entries: TranscriptEntry[]; omitted: number };
-/** Where transcripts are stored. `source`: the admin setting, the environment, or the local directory by default. */
+/** Where transcripts are stored; `active` null: transcripts are off. `source`: the admin setting or the environment. */
 export type TranscriptStoreStatus = {
-  active: { kind: "local" | "s3"; source: "settings" | "environment" | "default"; dir: string | null; endpoint: string | null; bucket: string | null; prefix: string; accessKeyId: string | null };
+  active: { kind: "local" | "s3"; source: "settings" | "environment"; dir: string | null; endpoint: string | null; bucket: string | null; prefix: string; accessKeyId: string | null } | null;
   saved: { kind: "local" | "s3"; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretSet: boolean } | null;
   environment: boolean;      // a bucket is configured in the environment
   problem: string | null;

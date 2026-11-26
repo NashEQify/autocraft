@@ -20,7 +20,7 @@ import { LEASE_IDLE_MS } from "../data/runners/index.ts";
 import { ERROR_MAX } from "../data/inference/types.ts";
 import type { ClaimFacts, LiveLease, PollRow, QueueSnapshot, RefusalRetry, RunnerSnapshot } from "../data/runners/index.ts";
 import { familyOf, isEffort, isTier, meetsEffort, modelsOf, REMOTE_MODELS_KEY, TIERS } from "./mode.ts";
-import { saveCallTranscript } from "../transcripts/index.ts";
+import { saveCallTranscript, transcriptsOn } from "../transcripts/index.ts";
 import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, ROUTES, TRANSCRIPT_MAX, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
 import { claimReposOf } from "./my-repos.ts";
 import { skipsIn, taskOfStep } from "./my-tasks.ts";
@@ -615,7 +615,7 @@ export async function bundleOf(db: Db, secret: string | undefined): Promise<Task
   const l = secret ? await runners.loadLeaseBundle(db, secret, Date.now()) : null;
   // A claim always records its harness.
   if (!l || l.harness === null) return null;
-  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, transcript: true };
+  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, ...(await transcriptsOn(db) && { transcript: true }) };
 }
 
 /** A plain one-line progress text from the helper: control characters removed, scrubbed, cut. */
