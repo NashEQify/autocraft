@@ -1,6 +1,7 @@
 // Which PRs the Opus review looks at: the PRs whose Plan holds a `review` action (no Opus verdict at
 // the current head commit, or one older than a comment or review by someone else).
 import { onAutoPath } from "../core/decide.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { type Size } from "../core/rules.ts";
@@ -23,8 +24,8 @@ export async function opusCandidateOf(db: Db, f: Pick<PrFacts, "repo" | "number"
 }
 
 /** PRs of `repo` still to review, highest work score first. */
-export async function selectOpusCandidates(db: Db, repo: string, run?: string | null): Promise<OpusCandidate[]> {
-  const rows = await planned(db, "review", { repo, ...(run !== undefined ? { run } : {}) });
+export async function selectOpusCandidates(db: Db, repo: string, run?: string | null, by: By = CLI_BY): Promise<OpusCandidate[]> {
+  const rows = await planned(db, "review", { repo, by, ...(run !== undefined ? { run } : {}) });
   const items = await loadItems(db, rows.map((p) => ({ repo: p.facts.repo, number: p.facts.number })), "text");
   return rows.map((p) => ({ ...candidateOf(items.get(`${p.facts.repo}#${p.facts.number}`), p.facts, p.action.head!, ""), auto: onAutoPath(p.facts) }));
 }

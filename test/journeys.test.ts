@@ -8,7 +8,7 @@ import { runFixup } from "../src/fixup/index.ts";
 import { runBatches } from "../src/merge/batch.ts";
 import { runMerge } from "../src/merge/index.ts";
 import { refreshChecks } from "../src/review/checks.ts";
-import { prepareOpusInput, saveOpus, type OpusDeps } from "../src/review/opus.ts";
+import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
 import { runPremerge } from "../src/premerge/review.ts";
 import type { LaneDeps } from "../src/github/user-lane.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
@@ -63,7 +63,7 @@ describe("PR journeys", () => {
     assert.equal(w.gh.writesOf("merge").length, 0);
   });
 
-  test("an unsure review of a started PR comes back with a recommendation; answered with merge, it is reviewed again and merged as the person who answered", async () => {
+  test("an unsure review of a started PR comes back with a recommendation; answered with merge, it is merged without another review, as the person who answered", async () => {
     const w = await (await (await (await (await (await fresh()).acting("mira")).pr(1)).workflow(1, { by: "mira", approved: false })).review(1, { sure: false })).verified(1);
     await w.premerge(1, "clean");
     const lane: LaneDeps = { vault: { userToken: async (login) => ({ ok: true, access: login === "mira" ? "user-token" : "other" }) }, permission: async () => "write" };
@@ -80,15 +80,7 @@ describe("PR journeys", () => {
     assert.equal(answer.items[0]!.outcome, "run", answer.lines.join());
     const advance = () => untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 3);
     await advance();
-    assert.deepEqual((await w.prPlan(1)).actions.map((a) => a.kind), ["review"]);
-    assert.deepEqual((await merge()).merged, []);
-    // The review is unsure again: the approval carries it on.
-    await saveOpus(w.db, "rv2", { repo: "app", number: 1, head_oid: "sha1" }, {
-      mode: "full", base: null, model: "m",
-      review: { ref: "app#1", verdict: "take", sure: false, reason: "r", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] },
-    });
-    await w.premerge(1, "clean");
-    await advance();
+    assert.deepEqual((await w.prPlan(1)).actions.map((a) => a.kind), ["merge"]);
     assert.deepEqual((await merge()).merged, ["app#1"]);
     assert.deepEqual(w.gh.writesOf("merge").map((x) => [x.number, x.head]), [[1, "sha1"]]);
     assert.deepEqual(tokens, ["user-token"], "the merge ran with the token of the person who answered");

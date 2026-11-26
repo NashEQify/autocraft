@@ -32,7 +32,9 @@ import { ghComment, WritePacedError, type Writer } from "./write.ts";
 import { envVar } from "../env.ts";
 import { t } from "../i18n/index.ts";
 import { runCommand, type Actor } from "../workflow/apply.ts";
-import { parseComment } from "../workflow/parse.ts";
+import { READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "../workflow/read.ts";
+import { commentLines } from "./comment-lines.ts";
+import { commentCondition, parseComment } from "../workflow/parse.ts";
 import type { ItemRef, Parsed } from "../workflow/types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -101,6 +103,8 @@ export type CommandDeps = {
   now?: () => Date;
   log?: (l: string) => void;
   limit?: number;
+  /** Replaces the model reading's calls (tests); null turns the reading off. */
+  read?: ReadDeps | null;
 };
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, 300).replace(/[.\s]+$/, "");
@@ -206,7 +210,8 @@ async function expire(db: Db, d: Drain, r: Row, now: Date): Promise<void> {
   await settle(db, d, r, "expired", answer ? NO_ACCESS_READ : null, now, { reply: answer });
 }
 
-type Outcome = "settled" | "retry" | "wait";
+/** `reading`: a model reads the comment in the background (readInBackground), which settles and answers it. */
+type Outcome = "settled" | "retry" | "wait" | "reading";
 
 /** The least time between two "link your account" answers to one login. */
 export const NUDGE_EVERY_MS = 7 * 86400_000;
@@ -219,6 +224,13 @@ const parsedOf = (r: Row): Parsed | null => {
     return null;
   }
 };
+
+/**
+ * The command as the two texts are compared: one queued by a release that calls a hold `stop`, or that does not note a yes beside the commands,
+ * is the same command. A release before this one that reads a queued `hold` settles it unanswered; it is sent again.
+ */
+const commandKey = (p: Parsed): string =>
+  JSON.stringify(p.kind === "commands" ? { items: p.items, parts: p.parts.map((x) => ((x.word as string) === "stop" ? { ...x, word: "hold" } : x)) } : p);
 
 /** Words that start, run or approve work: carried out only at the head the comment was written at. */
 const HEAD_WORDS = new Set(["review", "fix-up", "implement", "merge", "fix", "drop"]);
@@ -277,7 +289,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   const names = await commentNames(db, slug);
   const mentionName = names[0];
   const again = c.kind === "ok" && c.authorId === Number(r.github_id) ? parseComment(c.body, names, { repo: r.repo }) : null;
-  if (!again || JSON.stringify(again) !== r.parsed) {
+  if (!again || commandKey(again) !== commandKey(parsed)) {
     await settle(db, d, r, "ignored", c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command", clock());
     return "settled";
   }
@@ -303,7 +315,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
   const allowed = !await actRefusal(db, actor, r.repo);
   const reply = !await quietFor(db, d, r);
   const ref = refOf(r);
-  const items = parsed.kind !== "ambiguous" ? parsed.items ?? [] : [];
+  const items = again.kind !== "ambiguous" ? again.items ?? [] : [];
   if (items.length === 1 && !isOwnItem(items[0]!, r.repo, r.number)) {
     await settle(db, d, r, "refused", t("On GitHub a command acts on the item it is written on. Send it there, or from the dashboard, Discord or your agent."), now, { reply, allowed });
     return "settled";
@@ -312,8 +324,13 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
     await settle(db, d, r, "refused", t("{ref} changed after the command was written. Send it again.", { ref: `${slugOf(r.repo)}#${r.number}` }), now, { reply, allowed });
     return "settled";
   }
+  if (again.kind === "ambiguous" && allowed && deps.read !== null) {
+    const body = c.kind === "ok" ? c.body : "";
+    readInBackground(db, d, r, deps, { actor, again, names, text: addressedText(body, names), condition: commentCondition(body, names) !== null, mention: mentionName, reply, allowed });
+    return "reading";
+  }
   try {
-    const own: Parsed = parsed.kind === "ambiguous" || items.length !== 1 ? parsed : { ...parsed, items: [] };
+    const own: Parsed = again.kind === "ambiguous" || items.length !== 1 ? again : { ...again, items: [] };
     const res = await runCommand(db, actor, "github", { parsed: own, items: [{ repo: r.repo, number: r.number }], ...(head ? { head } : {}), ...(mentionName ? { mention: mentionName } : {}), at: now.toISOString(), asked: () => r.created_at });
     const o = res.items[0];
     await settle(db, d, r, o?.outcome === "run" ? "done" : "refused", o?.line ?? (res.lines.join(" ") || NOT_RUN), now, { reply, allowed });
@@ -322,6 +339,78 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
     await settle(db, d, r, "refused", NOT_RUN, now, { reply, allowed });
   }
   return "settled";
+}
+
+/** The comment was deleted, or no longer holds the command, by the time a reading's command would run. */
+class CommentChanged extends Error {}
+/** GitHub could not give the comment again just before a reading's command would run. */
+class CommentUnread extends Error {}
+
+/** Comments a model is reading or has read in this process, with when it started: the drain leaves them to readInBackground. */
+const reading = new Map<number, number>();
+/** The background readings still running, for tests to wait on. */
+const readings = new Set<Promise<void>>();
+export const readingsDone = async (): Promise<void> => { await Promise.all([...readings]); };
+
+/** The comment from its first line addressed to the app on, without quoted, fenced or hidden lines: what the model reads. */
+function addressedText(body: string, names: readonly string[]): string {
+  const lines = commentLines(body.slice(0, 65_536));
+  const at = lines.findIndex((l) => names.some((n) => l.toLowerCase().startsWith(`@${n.toLowerCase()}`)));
+  return lines.slice(Math.max(at, 0)).join("\n").trim();
+}
+
+/**
+ * Reads an answer the parser could not read with a model (src/workflow/read.ts runText), off the drain, which would otherwise wait for the
+ * call; then settles the command and posts its answer. Just before a command the reading runs, the comment is read again, as a typed one
+ * is: deleted or changed meanwhile, the command ends unanswered; when GitHub cannot give it, the command stays queued and is tried again. It is pinned to the PR's head at the comment, as a typed one is. The row
+ * stays queued meanwhile, and the drain passes over it (`reading`); after a restart the drain reads it again.
+ */
+function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { actor: Actor; again: Parsed; names: readonly string[]; text: string; condition: boolean; mention: string | undefined; reply: boolean; allowed: boolean }): void {
+  const id = Number(r.comment_id);
+  const clock = deps.now ?? (() => new Date());
+  const nowMs = Date.now();
+  for (const [k, at] of reading) if (nowMs - at >= EXPIRE_MS) reading.delete(k);
+  reading.set(id, nowMs);
+  const pin = async (p: Parsed): Promise<{ head?: string } | string> => {
+    const c = await (deps.comment ?? restComment)(r.repo, r.comment_id).catch(() => null);
+    if (!c) throw new CommentUnread();
+    const now = c.kind === "ok" && c.authorId === Number(r.github_id) ? parseComment(c.body, o.names, { repo: r.repo }) : null;
+    if (!now || commandKey(now) !== commandKey(o.again)) throw new CommentChanged(c.kind === "gone" ? "the comment was deleted" : "the comment no longer holds the command");
+    if (!pinsHead({ pr: r.pr, parsed: JSON.stringify(p) })) return {};
+    const p2 = await (deps.pr ?? prSince)(deps.querier, r.repo, r.number, r.created_at).catch(() => undefined);
+    return p2 && !p2.changed ? { head: p2.head } : t("{ref} changed after the command was written. Send it again.", { ref: `${slugOf(r.repo)}#${r.number}` });
+  };
+  const job = (async () => {
+    let state: CommandState = "refused", line = NOT_RUN;
+    try {
+      const res = await runText(db, o.actor, "github", { parsed: o.again, items: [{ repo: r.repo, number: r.number }], ...(o.mention ? { mention: o.mention } : {}), at: clock().toISOString(), asked: () => r.created_at },
+        { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ...(deps.read ? { deps: deps.read } : {}) });
+      const out = res.items[0];
+      state = out?.outcome === "run" ? "done" : "refused";
+      line = out?.line ?? (res.lines.join(" ") || NOT_RUN);
+    } catch (e) {
+      if (e instanceof CommentChanged) {
+        await settle(db, d, r, "ignored", e.message, clock());
+        return;
+      }
+      if (e instanceof CommentUnread) {
+        // Tried again after RETRY_MS, as a typed command whose comment GitHub could not give; the expiry still counts from requested_at.
+        await saveCommandProgress(db, [{ commentId: id, triedAt: clock().toISOString(), retryInc: true }]);
+        reading.delete(id);
+        return;
+      }
+      deps.log?.(`github command ${refOf(r)}: ${oneLine(String((e as Error)?.message ?? e))}`);
+    }
+    await settle(db, d, r, state, line, clock(), { reply: o.reply, allowed: o.allowed });
+    const row = d.settled.get(id)!;
+    // A paced answer is left to the next drain, which posts settled rows.
+    if (row.reply === null && (await answer(db, row, deps)) === "paced") reading.delete(id);
+  })().catch((e) => {
+    deps.log?.(`github command ${refOf(r)}: ${oneLine(String((e as Error)?.message ?? e))}`);
+    reading.delete(id);
+  });
+  readings.add(job);
+  void job.finally(() => readings.delete(job));
 }
 
 /**
@@ -388,6 +477,7 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
   let settled = 0, calls = 0;
   for (const r0 of rows) {
     if (calls >= (deps.limit ?? 10)) break;
+    if (reading.has(Number(r0.comment_id))) continue;
     const now = clock();
     let r = r0;
     if (r.state === "queued") {
@@ -397,7 +487,7 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
       else {
         calls++;
         const out = await carryOutAnswer(db, d, r, deps, now);
-        if (out === "wait") continue;
+        if (out === "wait" || out === "reading") continue;
         if (out === "retry") {
           // GitHub could not be read: retried after RETRY_MS; the expiry still counts from requested_at.
           await saveCommandProgress(db, [{ commentId: Number(r.comment_id), triedAt: clock().toISOString(), retryInc: true }]);

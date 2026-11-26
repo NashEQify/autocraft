@@ -3,6 +3,7 @@
 //
 // Every detector looks only at what happened after `since`, up to when the person who last started or answered the item has seen it (an
 // answer: when its question was asked): what they had seen then, they chose to go on with, so a yes after a blocker resumes instead of stopping again on the same evidence.
+import { stopCodeOf, type StopCode } from "../core/codes.ts";
 import type { Blocker, Entry } from "./types.ts";
 
 export type BlockerFacts = {
@@ -20,28 +21,37 @@ export type BlockerFacts = {
   plannedFiles: readonly string[];
   /** Files an issue's implementation changed that no part of its plan names, not yet shown to a person. */
   implementationBeyond?: readonly string[];
-  /** The merge leg (the pre-approved merge) stopped or was cancelled since `since`, with its reason. */
-  leg: { reason: string } | null;
+  /** The merge leg (the pre-approved merge) stopped or was cancelled since `since`, with its reason, and its code where the row has one. */
+  leg: EndedLeg | null;
   thresholds: { largeFix: number; outsideMin: number };
 };
+
+export type EndedLeg = { reason: string; code?: StopCode | null };
+
+/** Why the leg ended, its text's where the row has no code. */
+export const codeOf = (leg: EndedLeg): StopCode => leg.code ?? stopCodeOf(leg.reason);
 
 export type Found = { blocker: Blocker; params: Record<string, unknown> };
 
 /** A step failing this many times stops the item (blocker 3). */
 export const FAILED_TWICE = 2;
 
-/** A stopped merge leg's reason that is the pre-merge review's finding: its defects. An unsure review stops no workflow's merge leg. */
-export const PREMERGE_STOP = /pre-merge review found/;
+const PREMERGE_STOP = /pre-merge review found/;
+
+/** The stopped merge leg's reason is the pre-merge review's finding: its defects. An unsure review stops no workflow's merge leg. */
+export const premergeStop = (leg: EndedLeg): boolean => (leg.code ? leg.code === "premerge-defect" : PREMERGE_STOP.test(leg.reason));
 
 /**
- * The blocker a stopped merge leg's reason (src/preapproval) stands for. One failed try is `other`, shown with its reason: a step
+ * The blocker a stopped merge leg (src/preapproval) stands for. One failed try is `other`, shown with its reason: a step
  * failing twice is counted from the tries themselves (`failures`).
  */
-export function legBlocker(reason: string): Blocker {
-  if (/another push moved the head|the head went back/.test(reason)) return "author-commits";
-  if (/the review says (hold|close)|verification failed/.test(reason) || PREMERGE_STOP.test(reason)) return "major-finding";
-  if (/too-large/.test(reason)) return "large-fix";
-  return "other";
+export function legBlocker(code: StopCode): Blocker {
+  switch (code) {
+    case "author-push": case "head-back": return "author-commits";
+    case "review-hold": case "review-close": case "verification-failed": case "premerge-defect": return "major-finding";
+    case "fix-too-large": return "large-fix";
+    default: return "other";
+  }
 }
 
 /**
@@ -69,6 +79,6 @@ export function detectBlocker(f: BlockerFacts): Found | null {
   if (r && (r.verdict === "hold" || r.verdict === "close" || r.majors.length)) {
     return { blocker: "major-finding", params: { verdict: r.verdict, sure: r.sure, parts: r.majors } };
   }
-  if (f.leg) return { blocker: legBlocker(f.leg.reason), params: { reason: f.leg.reason } };
+  if (f.leg) return { blocker: legBlocker(codeOf(f.leg)), params: { reason: f.leg.reason } };
   return null;
 }

@@ -14,7 +14,7 @@ import { loadQuiet } from "../../data/security/index.ts";
 import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
 import { isLive } from "../../workflow/store.ts";
 import type { StoredEvent } from "../../data/workflow/types.ts";
-import { openRecommendation, type ItemWorkflow } from "../../workflow/types.ts";
+import { openRecommendation, shownWorkflow, type ItemWorkflow } from "../../workflow/types.ts";
 import { legWait } from "../../workflow/waits.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
@@ -24,7 +24,7 @@ import { blankIfHidden, hiddenRepos, needVisible } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
 
 /** Events whose line confirms a command that ran. */
-const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", "backlog", "closed", "stopped"]);
+const ACCEPTED = new Set(["started", "approved", "answered", "weighted", "set", "backlog", "closed", "stopped", "resumed"]);
 
 /**
  * The item's steps with the current one marked: the step the advance pass recorded on the row. A row with no recorded step yet
@@ -71,6 +71,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
   return {
     headline: stateLine(wf, steps ? currentStep(steps) : undefined, undefined, wait),
     live: isLive(wf.state),
+    held: wf.state === "stopped",
     entry: wf.entry,
     lines: attributionLines(wf, answered ? { by: answered.login, at: answered.at } : null),
     approved: wf.approvedBy !== null,
@@ -98,7 +99,7 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const facts = await loadMaintainItem(db, { staff, quiet }, { repo, number: n });
   if (!facts) throw new HttpError(404, `${repo}#${n} is not an item AutoCraft has read`);
   const { history, events, hold } = facts;
-  const wf = history[history.length - 1] ?? null;
+  const wf = shownWorkflow(history);
   // The breakers that stop a step of this repo: its own, and the instance-wide one of each stage.
   const mineTrips = facts.trips.flatMap((t) => { const k = tripOf(t.stage); return k && (k.repo === null || t.stage === tripKey(k.stage, repo)) ? [t] : []; });
   const breakers = await Promise.all(mineTrips.map(async (t) => ({

@@ -1,6 +1,6 @@
-// reads: mirror.comments, mirror.items, mirror.repos, access.access, control.audit, implement.implementations, merge.merges, workflow.item_workflows
+// reads: mirror.comments, mirror.items, mirror.repos, access.access, control.audit, implement.implementations, workflow.item_workflows
 // The discussion statements filter comments by "not ours" inside an aggregate, so they join the mirror, access and audit rows in
-// one statement. loadFollowupFixPrs and loadPendingDefects read `implementations.pr_number`; countUnreviewedMerges reads `merges`;
+// one statement. loadFollowupFixPrs and loadPendingDefects read `implementations.pr_number`;
 // the pre-merge base match reads the repo's default branch.
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
@@ -101,12 +101,4 @@ export function followupFixLinks(db: Db, keys: KeySource) {
     .innerJoin("main.postmerge_followups as pf", (j) => j.onRef("pf.repo", "=", "im.repo").onRef("pf.issue_number", "=", "im.number"))
     .innerJoin(resolveKeys(db, keys, "kk"), (j) => j.onRef("kk.repo", "=", "im.repo").onRef("kk.number", "=", "im.pr_number"))
     .select(["im.repo as repo", "im.pr_number as number"]).distinct();
-}
-
-/** Merged PRs since `since` with no post-merge row. */
-export function unreviewedMerges(db: Db, since: string) {
-  const q = queryDb(db);
-  return q.k.selectFrom((eb) => eb.selectFrom("main.merges as m").select(["m.repo", "m.number"]).distinct().where("m.outcome", "=", "merged").where("m.at", ">=", since)
-    .where((e) => e.not(e.exists((e as kx.AnyEb).selectFrom("main.postmerge_reviews as r").select(e.lit(1).as("one")).whereRef("r.repo", "=", "m.repo").whereRef("r.number", "=", "m.number")))).as("d"))
-    .select((eb) => eb.fn.countAll<number>().as("n"));
 }

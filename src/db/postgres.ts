@@ -37,6 +37,17 @@ const DEFAULT_IDLE_IN_TRANSACTION_MS = 10_000;
 export const SERVER_KEEPALIVE = { tcp_keepalives_idle: 5, tcp_keepalives_interval: 2, tcp_keepalives_count: 3, tcp_user_timeout: 10_000 } as const;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
 /**
+ * How much longer than the statement timeout (at most twice it) a pool connection waits for the server's answer before it
+ * gives the connection up. The server ends every statement and lock wait within the statement timeout, so an answer still
+ * missing after it is lost: the server or a proxy between went away without closing the connection.
+ */
+const ANSWER_MARGIN_MS = 30_000;
+/**
+ * Idle time before the client's first TCP keepalive probe on a pool, lock or listening connection; the system default is two hours. With the
+ * system's probe interval and count, a connection whose server vanished fails within minutes instead of hours.
+ */
+const CLIENT_KEEPALIVE_MS = 10_000;
+/**
  * JIT compilation off (0 is a boolean's false). The planner's cost estimates for the facts loads' correlated subqueries pass
  * jit_above_cost while the queries run in milliseconds, and each compile costs 100 ms or more, up to seconds for the full load.
  */
@@ -156,6 +167,34 @@ export function writesRows(text: string): boolean {
 /** `s` as an SQL string literal (standard_conforming_strings, the default: only quotes are doubled). */
 const quoteLiteral = (s: string): string => `'${s.replaceAll("'", "''")}'`;
 
+/** The error a statement fails with when its answer did not come within the limit (`answerWithin`). */
+export class AnswerTimeout extends Error {}
+
+/**
+ * Bounds every round trip on `client`: an answer missing after `ms` fails the statement with an AnswerTimeout and closes
+ * the connection, since a late answer would be read as the answer to the next statement. The pool drops the closed client
+ * once it is released. Nothing is bounded when `ms` is 0.
+ */
+function answerWithin(client: Pg.PoolClient, ms: number): void {
+  if (ms <= 0) return;
+  const query = client.query.bind(client) as (...a: unknown[]) => unknown;
+  (client as { query: unknown }).query = (...a: unknown[]): unknown => {
+    const r = query(...a);
+    if (!(r instanceof Promise)) return r;
+    let t: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      t = setTimeout(() => {
+        // With a statement in flight, end() closes the socket at once, and the pool drops a client that is ending.
+        void client.end().catch(() => undefined);
+        reject(new AnswerTimeout(`db: no answer from the server within ${ms} ms; the connection is closed`));
+      }, ms);
+    });
+    // The statement's own failure once the connection is closed is not the one the caller sees.
+    void r.catch(() => undefined);
+    return Promise.race([r, late]).finally(() => clearTimeout(t));
+  };
+}
+
 /** Counts every round trip on `client` in the current meter, and emits a query event for it while someone observes. */
 function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
   const query = client.query.bind(client) as (...a: unknown[]) => unknown;
@@ -205,14 +244,19 @@ function schemaCompiler(k: typeof K, mainSchema: string | undefined): K.QueryCom
 /** An engine on the Postgres database at `url`. `k` and `pg` are the modules src/db/open.ts loaded. */
 export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, opts: PgOptions, ctx: EngineContext): Engine {
   const lockTimeout = (tx: Tx | undefined) => Math.max(1, Math.floor(tx?.lockTimeoutMs ?? opts.busyTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS));
+  const statementTimeout = opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
+  const answerMs = statementTimeout > 0 ? statementTimeout + Math.min(ANSWER_MARGIN_MS, statementTimeout) : 0;
   const pool = new pg.Pool({
     connectionString: pgConnectionString(opts.scope ? scopedUrl(url, opts.scope) : url),
     max: POOL_MAX[opts.role],
+    // Bounds both opening a connection and waiting for a free one: the holders' statements end within the statement timeout.
+    connectionTimeoutMillis: answerMs,
     keepAlive: true,
+    keepAliveInitialDelayMillis: CLIENT_KEEPALIVE_MS,
     allowExitOnIdle: true,
     application_name: `autocraft-${opts.role}`,
     // A startup parameter of every connection, so it also bounds statements outside transactions; no SET is sent.
-    statement_timeout: opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+    statement_timeout: statementTimeout,
     // A lone write of a rowWrites handle waits for row locks no longer than a transaction waits for its lock.
     ...(opts.rowWrites && { lock_timeout: lockTimeout(undefined) }),
     types: typesFor(pg),
@@ -220,6 +264,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
   // An idle connection that fails (server restart, network) is dropped by the pool; without a listener it would crash the process.
   pool.on("error", (e) => console.warn(`db: idle Postgres connection failed: ${e.message}`));
   pool.on("connect", (client) => {
+    answerWithin(client, answerMs);
     observeClient(client, ctx);
     // The pool listens only while a connection is idle. One the server ends while it is checked out (an idle transaction
     // past its limit, a terminated backend) must not crash the process: its next statement fails, and the pool drops it.
@@ -331,7 +376,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
       // A connection of its own, outside the pool (a job's pool has one connection), closed with the lock: closing the
       // session releases it, and so does the server when this process dies (SERVER_KEEPALIVE).
       const wait = Math.max(1, Math.floor(waitMs));
-      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-lock", keepAlive: true, connectionTimeoutMillis: 10_000, query_timeout: wait + 5_000 });
+      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-lock", keepAlive: true, keepAliveInitialDelayMillis: CLIENT_KEEPALIVE_MS, connectionTimeoutMillis: 10_000, query_timeout: wait + 5_000 });
       let held = false;
       c.on("error", () => (held = false));
       c.on("end", () => (held = false));
@@ -398,10 +443,13 @@ export function pgListener(pg: typeof Pg.default, url: string): Listener {
   let closed = false, failures = 0, warned = false;
   let retry: NodeJS.Timeout | undefined;
 
-  // The connection keeps the process alive only while something listens, so a process can end once its waits are over.
+  /** Subscriptions that are not `background`. */
+  let waits = 0;
+  // The connection keeps the process alive only while something waits for a notification, so a process can end once its
+  // waits are over; a background subscription (a cache) never holds it.
   const hold = (): void => {
     const c = client as (Pg.Client & { ref?: () => void; unref?: () => void }) | null;
-    if (fns.size) c?.ref?.();
+    if (waits) c?.ref?.();
     else c?.unref?.();
   };
   const dispatch = (channel: string, payload: string | null): void => {
@@ -441,7 +489,7 @@ export function pgListener(pg: typeof Pg.default, url: string): Listener {
     if (client) return Promise.resolve(client);
     connecting ??= (async () => {
       const reconnect = failures > 0 || warned;
-      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-listen", keepAlive: true, connectionTimeoutMillis: LISTEN_CONNECT_MS });
+      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-listen", keepAlive: true, keepAliveInitialDelayMillis: CLIENT_KEEPALIVE_MS, connectionTimeoutMillis: LISTEN_CONNECT_MS });
       c.on("error", (e) => lost(c, e.message));
       c.on("end", () => lost(c, "closed"));
       try {
@@ -471,24 +519,27 @@ export function pgListener(pg: typeof Pg.default, url: string): Listener {
   };
 
   return {
-    listen(channel, fn) {
+    listen(channel, fn, o) {
       if (!CHANNEL.test(channel)) throw new Error(`db: bad channel name ${channel}`);
       if (closed) throw new Error("db: the handle is closed");
       let set = fns.get(channel);
       if (!set) fns.set(channel, set = new Set());
       set.add(fn);
+      const waiting = !o?.background;
+      if (waiting) waits++;
       hold();
       if (client) void sync(client);
       else void connect();
       return {
         listening: () => client !== null && active.has(channel),
         off: () => {
-          set.delete(fn);
+          if (!set.delete(fn)) return;
+          if (waiting) waits--;
+          hold();
           if (set.size || fns.get(channel) !== set) return;
           fns.delete(channel);
           active.delete(channel);
           if (client) void client.query(`UNLISTEN ${channel}`).catch(() => undefined);
-          hold();
         },
       };
     },

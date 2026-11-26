@@ -18,6 +18,7 @@ import { setCiApproval } from "../src/merge/ci-approval.ts";
 import { CLIPPY_ARTIFACT } from "../src/prepush/index.ts";
 import type { Querier } from "../src/mirror.ts";
 import { saveOpus } from "../src/review/opus.ts";
+import { acting, appLane } from "./acting.ts";
 import { validating } from "./gql.ts";
 import { reportingTaskRunner } from "./fake-runner.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -52,6 +53,7 @@ async function fresh(head: string, o: Opts = {}): Promise<Db> {
   if (o.comment) await setCommentApproval(db, "op", "app", true);
   if (o.ci) await setCiApproval(db, "op", "app", true);
   await insertWorkflow(db, { repo: "app", number: 7, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: T0, startedVia: "dashboard" });
+  await acting(db, ["op"]);
   await reportingTaskRunner(db);
   return db;
 }
@@ -190,7 +192,7 @@ function world(opts: { log?: string; reply?: string | null; check?: string | nul
     return exec("git", net >= 0 ? sub2 : args, { ...o });
   };
   const deps: CifixDeps = {
-    querier, exec: run, now: () => new Date(T2), root: join(root, "cache"),
+    querier, lane: appLane(querier), exec: run, now: () => new Date(T2), root: join(root, "cache"),
     fetchDiff: async () => ({ ok: true, text: "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+fn a() {}\n" }),
     gh: async (args) => {
       if (args[0] === "api" && args[1]!.includes("/pulls/")) return `${BASE}\n`;
@@ -373,5 +375,22 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     assert.equal((await db.all(db.k.selectFrom("build_tasks").select("id"))).length, 1);
   } finally {
     mock.timers.reset();
+  }
+});
+
+test("nothing is posted on a quiet pull request: no ask, and no patch as a comment", async () => {
+  for (const tries of [0, 2]) {
+    const w = world({ canModify: false });
+    const db = await fresh(w.head, { canModify: false, comment: true });
+    await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "app", state: "done", started_by: "op", started_at: T0 }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 50, scan_id: 1, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp", created_at: T0, updated_at: T0, fix_pr: 7 }));
+    for (let i = 1; i <= tries; i++) await db.run(db.k.insertInto("ci_fixes").values({ repo: "app", number: 7, head: w.head, attempt: i, kind: "code", state: "failed", created_at: T0 }));
+    const run = () => runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps);
+    await run();
+    assert.deepEqual(w.log.filter((l) => l.startsWith("comment:") || l === "model"), [], `${tries} tries`);
+    // The finding is dismissed, and the same PR gets its comment.
+    await db.run(db.k.updateTable("security_findings").set({ state: "dismissed" }));
+    await run();
+    assert.ok(w.log.some((l) => l.startsWith("comment:") || l === "model"), `${tries} tries, no longer quiet`);
   }
 });

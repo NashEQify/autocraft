@@ -23,7 +23,7 @@ import type { Db } from "../../db/index.ts";
 import { t } from "../../i18n/index.ts";
 import { COMMANDS } from "../../workflow/vocab.ts";
 import { parse } from "../../workflow/parse.ts";
-import { runCommand } from "../../workflow/apply.ts";
+import { runText } from "../../workflow/read.ts";
 import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
 import { eventsOf } from "../../workflow/store.ts";
 import { legWait } from "../../workflow/waits.ts";
@@ -153,7 +153,7 @@ export const TOOLS = [
   },
   {
     name: "list_merge_queue",
-    description: "The merge queue as on the dashboard's Queue page (Merge tab): each PR with its state, how it came in and who added it, its weight, whether its merge is held, and why it does not merge yet; the next merges in order with what each waits for; the integration batches in flight; and pre-approved merges still before their review.",
+    description: "The merge queue as on the dashboard's Queue page (Merge tab): each PR with its state, how it came in and who added it, its weight, and why it does not merge yet; the next merges in order with what each waits for; the integration batches in flight; and pre-approved merges still before their review.",
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
@@ -172,13 +172,13 @@ const ITEM_HELP = "The item: a GitHub URL, repo#number or owner/repo#number.";
 export const WORKFLOW_READ_TOOLS = [
   {
     name: "get_item",
-    description: "One item's workflow as every surface shows it: where it stands, the open recommendation and how to answer it, who started, approved and stopped it, the plan's parts and the latest commands sent. Only for repositories switched to AutoCraft commands.",
+    description: "One item's workflow as every surface shows it: where it stands, the open recommendation and how to answer it, who started, approved and holds it, the plan's parts and the latest commands sent. Only for repositories switched to AutoCraft commands.",
     inputSchema: { type: "object", additionalProperties: false, required: ["item"], properties: { item: { type: "string", description: ITEM_HELP } } },
     annotations: { readOnlyHint: true },
   },
   {
     name: "my_items",
-    description: "Your items on the new Home: the ones waiting for your answer, and the ones you started, approved or stopped, each with its state line. Viewers get the items waiting and running across the repositories they can see.",
+    description: "Your items on the new Home: the ones waiting for your answer, and the ones you started, approved or held, each with its state line. Viewers get the items waiting and running across the repositories they can see.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     annotations: { readOnlyHint: true },
   },
@@ -359,9 +359,9 @@ async function sendCommand(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const req = reqOf(user);
   const repos = new Set(await allVisibleRepos(env.db, req));
   const parsed = parse(a.text as string, { repo: r.repo });
-  const done = await runCommand(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
+  const done = await runText(env.db, { login: user.login, canWrite: (repo) => user.canWrite(repo) }, "agent", {
     parsed, items: [{ repo: r.repo, number: r.number }], visible: async (repo) => repos.has(repo), asked: ({ ref }) => (ref === refText(r) ? a.asked as string | undefined : null),
-  });
+  }, { text: a.text as string, own: [{ repo: r.repo, number: r.number }], named: false, parse: { repo: r.repo } });
   const text = done.lines.join("\n");
   return { text: /has no write access to/.test(text) ? text + PERMISSION_HINT : text };
 }
@@ -390,7 +390,7 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const prs = page.mergeRows.map((x) => ({
     item: item(x), title: x.title, author: x.author, state: x.state, mergesBy: x.path, verdict: x.verdict, ci: x.ci, mergeable: x.mergeable,
     verify: x.verify?.state ?? null, premergeOrRefusal: x.refusedReason, outsideRule: x.outsideRule, note: x.note, conflict: x.conflictNote ?? null,
-    held: x.held, weight: x.place,
+    weight: x.place,
     added: x.added ? { how: x.added.how, by: x.added.by, at: x.added.at } : null, closes: x.closes ?? [], link: link(env, itemPath(x.repo, x.number)),
   }));
   // Pre-approved merges whose PR is no queue row yet (no take review at its head), so an agent sees what it queued. A PR that is a

@@ -45,7 +45,7 @@ export async function mergesAsPerson(w: World, head = "sha1"): Promise<void> {
   assert.equal(wf.approvedBy, MAINT);
   assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "merge" && a.head === head), JSON.stringify(await w.prPlan(1)));
   assert.deepEqual(mergeMay((await loadPrFact(w.db, "app", 1))!), { ok: true, as: "person", by: MAINT });
-  assert.deepEqual((await mergeVerdicts(w.db, "app", [{ number: 1, head }])).get(1), { ok: true, as: "person", by: MAINT });
+  assert.deepEqual((await mergeVerdicts(w.db, "app", [{ number: 1, head }])).get(1), { ok: true, as: `user:${MAINT}`, by: { kind: "person", login: MAINT } });
 }
 export const review = async (w: World, head = "sha1") => {
   // The review a start asked for: newer than the start.

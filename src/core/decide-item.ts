@@ -3,11 +3,15 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
-import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, standingWait } from "./decide.ts";
+import { permitted } from "./authority.ts";
+import type { WaitCode } from "./codes.ts";
+import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
 import { REFEREE_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
-import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
+import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts } from "./plan.ts";
 
 const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
+const person = (code: WaitCode, text: string): Wait => ({ code, who: "person", text });
+const system = (code: WaitCode, text: string): Wait => ({ code, who: "system", text });
 
 export { BOX_IDENTITY_WAIT, implementOffWait };
 /** The wait of a queued issue whose latest attempt ended without a merged PR and whose text has not changed since. */
@@ -15,38 +19,39 @@ export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again"
 
 /**
  * The Implement stage's step for an issue, or the wait that holds it; null when the issue is not queued (no live implement
- * workflow) or another rule says what it waits on (a hold, an open PR that closes or mentions it).
+ * workflow) or another rule says what it waits on (a hold).
  * A new attempt starts when there is none, or the last one ended and the issue text changed or it was queued again since; it needs the repo's
- * Implement feature and room among the repo's live implementations. A question is planned again when its answer may have
+ * Implement feature and room among the repo's live implementations, and waits while an open PR closes the issue (a PR that only mentions
+ * it holds nothing). A question is planned again when its answer may have
  * come: the issue text changed, a person commented after it, or the workflow's recommendation is answered.
  */
-export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wait: string; waitKind: WaitKind } | null {
+export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wait: Wait } | null {
   const im = f.implement, row = im.row;
   if (f.kind !== "issue" || !f.open || !f.inScope || f.held || im.queuedBy === null) return null;
   const state = row?.state as ImplementationState | undefined;
   const ended = !row || ENDED_STATES.has(state!);
   if (im.standing === "no" && ended) return null;
   const held = standingWait(im, f.repo);
-  if (held) return { wait: held.text, waitKind: held.kind };
-  const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: implementOffWait(f.repo), waitKind: "system" as const });
+  if (held) return { wait: held };
+  const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: system("implement-off", implementOffWait(f.repo)) });
   if (ended) {
-    if (f.openPr !== null) return null;
-    if (row && !row.textChanged && !row.requeuedAfterEnd) return { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };
-    if (im.featureOn && im.liveInRepo >= MAX_LIVE_PER_REPO) return { wait: `${im.liveInRepo} implementations already running in ${f.repo}`, waitKind: "system" };
+    if (f.openPr?.closes) return { wait: system("open-pr", answerPrWait(f.openPr.number)) };
+    if (row && !row.textChanged && !row.requeuedAfterEnd) return { wait: person("implement-ended", IMPLEMENT_ENDED_WAIT) };
+    if (im.featureOn && im.liveInRepo >= MAX_LIVE_PER_REPO) return { wait: system("implement-room", `${im.liveInRepo} implementations already running in ${f.repo}`) };
     return due("plan");
   }
   if (state === "planning") return due("plan");
   if (state === "asked") {
     if (row!.textChanged || row!.newCommentAfterQuestion || row!.decisionAnswered) return due("plan");
-    return row!.asked === "author" ? { wait: "the author's answer", waitKind: "contributor" } : { wait: "a maintainer's answer", waitKind: "person" };
+    return { wait: row!.asked === "author" ? { code: "implement-question", who: "contributor", text: "the author's answer" } : person("implement-question", "a maintainer's answer") };
   }
   if (BUILD_STATES.has(state!)) return due("build");
   if (state === "revising") return due("revise");
-  if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: "a maintainer's answer on the stuck implementation", waitKind: "person" };
+  if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: person("implement-stuck", "a maintainer's answer on the stuck implementation") };
   // pr-opened: the open PR is the wait (openPr); a PR that merged or closed while the issue stayed open ends the attempt with
   // it (the revise work records that and ends the workspace). Its revisions, and the end of an attempt whose issue is closed
   // too, are planned on the PR (decidePr).
-  // Ending the attempt is bookkeeping: it needs neither the Implement feature nor the approval (gates()).
+  // Ending the attempt is bookkeeping: it needs neither the Implement feature nor a person's command (gatePermission).
   return row!.prOpen ? null : { bucket: "revise" };
 }
 
@@ -56,9 +61,10 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
  */
 const labelDisagreement = ({ classification: c }: ItemFacts): boolean => c.status === "disagree" && !(isScope(c.jevLabel) && isScope(c.haikuLabel));
 
-/** An issue's wait on the open PR that closes it or mentions it. The plan stores only this text, so liveness recognises the wait with `isOpenPrWait`. */
-export const openPrWait = (n: number, closes: boolean): string => `open PR #${n}${closes ? "" : " mentions it"}`;
-export const isOpenPrWait = (wait: string | null): boolean => wait !== null && /^open PR #\d+( mentions it)?$/.test(wait);
+/** An issue's wait on the open PR that closes it. */
+export const openPrWait = (n: number): string => `open PR #${n}`;
+/** The same wait of a queued issue: its implementation starts once someone merged, closed or took up that PR. */
+export const answerPrWait = (n: number): string => `open PR #${n}, which closes it: answer that pull request`;
 
 /** The wait of an open issue with nothing due and nothing to ask: it stays open as a request for anyone to pick up. */
 export const TRIAGE_WAIT = "an open request for a person to pick up";
@@ -76,9 +82,9 @@ export function itemState(f: ItemFacts): ItemState {
   return "classified";
 }
 
-const WAITS: Partial<Record<ItemState, string>> = {
-  "held-backlog": "a Backlog hold", "referee-due": "the label referee",
-  "waiting-haiku": "Haiku's second opinion",
+const WAITS: Partial<Record<ItemState, Wait>> = {
+  "held-backlog": system("ended", "a Backlog hold"), "referee-due": system("triage", "the label referee"),
+  "waiting-haiku": system("triage", "Haiku's second opinion"),
 };
 
 /** The item has no priority row at its current text hash; the prioritize step asks it unless a classify request does. */
@@ -133,16 +139,17 @@ export function decideItem(f: ItemFacts): ItemPlan {
 
   // A closed item is here for its close only.
   if (!f.open) actions.splice(0, actions.length, ...actions.filter((a) => a.kind === "act"));
-  const base = actions.some(isWork) ? null : !f.inScope ? "not in scope" : state === "classified" && pluginPr(f) ? PLUGIN_WAIT : WAITS[state] ?? null;
-  // An issue with nothing else due waits on the PR that closes it.
-  let wait = base, waitKind: ItemPlan["waitKind"] = base === null ? null : "system";
+  const due = permitted(f, actions);
+  const idle = !due.some((a) => isWork(a) && (a.permission?.ok || !TELLS.has(a.kind)));
+  let wait: Wait | null = !idle ? null : !f.inScope ? system("scope", "not in scope") : state === "classified" && pluginPr(f) ? system("open-request", PLUGIN_WAIT) : WAITS[state] ?? null;
   // A queued issue waits on what holds its implementation.
-  if (step && "wait" in step && f.open && actions.every((x) => !isWork(x))) { wait = step.wait; waitKind = step.waitKind; }
-  if (wait === null && f.kind === "issue" && f.open && f.inScope && !f.held && actions.every((x) => !isWork(x))) {
-    if (f.openPr !== null) { wait = openPrWait(f.openPr.number, f.openPr.closes); waitKind = "system"; }
-    else if (state === "classified") { wait = TRIAGE_WAIT; waitKind = "system"; }
+  if (step && "wait" in step && f.open && idle) wait = step.wait;
+  // An issue with nothing else due waits on the PR that closes it.
+  if (wait === null && f.kind === "issue" && f.open && f.inScope && !f.held && idle) {
+    if (f.openPr?.closes) wait = system("open-pr", openPrWait(f.openPr.number));
+    else if (state === "classified") wait = system("open-request", TRIAGE_WAIT);
   }
-  return { repo: f.repo, number: f.number, kind: f.kind, state, actions, wait, waitKind };
+  return { repo: f.repo, number: f.number, kind: f.kind, state, actions: due, ...waitFields(wait ?? refusedWait(due)) };
 }
 
 /** The Work page's next-step text (rank/next.ts nextStepOf), from the item's state and, for a PR, the facts of its review-to-merge path. */

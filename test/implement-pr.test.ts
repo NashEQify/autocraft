@@ -13,6 +13,7 @@ import { openImplementationPr } from "../src/implement/pr.ts";
 import { implementationById, setImplementationState, startImplementation } from "./implement-rows.ts";
 import type { Implementation } from "../src/implement/types.ts";
 import { insertWorkflow } from "../src/workflow/store.ts";
+import { listWorkflows, loadLinks } from "../src/data/workflow/index.ts";
 import { setFeature } from "../src/build/features.ts";
 import { exec as realExec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { ghOpenPr, pushOwnBranch } from "../src/github/write.ts";
@@ -213,6 +214,8 @@ test("opening an implementation's PR survives reruns: the stored branch is reuse
   assert.equal(gh.creates, 1, "no second PR");
   assert.equal(gh.comments, 1);
   assert.equal((await implementationById(db, started.id))!.state, "pr-opened");
+  assert.deepEqual((await loadLinks(db, { issues: [{ repo: "app", number: 5 }] })).map((l) => l.pr), [again.number], "the issue's workflow is linked to the PR");
+  assert.equal((await listWorkflows(db, { live: true }))[0]!.prNumber, again.number);
 
   // A run that stopped after the PR was stored adopts the stored PR, at the commit this implementation pushed.
   await setImplementationState(db, started.id, "opening");

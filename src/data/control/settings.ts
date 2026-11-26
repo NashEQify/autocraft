@@ -84,6 +84,8 @@ export const SETTINGS = {
   }),
   prBuildsPerDay: reg("pr_builds_per_day", "int", 10, { owner: "build", shown: false }, (r) => intIn(r, 0, Infinity, 10)),
   postmergeSince: reg("postmerge_since", "text", "9999", { owner: "review" }, (r) => r ?? "9999"),
+  /** Merges outside the pipeline's scope (the repo's switch is off and the work on the item ended with the merge) are reviewed from this time on. */
+  postmergeUnscopedSince: reg("postmerge_unscoped_since", "text", "9999", { owner: "review" }, (r) => r ?? "9999"),
   discordIssueDailyUsd: reg("discord_issue_daily_usd", "float", 2, { owner: "discord" }, (r) => { const v = Number(r); return Number.isFinite(v) && v >= 0 ? v : 2; }),
   discordSignalDailyUsd: reg("discord_signal_daily_usd", "float", 1, { owner: "discord" }, (r) => { const v = Number(r); return Number.isFinite(v) && v >= 0 ? v : 1; }),
   /** The raw reaction emoji; the Discord module checks it and applies its default. */

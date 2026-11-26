@@ -9,6 +9,7 @@ import { type FixupDeps } from "../src/fixup/index.ts";
 import type { Querier } from "../src/mirror.ts";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { type PremergeDeps } from "../src/premerge/review.ts";
+import { appLane } from "./acting.ts";
 import { CHECK, T1, tmpdir, world, type World } from "./world-db.ts";
 
 process.env.AUTOCRAFT_DIFF_CACHE = join(tmpdir("diffs"), "cache");
@@ -104,6 +105,7 @@ export function gitWorld(n: number, lib = "fn a() {}\nfn main() { a(); }\n", con
         fetchDiff: async () => ({ ok: true, text: "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+fn a() {}\n" }),
         ask: async () => patch,
         check: async () => JSON.stringify({ verdict: "approve", reasons: "matches the listed fix", problems: [] }),
+        lane: appLane(querier),
       };
     },
     /** The CI fix step's deps: the failed check's log names src/lib.rs. */

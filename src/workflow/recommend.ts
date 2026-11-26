@@ -6,6 +6,7 @@
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
 import { byHand, type ConflictPath } from "../core/decide.ts";
+import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, UNSURE_REASON } from "../core/rules.ts";
 import { asSentence } from "../prose.ts";
 import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
@@ -27,8 +28,8 @@ export function planOf(fixes: readonly ReviewFix[], before: readonly PlanPart[])
 
 export type ReviewView = { verdict: string; sure: boolean; rec: ReviewRecommendation | null };
 
-const planned = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "planned").map((p) => p.n);
-const droppedOf = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "dropped").map((p) => p.n);
+export const planned = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "planned").map((p) => p.n);
+export const droppedOf = (plan: readonly PlanPart[]): number[] => plan.filter((p) => p.state === "dropped").map((p) => p.n);
 
 /** "Fix 1 and 2, then merge." / "Fix 1, then come back." */
 const fixText = (fix: readonly number[], merges: boolean): string => (merges
@@ -36,11 +37,21 @@ const fixText = (fix: readonly number[], merges: boolean): string => (merges
   : t("Fix {parts}, then come back with the result.", { parts: listText(fix) }));
 
 /** The sentence for what a yes runs, when the review's own sentence does not say it. */
-function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; again?: "review" | "fixup" }): string {
+export function textFor(r: { fix: readonly number[]; merges: boolean; close?: boolean; again?: "review" | "fixup" }): string {
   if (r.close) return t("Close it, as the review recommends.");
   if (r.fix.length) return fixText(r.fix, r.merges);
   if (r.again === "review") return r.merges ? t("Review it again, then merge.") : t("Review it again, then come back with the result.");
   return r.merges ? t("Merge it.") : t("Review it again, then come back with the result.");
+}
+
+/** The planned parts of the review's fixes that nobody makes, dropped: the merge goes on without them. */
+export function without(parts: readonly number[], protectedFiles: boolean): Recommendation {
+  const vars = { parts: listText(parts) };
+  return {
+    text: protectedFiles ? t("The review asks for changes to files AutoCraft may not touch. Drop {parts}, then merge.", vars)
+      : t("The review asks for fixes that AutoCraft's fix-up cannot make and nobody else is asked for. Drop {parts}, then merge.", vars),
+    parts: { fix: [], drop: [...parts] }, merges: true,
+  };
 }
 
 const STOPS = {
@@ -129,7 +140,7 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
     return go(t("Review it again, then merge."), { again: "review" });
   }
   switch (found.blocker) {
-    case "author-commits": return go(t("Review the new commits, then merge."), mergeEntry ? { again: "review" } : {});
+    case "author-commits": return go(t("Review the new commits, then merge."), { newCommits: true, ...(mergeEntry ? { again: "review" } : {}) });
     case "failed-twice": {
       if (p.step === "fix-up") {
         const fix = planned(plan);
@@ -137,7 +148,8 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       }
       return go(t("Review it again with the failing checks, then merge."), { again: "review" });
     }
-    case "large-fix": return go(t("Keep the fix of {lines} lines, then merge.", { lines: Number(p.lines ?? 0) }));
+    // The fix-up a leg stopped at pushed nothing.
+    case "large-fix": return p.lines === undefined ? afterStop(String(p.reason ?? ""), go) : go(t("Keep the fix of {lines} lines, then merge.", { lines: Number(p.lines ?? 0) }));
     case "beyond-agreed": return go(t("Keep the changes to {files}, then merge.", { files: listText((p.files as string[] | undefined) ?? []) }));
     case "outside-purpose":
     case "major-finding": {
@@ -147,9 +159,30 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       return found.blocker === "outside-purpose" ? go(t("Keep the {lines} lines outside the purpose, then merge.", { lines: Number(p.lines ?? 0) })) : go(t("Merge it as it is."));
     }
     case "other": {
-      const reason = String(p.reason ?? "");
-      if (!reason) return go(t("Go on with the merge."));
-      return go(t("Go on with the merge after this stop: {reason}", { reason: asSentence(reason) }));
+      return afterStop(String(p.reason ?? ""), go);
     }
   }
+}
+
+const afterStop = (reason: string, go: (text: string) => Recommendation): Recommendation =>
+  go(reason ? t("Go on with the merge after this stop: {reason}", { reason: asSentence(reason) }) : t("Go on with the merge."));
+
+/** The merge rule's reasons (core/decide.ts queueEntry) as a person reads them; a reason of its own wording is shown as it is. */
+const RULE_REASONS: readonly (readonly [(r: string) => boolean, () => string])[] = [
+  [(r) => r === UNSURE_REASON, () => t("the review is unsure")],
+  [(r) => r === PREMERGE_DEFECT_REASON, () => t("the pre-merge review found a defect")],
+  [(r) => r === PREMERGE_UNSURE_REASON, () => t("the pre-merge review could not verify a claim of the description")],
+  [(r) => r === PREMERGE_FAILED_REASON, () => t("the pre-merge review failed")],
+  [(r) => r.startsWith("conflicts with "), () => t("it goes against an earlier statement of the owners")],
+  [(r) => r.startsWith("verification failed") || r.startsWith("verification errored"), () => t("verification failed")],
+  [(r) => r.startsWith("the screenshots show"), () => t("the screenshots show a regression")],
+];
+/** Reasons a sentence names at most. */
+const RULE_REASONS_SHOWN = 3;
+
+/** The recommendation of a PR the automatic merge rule took up and stopped: the sentence first says why the rule does not merge it. */
+export function ruleStopped(rec: Recommendation, reasons: readonly string[]): Recommendation {
+  const why = [...new Set(reasons.map((r) => RULE_REASONS.find(([is]) => is(r))?.[1]() ?? r))].slice(0, RULE_REASONS_SHOWN);
+  if (!why.length) return rec;
+  return { ...rec, text: t("The automatic merge rule stops here: {why}. {text}", { why: listText(why), text: rec.text }) };
 }

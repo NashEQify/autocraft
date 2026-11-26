@@ -1,6 +1,7 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
-import { effectiveCiWith, optionalChecksOf } from "../optional-checks.ts";
+import { ciAt } from "../core/evidence.ts";
+import { optionalChecksOf } from "../optional-checks.ts";
 import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, activeFrom, hasOpenQuestion, loadBlockerReads, type BlockerReads } from "./blockers.ts";
 import { MAX_RERUNS_PER_DAY, maintainerSince, discussionStateOf, nextUtcMidnight, staleMarksOf } from "./discussion.ts";
 import { ourPathIn } from "./ours.ts";
@@ -9,6 +10,7 @@ import type { KeySource } from "../data/keys.ts";
 import { loadPushEdges, type PushEdge } from "../data/changes/index.ts";
 import { saveSettings, setting } from "../data/control/index.ts";
 import { loadReviewRunCounts } from "../data/inference/index.ts";
+import { loadRunApprovals } from "../data/merge/index.ts";
 import { loadChecks } from "../data/mirror/index.ts";
 import { loadReviewFacts, recordReviewFailures, type ReviewFacts } from "../data/review/index.ts";
 import { loadLegs } from "../data/workflow/index.ts";
@@ -48,15 +50,6 @@ export async function recordReviewFailure(db: Db, repo: string, number: number, 
 /** `until`: when a timed wait ends (ms), so the planner wakes then. `red`: a ci hold whose head's CI has failed (not still running). */
 export type ReviewHold = { kind: "blocked" | "ci" | "cap" | "interval" | "failed"; wait: string; until?: number; red?: boolean; /** A blocker has an open question: the wait is on a person. */ person?: boolean };
 
-/** CI at the PR's head as the review gate reads it: "ok" (passed, or no checks and none pending), "pending", "failure", or "unknown" when the stored checks describe another head. */
-export async function headCi(db: Db, repo: string, number: number, head: string): Promise<"ok" | "pending" | "failure" | "unknown"> {
-  const [checks, optional] = await Promise.all([loadChecks(db, [{ repo, number }]), optionalChecksOf(db)]);
-  const c = checks.get(`${repo}#${number}`);
-  if (!c || c.head_oid !== head) return "unknown";
-  const o = effectiveCiWith(optional(repo), c.overall, c.checks);
-  return o === "pending" ? "pending" : o === "failure" ? "failure" : "ok";
-}
-
 export { nextUtcMidnight };
 
 /** What the hold check of a set of PRs reads besides their review facts: one wave. */
@@ -76,6 +69,8 @@ export type HoldInputs = Awaited<ReturnType<typeof loadHoldInputs>> & {
   reads: BlockerReads;
   /** The pushes of ours to each PR, by "repo#number". */
   edges: ReadonlyMap<string, readonly PushEdge[]>;
+  /** The run approvals at each head, by "repo#number@head". */
+  approvals: ReadonlyMap<string, { approved: readonly number[] }>;
 };
 
 export type HoldCheck = (repo: string, number: number, head: string, refresh?: (at: number) => void) => Promise<ReviewHold | null>;
@@ -83,11 +78,11 @@ export type HoldCheck = (repo: string, number: number, head: string, refresh?: (
 /** The hold check of `refs` ("repo#number"; every PR without them), with what it reads loaded once. */
 export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Iterable<string>): Promise<HoldCheck> {
   const keys: KeySource = refs ? [...refs].map((r) => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) })) : { mode: "full" };
-  const [facts, inputs, interval, optional, edges] = await db.together(() => Promise.all([
-    loadReviewFacts(db, keys, { now: nowMs }), loadHoldInputs(db, keys, nowMs), reviewMinInterval(db), optionalChecksOf(db), loadPushEdges(db, keys),
+  const [facts, inputs, interval, optional, edges, approvals] = await db.together(() => Promise.all([
+    loadReviewFacts(db, keys, { now: nowMs }), loadHoldInputs(db, keys, nowMs), reviewMinInterval(db), optionalChecksOf(db), loadPushEdges(db, keys), loadRunApprovals(db, keys),
   ]));
   const reads = await loadBlockerReads(db, [...facts.latest.values()].filter((r) => r.verdict === "hold").flatMap((r) => r.blocked_by));
-  return holdsFrom({ ...inputs, facts, interval, optional, reads, edges }, nowMs);
+  return holdsFrom({ ...inputs, facts, interval, optional, reads, edges, approvals }, nowMs);
 }
 
 /**
@@ -107,13 +102,6 @@ export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
   // A "Queue items" row at the head it started on (no fix-up, no push since) asks for no review of its own: CI, the cap and the interval hold it as any PR.
   const preapproved = new Set([...legs.values()].flat().filter((p) => p.state === "review" && (p.fix_id !== null || p.head !== p.from_head) && p.head !== null).map((p) => `${p.repo}#${p.number}@${p.head}`));
   const states = discussionStateOf(facts);
-  // CI at the head as headCi() reads it.
-  const ciAt = async (repo: string, number: number, head: string): Promise<"ok" | "pending" | "failure" | "unknown"> => {
-    const c = checks.get(`${repo}#${number}`);
-    if (!c || c.head_oid !== head) return "unknown";
-    const o = effectiveCiWith(optional(repo), c.overall, c.checks);
-    return o === "pending" ? "pending" : o === "failure" ? "failure" : "ok";
-  };
   return async (repo, number, head, refresh) => {
     const ref = `${repo}#${number}`;
     const last = lastReviews.get(ref);
@@ -145,7 +133,7 @@ export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
       }
       settled = true;
     }
-    const ci = await ciAt(repo, number, head);
+    const ci = ciAt(checks.get(ref), head, { optional: optional(repo), approvedRuns: d.approvals.get(`${ref}@${head}`)?.approved.length ?? 0 });
     if (ci === "pending") return { kind: "ci", wait: "CI on the latest commit to finish" };
     if (ci === "failure" && last && !settled) return { kind: "ci", wait: "CI on the latest commit to pass", red: true };
     const ours = last && last.head !== head ? ourPathIn(d.edges.get(ref) ?? [], last.head, head) : null;

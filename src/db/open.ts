@@ -83,6 +83,8 @@ export interface ConnectOptions {
   migrate?: boolean;
   /** Postgres: how long a transaction may sit idle before the server ends its session (default 10 s). */
   idleInTransactionMs?: number;
+  /** Postgres: longest a statement may run (default 120 s); a connection waits this long plus a margin for an answer. */
+  statementTimeoutMs?: number;
   /**
    * Postgres: write statements outside a transaction run under their row locks only, not as a transaction under the writer
    * lock, so they never wait for another process's long write; a row-lock wait still ends after busyTimeoutMs. For a
@@ -101,7 +103,7 @@ export async function connectDb(target: string = dbTarget(), opts: ConnectOption
   if (redirect && !isPgUrl(target)) target = await redirect(target);
   if (!isPgUrl(target)) return dbFor(connect(target, opts));
   const [k, pg] = await Promise.all([loadKysely(), loadPg()]);
-  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? dbRole(), busyTimeoutMs: opts.busyTimeoutMs, idleInTransactionMs: opts.idleInTransactionMs, rowWrites: opts.rowWrites }, ctx));
+  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? dbRole(), busyTimeoutMs: opts.busyTimeoutMs, idleInTransactionMs: opts.idleInTransactionMs, statementTimeoutMs: opts.statementTimeoutMs, rowWrites: opts.rowWrites }, ctx));
   if (opts.migrate === false) return db;
   try {
     // A current database costs two reads on the pool; only a stale one opens a connection of its own for the migration, and

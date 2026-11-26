@@ -10,9 +10,12 @@ import { loadOpenPrLinks } from "../../data/mirror/index.ts";
 import { featureOn } from "../../build/features.ts";
 import { ownerOf } from "../../owners.ts";
 import type { Exec } from "../../fixup/git.ts";
-import { ControlError, holdMerge, releaseMerge, removeFromBatch, stopBatch } from "../../merge/controls.ts";
+import { ControlError } from "../../merge/controls.ts";
+import { holdBatched, stopBatch } from "../../workflow/batch.ts";
+import { actorOf } from "./commands.ts";
 import { loadBatches } from "../../data/merge/index.ts";
 import type { Preapproval } from "../../data/workflow/index.ts";
+import { NO_WORKFLOW_SCORE } from "../../core/work-score.ts";
 import { mergeOrder, queueSlots } from "../../rank/position.ts";
 import { classifyListOf, NOT_PLANNED } from "../../rank/next.ts";
 import { HttpError } from "../server/util.ts";
@@ -47,17 +50,16 @@ const WAITS: Record<string, [MergeWait, string, number]> = {
   "waiting-verify": ["verify", "Waiting for Verify", 2],
   "waiting-premerge": ["premerge", "Waiting for the pre-merge review", 2],
 };
-const HELD: [MergeWait, string, number] = ["held", "Merge held by an operator", 9];
 
-/** What merges next and what each PR waits for, from the queue states (src/merge/queue.ts). By weight, then by what it waits for; held last. */
+/** What merges next and what each PR waits for, from the queue states (src/merge/queue.ts). By weight, then by what it waits for. */
 export function nextMerges(entries: CachedEntry[], places: Map<string, WeightPlace>, batchOf: Map<string, { id: number; branch: string }>, scores: Map<string, number>): NextMerge[] {
   const items = entries.flatMap((e) => {
-    const w = e.held && e.state in WAITS ? HELD : e.state === "ci-approval" && e.runsBlocked ? WAITS[e.state]!.map((x, k) => (k === 1 ? "CI runs need a person to approve" : x)) as [MergeWait, string, number] : WAITS[e.state];
+    const w = e.state === "ci-approval" && e.runsBlocked ? WAITS[e.state]!.map((x, k) => (k === 1 ? "CI runs need a person to approve" : x)) as [MergeWait, string, number] : WAITS[e.state];
     return w ? [{ e, w }] : [];
   });
   items.sort((a, b) => {
     const fa = places.get(`${a.e.repo}#${a.e.number}`)?.position ?? Infinity, fb = places.get(`${b.e.repo}#${b.e.number}`)?.position ?? Infinity;
-    return (a.w[2] === 9 ? 1 : 0) - (b.w[2] === 9 ? 1 : 0) || fa - fb || a.w[2] - b.w[2]
+    return fa - fb || a.w[2] - b.w[2]
       || (scores.get(`${b.e.repo}#${b.e.number}`) ?? -1) - (scores.get(`${a.e.repo}#${a.e.number}`) ?? -1) || a.e.repo.localeCompare(b.e.repo) || a.e.number - b.e.number;
   });
   return items.slice(0, NEXT_LIMIT).map(({ e, w }) => ({
@@ -113,7 +115,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     }),
     queueSlots(db, visible),
   ]));
-  const { scope: scoped, holds: held, closes: closesOf, positions } = facts;
+  const { scope: scoped, closes: closesOf, positions } = facts;
   const allEntries = facts.entries;
   const places = new Map<string, WeightPlace>([...positions].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))).map(([k, p]) => [k, { position: p.position, of: p.of, weight: p.weight }]));
   const inScope = (repo: string, number: number): boolean =>
@@ -123,11 +125,11 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const entries = allEntries.filter((e) => e.state !== "merged" && visibleSet.has(e.repo) && inScope(e.repo, e.number));
   const originOf = queueOriginOf(facts, internals);
   const builds = tab === "merge" ? await prBuildsOf(db, entries, internals) : new Map<string, ItemPrBuild>();
-  const asRow = (e: CachedEntry): QueueMergeRow => ({ ...toRow(e, reader), place: places.get(refText(e)) ?? null, held: e.held, prBuild: builds.get(refText(e)) ?? null, closes: closesOf.get(refText(e)) ?? [], added: originOf(e) });
+  const asRow = (e: CachedEntry): QueueMergeRow => ({ ...toRow(e, reader), place: places.get(refText(e)) ?? null, prBuild: builds.get(refText(e)) ?? null, closes: closesOf.get(refText(e)) ?? [], added: originOf(e) });
   // Tabs come from the stored next step; the text is veiled afterwards, so a quiet pull request stays in its tab.
   const inTab = (next: string | null, t: QueueTab): boolean => t === "all" || tabOfNext(next ?? NOT_PLANNED) === t;
   const veilNext = (w: QueueWorkRow): QueueWorkRow => (veiledFor(reader, w.repo, w.number) ? { ...w, next: "" } : w);
-  const pending = pendingRows(facts, entries, inScope, originOf, held);
+  const pending = pendingRows(facts, entries, inScope, originOf);
   const total = (t: QueueTab): number => facts.work.steps.reduce((n, s) => (inTab(s.next, t) ? n + s.count : n), 0);
   const count = (t: QueueTab): number => (t === "merge" ? entries.length + pending.length : total(t));
   const counts = { all: count("all"), review: count("review"), fix: count("fix"), verify: count("verify"), merge: count("merge") };
@@ -139,14 +141,14 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     out.rows = facts.work.rows.filter((r) => inTab(r.next, tab)).slice(offset, offset + sizeFor(out.itemIndex)).map((r): QueueWorkRow => veilNext({
       repo: r.repo, number: r.number, kind: r.kind, title: r.title, score: r.score, level: r.breakdown.level, size: r.breakdown.size, breakdown: r.breakdown,
       label: r.label as TypeLabel | null, next: r.next ?? NOT_PLANNED, nextHref: r.itemState === "referee-due" ? classifyListOf(r.repo) : null,
-      queue: slots.get(refText(r)) ?? null, held: held.has(refText(r)),
+      queue: slots.get(refText(r)) ?? null,
     }));
     out.total = total(tab);
     out.next = offset + out.rows.length < out.total ? offset + out.rows.length : null;
     return out;
   }
   const rows = entries.map((e) => [e, asRow(e)] as const);
-  const ordered = mergeOrder(entries, (e) => facts.workScores.get(refText(e)) ?? facts.scores.get(refText(e)) ?? 0);
+  const ordered = mergeOrder(entries, (e) => facts.workScores.get(refText(e)) ?? facts.scores.get(refText(e)) ?? NO_WORKFLOW_SCORE);
   const active = facts.batches.filter((b) => (b.state === "checking" || b.state === "open") && b.members.some((p) => inScope(b.repo, p.number)));
   const rowOfEntry = new Map(rows);
   const rowOf = new Map(rows.map(([e, r]) => [`${e.repo}#${e.number}`, r]));
@@ -169,7 +171,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
  * the fix-up or the review first. `entries` are the queue rows the view shows and `want` is the view's scope, so a PR is in exactly one
  * group. Oldest first.
  */
-function pendingRows(f: QueuePageFacts, entries: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "reviewedAt">) => QueueOrigin, held: Set<string>): QueuePendingRow[] {
+function pendingRows(f: QueuePageFacts, entries: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "reviewedAt">) => QueueOrigin): QueuePendingRow[] {
   const queued = new Set(entries.map((e) => `${e.repo}#${e.number}`));
   const seen = new Set<string>();
   const out: QueuePendingRow[] = [];
@@ -181,7 +183,7 @@ function pendingRows(f: QueuePageFacts, entries: CachedEntry[], want: (repo: str
     seen.add(k);
     out.push({
       repo: p.repo, number: p.number, kind: "pr", title: it.title ?? "", author: it.author ?? "", size: f.ranks.get(k)?.breakdown.size ?? null, step: p.state,
-      held: held.has(k), added: originOf({ repo: p.repo, number: p.number, reviewedAt: "" }),
+      added: originOf({ repo: p.repo, number: p.number, reviewedAt: "" }),
     });
   }
   return out;
@@ -257,20 +259,11 @@ function closingIndex(links: Awaited<ReturnType<typeof loadOpenPrLinks>>): Map<s
   return out;
 }
 
-export async function mergeHoldPr(db: Db, req: Req, on: boolean): Promise<{ ok: true }> {
+export async function batchRemovePr(db: Db, req: Req, run?: Exec): Promise<{ batch: string; line: string }> {
   const r = item(req);
   await needVisible(db, req, r.repo);
   await needRunner(req, r.repo);
-  const changed = await guarded(async () => (on ? await holdMerge(db, req.user.login, r.repo, r.number) : await releaseMerge(db, req.user.login, r.repo, r.number)));
-  if (!changed) throw new HttpError(409, `${r.repo}#${r.number} is ${on ? "already" : "not"} held`);
-  return { ok: true };
-}
-
-export async function batchRemovePr(db: Db, req: Req, run?: Exec): Promise<{ batch: string; closed: number | null }> {
-  const r = item(req);
-  await needVisible(db, req, r.repo);
-  await needRunner(req, r.repo);
-  return guarded(async () => removeFromBatch(db, req.user.login, r.repo, r.number, run));
+  return guarded(async () => holdBatched(db, actorOf(req), "dashboard", r.repo, r.number, run));
 }
 
 export async function batchStop(db: Db, req: Req, run?: Exec): Promise<{ batch: string; prs: number[]; held: number[]; closed: number | null }> {
@@ -279,5 +272,5 @@ export async function batchStop(db: Db, req: Req, run?: Exec): Promise<{ batch: 
   if (!repo) throw new HttpError(404, `no batch ${req.params.id}`);
   await needVisible(db, req, repo);
   await needRunner(req, repo);
-  return guarded(async () => stopBatch(db, req.user.login, id, run));
+  return guarded(async () => stopBatch(db, actorOf(req), "dashboard", id, run));
 }

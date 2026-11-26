@@ -10,9 +10,9 @@ type Override = { [K in keyof PrFacts]?: PrFacts[K] extends object | null ? Part
 const base = (): Omit<PrFacts, "may"> => ({
   repo: "app", number: 1, assignment: { login: "bot", assignees: ["dev"], ours: false }, now: NOW, pipelineOn: true, ghState: "OPEN", head: HEAD, draft: false,
   author: "dev", authorIsPipeline: false, tier: "whitelisted", lines: 20, size: "S", label: "bugfix", needsDecisionFlag: false,
-  inScope: true, integration: false, batchPr: false, heldBacklog: false, mergeHeld: false, score: 100,
+  inScope: true, integration: false, batchPr: false, heldBacklog: false, score: 100,
   repoFacts: { commentApproved: true, ciApproved: true, noCi: false, mainRed: false, implementOn: true },
-  review: { head: HEAD, at: REVIEW_AT, verdict: "take", unsure: false, mode: "full", reason: "ok", fixes: 0, stale: false, staleActionable: false },
+  review: { head: HEAD, at: REVIEW_AT, verdict: "take", unsure: false, reason: "ok", fixes: 0, stale: false, staleActionable: false },
   post: { postable: true, posted: { head: HEAD, at: "2026-11-04T10:01:00.000Z", opusAt: REVIEW_AT } },
   checksHere: true, checksOpen: true, ci: "success", mergeable: "MERGEABLE", unknown: null, runs: null,
   lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false,
@@ -20,7 +20,7 @@ const base = (): Omit<PrFacts, "may"> => ({
   handOver: false, mergeWaiting: false,
   workflow: { entry: "review", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true },
   premerge: { at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, defectsAllFixable: true, fixesSafe: true, minor: 0, error: null },
-  premergeFixUsed: false, sensitive: [], statementConflicts: [], pushable: true, pushChain: [HEAD], conflict: null, inActiveBatch: false, fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
+  premergeFixUsed: false, sensitive: [], statementConflicts: [], pushable: true, pushChain: [HEAD], conflict: null, inActiveBatch: false, fixup: null, lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, changesRequested: null, gateFailureNote: null,
 });
 
 const REPO_APPROVAL = { by: "op", at: "2026-11-01T00:00:00.000Z" };
@@ -32,7 +32,7 @@ function mayOf(f: Omit<PrFacts, "may">): PrFacts["may"] {
     repoMerge: REPO_APPROVAL, repoPush: REPO_APPROVAL, ended: f.endedWorkflow ?? null, pushes: [], ownHead: false, fixupBy: f.operator?.fix ? "maint" : null,
     workflow: w ? {
       live: true, entry: w.entry === "fixup" ? "fix-up" : w.entry, state: "running", startedBy: w.startedBy, approvedBy: w.approved ? w.startedBy : null,
-      approvedAt: w.approved ? w.startedAt : null, blocker: null, baseHead: f.head, fixupAsked: !!f.operator?.fix,
+      approvedAt: w.approved ? w.startedAt : null, blocker: null, baseHead: f.head,
       leg: f.handOver ? { state: "queued", head: f.head } : f.operator?.hold ? { state: "ci", head: f.head } : null,
     } : null,
   };
@@ -52,7 +52,7 @@ export function prFacts(over: Override = {}): PrFacts {
 
 const itemBase = (): ItemFacts => ({
   repo: "app", number: 1, kind: "issue", open: true, assignment: { login: "bot", assignees: ["dev"], ours: false }, now: NOW, pipelineOn: true, draft: false, inScope: true, integration: false, held: null, score: 100,
-  repoFacts: { labelsApproved: true, commentApproved: true, fixIssueApproved: true }, run: "run1",
+  repoFacts: { labelsApproved: true, commentApproved: true }, run: "run1",
   classification: {
     status: "settled", label: "bugfix", flags: [], jevLabel: "bugfix", haikuLabel: null, referee: null,
     jev: { at: "2026-11-04T08:00:00.000Z", changed: false, unsure: false }, haiku: null,

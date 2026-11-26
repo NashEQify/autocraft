@@ -34,7 +34,7 @@ const inDupeSet = (a: string): string =>
 const changed = (cols: string[]): string => cols.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ");
 
 /**
- * Item columns that change other PRs' facts: stacked PRs (head_ref, head_repo), long-lived branches (base_ref, author_association),
+ * Item columns that change other PRs' facts: long-lived branches (head_ref, head_repo, base_ref, author_association),
  * authors' tiers (state). A PR's text and closing links move issues' open PR, which the PR_REFS input logs by issue.
  */
 const PR_CROSS_COLUMNS = ["state", "head_ref", "head_repo", "base_ref", "author_association"];
@@ -116,7 +116,10 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "item_priority", class: "item", why: "One item's priority row." },
     { table: "item_rank", class: "item", why: "One item's rank score." },
     { table: "item_stage", class: "item", why: "One item's stage row." },
-    { table: "merge_holds", class: "item", why: "An operator's merge hold on one PR." },
+    {
+      table: "screenshot_runs", class: "item", why: "The screenshots at one PR head: a clear regression keeps it from merging until a person answers.", columns: ["head_sha", "held", "comparison", "finished_at"],
+      noTopic: "Written by the collect job (job-ends).",
+    },
     { table: "merges", class: "item", why: "Merge attempts of one PR." },
     { table: "operator_fixups", class: "item", why: "An operator's fix-up request on one PR." },
     {
@@ -243,9 +246,9 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     },
     {
       // Commands move a workflow at human pace; its recommendation and plan parts are not planner facts.
-      table: "item_workflows", class: "cross", why: "A maintainer workflow: its item's entry, weight and what the merge rule reads (approval, base head, blocker), the PR of an issue's implement workflow, PRs held for it as a blocking item (its state says whether a person is asked), and, when it starts or ends, the item's scope (duplicate sets, integration PRs).",
-      columns: ["repo", "number", "entry", "state", "weight", "approved_by", "approved_at", "base_head", "blocker", "started_by", "started_at", "review_asked_at"],
-      refs: `SELECT r.repo AS repo, r.number AS number UNION SELECT wi.repo, wi.pr_number FROM implementations wi WHERE wi.repo = r.repo AND wi.number = r.number AND wi.pr_number IS NOT NULL UNION ${blockedBy("r.repo", "r.number")}`,
+      table: "item_workflows", class: "cross", why: "A maintainer workflow: its item's entry, weight and what the merge rule reads (approval, base and accepted head, blocker), the PR of an issue's implement workflow, PRs held for it as a blocking item (its state says whether a person is asked), and, when it starts or ends, the item's scope (duplicate sets, integration PRs).",
+      columns: ["repo", "number", "entry", "state", "weight", "approved_by", "approved_at", "base_head", "accepted_head", "blocker", "started_by", "started_at", "pr_number", "review_asked_at"],
+      refs: `SELECT r.repo AS repo, r.number AS number UNION SELECT r.repo, r.pr_number WHERE r.pr_number IS NOT NULL UNION SELECT wi.repo, wi.pr_number FROM implementations wi WHERE wi.repo = r.repo AND wi.number = r.number AND wi.pr_number IS NOT NULL UNION ${blockedBy("r.repo", "r.number")}`,
       full: `r.state IN ${WF_LIVE}`,
       fullUpdate: `(old.state IN ${WF_LIVE}) IS NOT (new.state IN ${WF_LIVE})`,
     },

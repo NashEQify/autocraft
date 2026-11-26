@@ -30,7 +30,7 @@ import { ghExec, type Gh } from "../merge/safe-merge.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { cleanLine } from "../review/post-template.ts";
 import { scrub } from "../runner/scrub.ts";
-import { mainFixApprovalOf, mainFixApprovals } from "./approval.ts";
+import { approvedRepos, repoApproved } from "../core/repo-approvals.ts";
 import { lintReadyIn, openFixPrs, type FixPrDeps } from "./pr.ts";
 import { REASON_WORDS, VERDICTS, type MainFixInput, type MainFixVerdict } from "./types.ts";
 import { slugOf } from "../owners.ts";
@@ -39,7 +39,7 @@ import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { filterSeq } from "../async-seq.ts";
 
-export { mainFixApprovalOf, setMainFixApproval } from "./approval.ts";
+export { setMainFixApproval } from "./approval.ts";
 export { autocraftText } from "./status.ts";
 
 export const ACTOR = "main-fix";
@@ -151,8 +151,8 @@ const currentOf = async (db: Db, repo: string): Promise<Current | null> => (awai
 
 /** Those of `repos` where a run of the step has something to do. */
 export async function mainFixDueRepos(db: Db, repos: readonly string[]): Promise<string[]> {
-  const approved = await mainFixApprovals(db, [...repos]);
-  const heads = await currentHeads(db, repos.filter((r) => approved.get(r)));
+  const approved = await approvedRepos(db, repos, "mainfix");
+  const heads = await currentHeads(db, repos.filter((r) => approved.has(r)));
   const facts = await loadMainFixDue(db, [...heads].map(([repo, cur]) => ({ repo, headSha: cur.headSha, running: cur.state === "running" })));
   return await filterSeq([...heads.keys()], async (repo) => {
     const cur = heads.get(repo)!, due = facts.get(`${repo}@${cur.headSha}`)!;
@@ -307,7 +307,7 @@ async function settleReruns(db: Db, repo: string, cur: Current, deps: MainFixDep
 export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n: number) => void; stopping?: () => Promise<boolean>; by?: By }, log: (line: string) => void = console.log, deps: MainFixDeps = defaultDeps()): Promise<MainFixSummary> {
   const { repo } = params;
   const s: MainFixSummary = { repo, classified: 0, reran: 0, needsFix: 0, issues: 0, prs: 0, note: null };
-  if (!await mainFixApprovalOf(db, repo)) {
+  if (!await repoApproved(db, repo, "mainfix")) {
     s.note = `fixing a red main in ${repo} is not approved`;
     log(`main-fix ${repo}: ${s.note}; nothing done`);
     return s;

@@ -1,0 +1,111 @@
+// A PR the automatic merge rule took up and stopped for a person's judgement comes back with a recommendation, like a started item, and
+// whoever answers takes it over; a wait that clears by itself makes no question.
+import assert from "node:assert/strict";
+import { afterEach, test } from "node:test";
+import { decidePr } from "../src/core/decide.ts";
+import { loadPrFact } from "../src/core/facts.ts";
+import { loadStatusInputs } from "../src/data/views/prStatus.ts";
+import { mergeMay } from "../src/core/gates.ts";
+import { writePlanCache } from "../src/core/plan-cache.ts";
+import { advancePreapprovals } from "../src/preapproval/index.ts";
+import { advanceWorkflows } from "../src/workflow/advance.ts";
+import { runCommand, type Actor } from "../src/workflow/apply.ts";
+import { findAutoStops, startAutoStops } from "../src/workflow/auto-stop.ts";
+import { parse } from "../src/workflow/parse.ts";
+import { liveWorkflow } from "../src/workflow/store.ts";
+import { RULE_STARTER } from "../src/workflow/types.ts";
+import { expectFlat } from "./helpers/query-count.ts";
+import { T0, untilQuiet, world, type World } from "./world-db.ts";
+
+let current: World | undefined;
+afterEach(() => current?.close());
+
+const MAINT = "mira";
+const actor: Actor = { login: MAINT, canWrite: async () => true };
+const say = async (w: World, text: string) => (await runCommand(w.db, actor, "dashboard", { parsed: parse(text), items: [{ repo: "app", number: 1 }] })).items[0]!;
+/** Starts what the rule's stops start, after the planner stored their plans. */
+const sweep = async (w: World) => { await writePlanCache(w.db, await w.plan()); await advanceWorkflows(w.db); };
+const states = async (w: World) => (await w.rows("SELECT state FROM item_workflows WHERE number = 1 ORDER BY id")).map((r) => r.state);
+/** PR `n`, a small bug fix on the auto path, stopped at an unsure take whose recommendation is to merge it. */
+async function unsure(w: World, n: number, head?: string): Promise<void> {
+  if (head) await w.synced(n, head);
+  else await w.pr(n);
+  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({
+    repo: "app", number: n, head_oid: head ?? `sha${n}`, run_id: "rv", at: T0, model: "m", mode: "full", verdict: "take", sure: 0, reason: "r",
+    workflow: JSON.stringify({ outside_purpose: null, recommendation: { text: "Merge it.", fix: [], merge: true, close: false } }),
+  }));
+  await (await w.verified(n)).premerge(n, "clean");
+}
+const rows = async (w: World, n: number) => (await w.rows(`SELECT id FROM item_workflows WHERE number = ${n}`)).length;
+
+test("the automatic merge rule's unsure stop asks once, the answer makes the merge the answerer's, and a CI wait asks nothing", async () => {
+  const w = current = await (await (await world()).repo()).acting(MAINT);
+  await w.db.run(w.db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
+  await unsure(w, 1);
+  await (await (await (await w.pr(2, { ci: "pending" })).review(2)).verified(2)).premerge(2, "clean");
+  const stops = async () => (await w.db.seqs())["auto-stops"] ?? 0;
+  const before = await stops();
+  await writePlanCache(w.db, await w.plan());
+  assert.equal((await w.prPlan(1)).waitCode, "answer");
+  assert.ok(await stops() > before, "storing the stop wakes the workflow pass");
+  const stored = await stops();
+  await writePlanCache(w.db, await w.plan());
+  assert.equal(await stops(), stored, "the same plans again wake nothing");
+
+  await advanceWorkflows(w.db);
+  const wf = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([wf.state, wf.startedBy, wf.approvedBy, wf.recHead], ["recommending", RULE_STARTER, null, "sha1"]);
+  assert.match(wf.rec!.text, /^The automatic merge rule stops here: the review is unsure\. Merge it\./);
+  assert.equal(await liveWorkflow(w.db, "app", 2), null, "a CI wait is no question");
+
+  await advanceWorkflows(w.db);
+  assert.equal(await rows(w, 1), 1, "one row per PR");
+
+  assert.equal((await say(w, "yes")).outcome, "run");
+  await untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 8);
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.approvedBy, MAINT);
+  const may = mergeMay((await loadPrFact(w.db, "app", 1))!);
+  assert.ok(may?.ok && may.as === "person" && may.by === MAINT, JSON.stringify(may));
+
+  assert.equal((await say(w, "hold")).outcome, "run");
+  assert.deepEqual(await findAutoStops(w.db), [], "an ended workflow is not started again");
+  await advanceWorkflows(w.db);
+  assert.equal(await rows(w, 1), 1);
+});
+
+test("starting the rule's stops sends as many statements for many PRs as for one", async () => {
+  await expectFlat(async (size) => {
+    const w = await (await world()).repo();
+    for (let n = 1; n <= size; n++) await unsure(w, n);
+    await writePlanCache(w.db, await w.plan());
+    return { db: w.db, run: async () => assert.equal(await startAutoStops(w.db), size), close: async () => w.close() };
+  }, 1, 6);
+});
+
+test("an author push before anyone answers gives the PR back to the rule, which may ask again; with the pipeline off nothing starts", async () => {
+  const w = current = await (await (await world()).repo()).acting(MAINT);
+  await unsure(w, 1);
+  await w.pipeline(false);
+  await sweep(w);
+  assert.deepEqual(await states(w), [], "the pipeline is off");
+  await w.pipeline(true);
+  await sweep(w);
+  assert.deepEqual(await states(w), ["recommending"]);
+  const commented = async () => (await loadStatusInputs(w.db, ["app"])).get("app")!.started.has(1);
+  assert.equal(await commented(), true);
+
+  await w.synced(1, "sha1b");
+  await advanceWorkflows(w.db);
+  assert.deepEqual(await states(w), ["superseded"]);
+  assert.equal(await commented(), false, "its status comment is the rule's again");
+  await (await (await w.review(1, { head: "sha1b" })).verified(1)).premerge(1, "clean");
+  assert.equal(decidePr((await loadPrFact(w.db, "app", 1))!).path, "rule", "a sure take at the new head merges by the rule");
+
+  await unsure(w, 1, "sha1c");
+  await sweep(w);
+  assert.deepEqual(await states(w), ["superseded", "recommending"], "a new stop asks again");
+  assert.equal((await say(w, "hold")).outcome, "run");
+  await w.synced(1, "sha1d");
+  await sweep(w);
+  assert.deepEqual(await states(w), ["superseded", "stopped"], "after a person ended it, the rule asks no more");
+});

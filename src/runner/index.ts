@@ -25,6 +25,7 @@ import { closeDb, openDb, setDbRole } from "../db/open.ts";
 import { elect, LOST_LEADER_EXIT } from "../db/leader.ts";
 import { assertFence, FencedError, isFenced, setFence } from "../db/fence.ts";
 import { dropRetired } from "../db/retired.ts";
+import { holdsToItems } from "../db/holds-to-items.ts";
 import { switchOver } from "../db/switch-over.ts";
 import { inClusterApi } from "../build/kube-api.ts";
 import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
@@ -102,6 +103,8 @@ async function serve(): Promise<void> {
   await switchOver(db, { perDay: DEFAULT_PER_DAY, log: (l) => console.log(`runner: ${l}`) });
   const gone = await dropRetired(db);
   if (gone.length) console.log(`runner: dropped ${gone.join(", ")}`);
+  const held = await holdsToItems(db);
+  if (held) console.log(`runner: ${held} merge holds of an earlier release became held items`);
   const linked = await linkRepeatedFindings(db);
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
   const fixes = await autoFixConfirmed(db);

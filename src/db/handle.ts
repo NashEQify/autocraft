@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Compilable, CompiledQuery, DatabaseConnection, Kysely, OperationNode, OperationNodeSource, SelectQueryNode, TransactionBuilder } from "kysely";
 import type { DatabaseSync } from "node:sqlite";
 import { bytesRead } from "./bytes-read.ts";
-import type { DB, DbEvent, DbStats, Dialect, NamedParams, Param, QueryOpts, Row, RunResult, Statement, Subscription, WriteOptions } from "./index.ts";
+import type { DB, DbEvent, DbStats, Dialect, ListenOptions, NamedParams, Param, QueryOpts, Row, RunResult, Statement, Subscription, WriteOptions } from "./index.ts";
 import type { QueryDb } from "./query-db.ts";
 
 export type Op = "get" | "all" | "run";
@@ -69,7 +69,7 @@ export interface Engine {
 
 /** Notifications from other connections: what `Db.listen` sits on. */
 export interface Listener {
-  listen(channel: string, fn: (payload: string | null) => void): Subscription;
+  listen(channel: string, fn: (payload: string | null) => void, o?: ListenOptions): Subscription;
   close(): Promise<void>;
 }
 
@@ -680,10 +680,10 @@ export class Handle implements QueryDb {
     await this.prepare("SELECT pg_notify(?, ?) AS n").get(channel, payload);
   }
 
-  listen(channel: string, fn: (payload: string | null) => void): Subscription | null {
+  listen(channel: string, fn: (payload: string | null) => void, o?: ListenOptions): Subscription | null {
     if (!this.#engine.listener) return null;
     this.#listener ??= this.#engine.listener();
-    return this.#listener.listen(channel, fn);
+    return this.#listener.listen(channel, fn, o);
   }
 
   async close(): Promise<void> {

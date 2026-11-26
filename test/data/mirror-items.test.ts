@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { listItems, loadItemAuthors, loadItems, loadOpenNumbers, loadOpenPrLinks, loadPrMirror, loadShown, loadStackedHeads, countItems, listMentioning, openItemKeys, searchItems, saveChecks } from "../../src/data/mirror/index.ts";
+import { listItems, loadItemAuthors, loadItems, loadOpenNumbers, loadOpenPrLinks, loadPrMirror, loadShown, countItems, listMentioning, openItemKeys, searchItems, saveChecks } from "../../src/data/mirror/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { both, bothFlat, seedItems } from "./mirror-fixture.ts";
 
@@ -33,11 +33,10 @@ both("listItems filters, orders by repo and number, and pages", async (db) => {
   return await nums({});
 });
 
-both("the stacked, open-link, number, count and shown loaders read what the planner needs", async (db) => {
+both("the open-link, number, count and shown loaders read what the planner needs", async (db) => {
   await seedItems(db, "app", [1], { base_ref: "main", head_ref: "feat/a", head_repo: "Org/App" });
   await seedItems(db, "app", [2], { base_ref: "feat/a", head_ref: "feat/b", head_repo: "org/app", closing_issues: "[7]", text_refs: '[[],[]]' });
   await seedItems(db, "app", [3], { kind: "issue", state: "CLOSED", title: "done" });
-  assert.deepEqual([...(await loadStackedHeads(db, ["app"])).entries()], [["app feat/a org/app", [1]]]);
   assert.deepEqual([...(await loadOpenNumbers(db, ["app", "none"], "pr")).entries()], [["app", [1, 2]]]);
   assert.deepEqual((await loadOpenPrLinks(db, ["app"])).map((r) => [r.number, r.title ?? null]), [[2, null], [1, "title 1"]]);
   assert.deepEqual([...(await countItems(db, { repos: ["app"] }, "state")).entries()].sort(), [["CLOSED", 1], ["OPEN", 2]]);
@@ -95,7 +94,7 @@ bothFlat("the item loaders issue the same number of statements for 2 and 12 keys
 }, async (db, size) => {
   const keys = refs("app", size);
   await db.together(async () => {
-    await Promise.all([loadItems(db, keys, "card"), loadItems(db, keys, "text"), loadPrMirror(db, keys), loadShown(db, keys), loadOpenNumbers(db, ["app"]), loadStackedHeads(db, ["app"]),
+    await Promise.all([loadItems(db, keys, "card"), loadItems(db, keys, "text"), loadPrMirror(db, keys), loadShown(db, keys), loadOpenNumbers(db, ["app"]),
       loadOpenPrLinks(db, ["app"]), countItems(db, { repos: ["app"] }, "kind"), listItems(db, { repos: ["app"] }, "pr")]);
   });
 });

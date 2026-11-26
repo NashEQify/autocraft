@@ -9,10 +9,10 @@ import { loadItemFact } from "../src/core/issue-facts.ts";
 import { retryItemPreapproval } from "../src/dash/api/operator.ts";
 import type { Req } from "../src/dash/types.ts";
 import { preapprovalOf } from "../src/preapproval/index.ts";
-import { insertWorkflow, liveWorkflow } from "../src/workflow/store.ts";
+import { insertWorkflow, liveWorkflow, updateWorkflow } from "../src/workflow/store.ts";
 import { noteMergeable, unknownOf } from "../src/merge/mergeable.ts";
 import type { PrChecks } from "../src/review/checks.ts";
-import { T0, T1 } from "./world-db.ts";
+import { T0, T1, type World } from "./world-db.ts";
 import { before, earlier, implementing, legs8, MAINT, mergesAsPerson, press, pushed, review, run, send, settle, unstarted } from "./workflow-start-world.ts";
 
 for (const pipeline of [true, false]) {
@@ -216,4 +216,48 @@ test("a PR started into the merge queue whose merge state stays unknown is follo
   await run(w, "merge");
   await noteMergeable(w.db, [row], T1);
   assert.equal((await unknownOf(w.db, "app", 1, "sha1"))?.reads, 1);
+});
+
+test("a merge nobody can make is refused with the reason, as an entry and on a started PR, and nothing is written: off the default branch, or no CI", async () => {
+  for (const [why, set] of [
+    [/aimed at release/, (w: World) => w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "release" }).where("number", "=", 1))],
+    [/no CI/, (w: World) => w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "none", checks: "[]" }))],
+  ] as const) {
+    const w = await unstarted(false);
+    await set(w);
+    for (const text of ["merge", "review and merge"]) {
+      const o = await send(w, text);
+      assert.equal(o.outcome, "refused", o.line);
+      assert.match(o.line, why);
+    }
+    assert.deepEqual([await liveWorkflow(w.db, "app", 1), await w.rows("SELECT id FROM preapprovals")], [null, []]);
+    await run(w, "review");
+    const o = await send(w, "merge");
+    assert.equal(o.outcome, "refused", o.line);
+    assert.equal((await liveWorkflow(w.db, "app", 1))!.approvedBy, null);
+    w.close();
+  }
+});
+
+test("merge at a stop on defects the pre-merge review gave no fix for is refused and asks to fix them first; the yes has them fixed", async () => {
+  const w = await unstarted(false);
+  await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
+  await run(w, "merge");
+  await w.premerge(1, "defect", false);
+  await settle(w);
+  const stopped = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([stopped.state, stopped.rec!.parts.fix, stopped.rec!.again], ["blocked", [1], undefined], stopped.rec?.text ?? "");
+  // A stop stored without its defects as parts gets them when someone says merge.
+  await updateWorkflow(w.db, stopped.id, { plan: [], blockerParams: { ...stopped.blockerParams, premerge: [] }, rec: { text: "Review it again, then merge.", parts: { fix: [], drop: [] }, merges: true, again: "review" } });
+  const o = await send(w, "merge");
+  assert.equal(o.outcome, "refused", o.line);
+  assert.match(o.line, /nothing merges past them.*Fix them first\?.*Reply yes to fix 1, then merge/);
+  const asked = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([asked.state, asked.rec!.parts.fix, asked.plan.map((p) => p.title), o.question?.recAt], ["blocked", [1], ["off by one"], asked.recAt]);
+  // Saying it again asks the same question again.
+  assert.match((await send(w, "merge")).line, /Reply yes to fix 1, then merge/);
+  await settle(w);
+  await run(w, "yes");
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
+  assert.match(String((await w.rows("SELECT instructions FROM operator_fixups WHERE state = 'queued'"))[0]!.instructions), /off by one/);
 });

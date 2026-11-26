@@ -1,7 +1,7 @@
 // Follow-up issues held until the merge. A card that merges the PR (a Merge answer, or a fix-up that merges: holdsIssues) does not open
 // its issue at the press: it stores it here, and the Act step files it once the PR merged, whoever merged it. A PR closed without merging,
 // or a merge path that ended (the Merge answer taken back, set aside or changed; the pre-approved merge cancelled, failed or handed back as
-// a question), drops it. The Act step reads these rows when the planner sees the PR's state or the merge path change: no timer runs.
+// a question), drops it; one on hold keeps it. The Act step reads these rows when the planner sees the PR's state or the merge path change: no timer runs.
 //
 // Filing writes the `filing` row before the call. A create whose answer was lost leaves that row behind: the issue may exist, so it is never
 // filed again and the item page says the outcome is unknown. Only a refusal from GitHub (no issue can exist) returns the row to `held`.
@@ -38,12 +38,12 @@ export const heldOf = async (db: Db, repo: string, n: number): Promise<HeldRow[]
 /**
  * What to do with a held row now: file it, drop it (with the reason), or keep holding (null). The row is bound to the workflow and merge
  * approval of its press (`h.path`, from `workflow.loadPathEnds`): a PR that merged files unless the path ended before the merge; a path
- * that was stopped, withdrawn or replaced, or a PR closed without merging, drops it.
+ * that was withdrawn or replaced, or a PR closed without merging, drops it; a held one goes on holding.
  */
 export function heldVerdict(h: HeldInput): { file: true } | { drop: string } | null {
   if (!h.item) return null;
   if (h.item.state === "CLOSED") return { drop: "the PR was closed without merging" };
-  const ended = h.path === "stopped" ? "the approved merge was stopped, withdrawn or replaced" : h.path === "closed" ? "the PR was closed without merging" : null;
+  const ended = h.path === "stopped" ? "the approved merge was withdrawn or replaced" : h.path === "closed" ? "the PR was closed without merging" : null;
   if (h.item.state !== "MERGED") return ended ? { drop: ended } : null;
   return ended ? { drop: ended } : { file: true };
 }

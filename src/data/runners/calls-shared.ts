@@ -26,7 +26,7 @@ export const LEASE_PREFIX = "aclease_";
 /** How long claims reuse the queued calls before reading them again. */
 export const QUEUE_CACHE_MS = 2_000;
 /** Prompts whose calls run on the interactive lane. */
-export const INTERACTIVE_PROMPTS: readonly string[] = ["discord."];
+export const INTERACTIVE_PROMPTS: readonly string[] = ["discord.", "interactive."];
 /** `user_settings` key of a login's Max calls at once and its largest value. */
 export const MAX_CALLS_KEY = "max_calls";
 export const MAX_CALLS_MAX = 64;

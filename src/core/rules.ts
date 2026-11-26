@@ -40,8 +40,10 @@ export const TRANSIENT_REFUSAL = /\b5\d\d\b|timed? ?out|ETIMEDOUT|ECONN|EAI_AGAI
 
 /** A merge refusal that only reports the state of CI, mergeable or the head: it clears when that state changes. Any other refusal is asked about. */
 export const STATE_REFUSAL = /^(not ready at merge time|head moved|no longer open|GitHub returned no such PR|the operator's merge answer is gone|verification at)/;
-export const ciAllows = (path: "rule" | "operator" | "maintainer" | null, ci: string | null | undefined, noCi: boolean): boolean =>
-  ci === "success" || (path === "operator" && ci === "none" && noCi);
+/** Why nothing merges a PR aimed elsewhere, whoever approves it. */
+export const OFF_DEFAULT_REASON = "its base is not the default branch";
+/** CI lets a head merge only once it passed, also where a person approved the merge and in a repo that has no CI. */
+export const ciAllows = (ci: string | null | undefined): boolean => ci === "success";
 
 export type Size = "S" | "M" | "L";
 
@@ -97,8 +99,6 @@ export const CONFLICT_MAX_MERGES_PER_PR_PER_DAY = 2;
 export const CIFIX_TRY_STATES = ["formatting", "linting", "superseded", "pushing", "pushed", "failed", "refused", "rejected"];
 export const CIFIX_PUSH_STATES = ["pushing", "pushed"];
 /** States that end the CI fix step's work at a head. */
-/** A stored model patch waits for its lint task or for the collect step. */
-export const LINT_STATE = "linting";
 export const CIFIX_FINAL_STATES = ["pushed", "pushing", "asked", "push-denied", "cannot-push", "skipped", "comment-failed"];
 
 /**
@@ -113,9 +113,6 @@ export function unsentAsk(ats: readonly string[], nowMs: number): { until: numbe
   const until = Math.max(...ats.map((a) => Date.parse(a))) + COMMENT_UNSENT_DELAYS_MS[ats.length - 1]!;
   return until > nowMs ? { until } : null;
 }
-
-/** The audit target of a merge at one head (an operator's Retry after a refusal names it). */
-export const mergeDecisionId = (repo: string, number: number, head: string): string => `${repo}#${number}:merge@${head}`;
 
 /** Setting that holds the pipeline account's login, recorded wherever the pipeline pushes as that account. */
 export const PIPELINE_LOGIN_KEY = "pipeline_login";

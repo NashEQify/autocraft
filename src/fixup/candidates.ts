@@ -28,6 +28,8 @@ export type FixSelection = {
   ask: FixCandidate[];
   /** Stored patches whose lint task ended (the Plan's `lint` action, step fixup). */
   lint: FixCandidate[];
+  /** The rowids of every stored patch the Plan lists, also those that may not be pushed now: they are kept. */
+  listed: number[];
   /** Conflicted take / take-fix PRs we may push to: the default branch is merged in. */
   conflictMerge: ConflictCandidate[];
   /** Conflicted PRs we can't push to, in a repo with comment approval, with no comment at this head yet. */

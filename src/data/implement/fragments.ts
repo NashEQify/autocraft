@@ -17,17 +17,5 @@ export function attemptOfPr(eb: Eb, repo: Expression<string> | string, prNumber:
     .$if(!!o.current, (q) => q.where("im.state", "not in", ended)));
 }
 
-/** `(repo, number)` of issues that have a live attempt, as a subquery for `EXISTS`/`IN`. */
-export function liveAttemptsOfIssues(eb: Eb): Expression<unknown> {
-  const w = schemaEb(eb);
-  return w.selectFrom("implementations as im").select(["im.repo", "im.number"]).where("im.state", "in", live);
-}
-
-/** `(repo, pr_number)` of attempts in a live state with a PR: the full-pass universe's implementation PRs. */
-export function livePrs(eb: Eb): Expression<unknown> {
-  const w = schemaEb(eb);
-  return w.selectFrom("implementations as im").select(["im.repo", "im.pr_number as number"]).where("im.state", "in", live).where("im.pr_number", "is not", null);
-}
-
 registerKeySource<undefined>("implement.liveIssues", (db) =>
   queryDb(db).k.selectFrom("implementations as im").select(["im.repo as repo", "im.number as number"]).where("im.state", "in", live));

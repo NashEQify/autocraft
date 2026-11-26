@@ -12,6 +12,7 @@ import { askConflict, type ConflictRun } from "../src/fixup/conflict.ts";
 import type { ConflictCandidate } from "../src/fixup/conflict-state.ts";
 import type { FixupDeps, FixupSummary } from "../src/fixup/index.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
+import { acting } from "./acting.ts";
 import { SCRATCH } from "./scratch.ts";
 import type { GuardedItem, GuardedRepo, Guarded } from "../src/core/guard.ts";
 import { commentOn, createIssue, ghComment, postReview, type Writer } from "../src/github/write.ts";
@@ -25,7 +26,7 @@ const T0 = Date.parse("2026-11-10T12:00:00Z");
 const HEAD = "a".repeat(40);
 const MIN = 60_000;
 
-test("a conflict ask whose token mint failed is asked again after the backoff, not before; one whose request went out is final", async () => {
+test("a conflict ask whose token mint failed is asked again after the backoff, not before; one whose request went out is final; a quiet pull request is not asked", async () => {
   mock.timers.enable({ apis: ["Date"], now: T0 });
   try {
     const db = await connectDb(join(dir, "t.db"));
@@ -37,6 +38,7 @@ test("a conflict ask whose token mint failed is asked again after the backoff, n
     await db.run(db.k.insertInto("items").values({ repo: "app", number: 1, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: HEAD, head_ref: "fix", head_repo: "contrib/app", base_ref: "main", maintainer_can_modify: 0, mergeable: "CONFLICTING", created_at: iso(T0 - 60 * MIN), updated_at: iso(T0 - 60 * MIN) }));
     await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: HEAD, run_id: "rv", at: iso(T0 - 30 * MIN), model: "m", verdict: "take", reason: "right", fixes: "[]", sure: 1, mode: "full" }));
     await insertWorkflow(db, { repo: "app", number: 1, kind: "pr", entry: "fixup", state: "running", startedBy: "op", startedAt: iso(T0 - 40 * MIN), startedVia: "dashboard" });
+    await acting(db, ["op"]);
 
     await db.run(db.k.insertInto("verifications").values({ repo: "app", number: 1, head_sha: HEAD, kind: "ci-enough", reason: "upstream CI", state: "ci-enough", created_at: iso(T0 - 20 * MIN) }));
     const plan = async () => decidePr((await loadPrFacts(db, { now: Date.now() })).find((f) => f.number === 1)!);
@@ -57,6 +59,14 @@ test("a conflict ask whose token mint failed is asked again after the backoff, n
       prQuery: "query", scrub: (s: string) => s, handled: { n: 0 }, by: CLI_BY,
     } as unknown as ConflictRun;
     const c = { repo: "app", number: 1, head: HEAD, base: "main", title: "Fix a thing", reason: "right", attempt: 1, pushable: false } as ConflictCandidate;
+
+    await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "app", state: "done", started_by: "op", started_at: iso(T0) }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 50, scan_id: 1, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp", created_at: iso(T0), updated_at: iso(T0), fix_pr: 1 }));
+    assert.deepEqual([await plannedAsk(), (await plan()).waitCode], [false, "conflict-person"]);
+    await askConflict(db, x, c);
+    assert.deepEqual(await rows(), []);
+    assert.ok(log.some((l) => l.includes("quiet")), log.join("\n"));
+    await db.run(db.k.updateTable("security_findings").set({ state: "dismissed" }));
 
     assert.equal(await plannedAsk(), true);
     await askConflict(db, x, c);

@@ -80,7 +80,7 @@ both("stage states, counts, last jobs, durations, step history and queue lookups
   const q = queryDb(db);
   await q.run(q.k.updateTable("jobs").set({ started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:00:03.000Z" }).where("step", "=", "classify"));
   assert.deepEqual((await loadStepDurations(db, ["classify", "none"])).get("classify"), [3000]);
-  assert.equal((await loadStepRuns(db, { requestedBy: "pipeline", sinceDays: 36500, window: 100, last: 3 })).length, 3);
+  assert.equal((await loadStepRuns(db, { requestedBy: "pipeline", sinceDays: 36500, window: 100, last: 3, nowMs: Date.now() })).length, 3);
   assert.deepEqual(await loadJobState(db, r1!), { state: "running", summary: null, error: null });
   assert.deepEqual([...await isRunning(db, [{ step: "review", repo: "app" }, { step: "review", repo: "lib" }])], ["review\0app"]);
   assert.deepEqual((await loadItemsSince(db, ["review", "verify"], { review: at })).size, 1);
@@ -165,7 +165,7 @@ both("the step runs are the newest of each step, with every done one where the n
   const ended = new Date().toISOString();
   const run = (step: string, states: string) => [...states].map((c) => ({ step, state: c === "d" ? "done" : "failed", requested_by: "pipeline", ended_at: ended, error: c === "s" ? "runner restarted" : null }));
   await seedJobs(db, [...run("ok", "ddfdd"), ...run("stuck", "dfddfff"), ...run("other", "fff"), ...run("few", "f")] as never);
-  const rows = await loadStepRuns(db, { requestedBy: "pipeline", sinceDays: 1, window: 1000, last: 3 });
+  const rows = await loadStepRuns(db, { requestedBy: "pipeline", sinceDays: 1, window: 1000, last: 3, nowMs: Date.now() });
   const of = (step: string) => rows.filter((r) => r.step === step).map((r) => r.state[0]).join("");
   assert.deepEqual(["ok", "stuck", "other", "few"].map(of), ["ddf", "fffddd", "fff", "f"]);
   assert.deepEqual(rows.map((r) => r.id), rows.map((r) => r.id).sort((a, b) => b - a));

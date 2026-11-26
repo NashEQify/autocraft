@@ -1678,7 +1678,7 @@ CREATE TABLE IF NOT EXISTS fast_track (
   UNIQUE (repo, number)
 );
 
--- Merge holds (src/merge/controls.ts): a PR held here is reviewed and fixed as usual but does not merge, alone or in a batch, until released.
+-- Retired (src/db/retired-names.ts): merge holds, which are held items (src/db/holds-to-items.ts). A release before that reads them.
 CREATE TABLE IF NOT EXISTS merge_holds (
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
@@ -1912,6 +1912,8 @@ CREATE TABLE IF NOT EXISTS postmerge_followups (
 CREATE INDEX IF NOT EXISTS postmerge_followups_issue ON postmerge_followups(repo, issue_number);
 -- Only merges from this moment on are reviewed unless `postmerge backfill` moves it back.
 INSERT OR IGNORE INTO settings (key, value) VALUES ('postmerge_since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+-- Merges outside the pipeline's scope, such as those a person approved in a repo whose Pipeline switch is off, from this moment on.
+INSERT OR IGNORE INTO settings (key, value) VALUES ('postmerge_unscoped_since', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 -- CI on the default branch of every synced repo, one row per head commit seen. Written by the main-ci step.
 -- state: green | red | optional | running | none (src/mainci/classify.ts).
@@ -2274,7 +2276,9 @@ CREATE TABLE IF NOT EXISTS preapprovals (
   reason TEXT,
   updated_at TEXT NOT NULL,
   fix_id INTEGER,
-  workflow_id INTEGER                 -- the item_workflows row whose merge leg this is; null outside the maintainer workflow
+  workflow_id INTEGER,                -- the item_workflows row whose merge leg this is; null outside the maintainer workflow
+  reason_code TEXT,                   -- what reason is (src/core/codes.ts StopCode); NULL: read from its text
+  reason_params TEXT                  -- JSON: what the reason names
 );
 CREATE INDEX IF NOT EXISTS preapprovals_item ON preapprovals(repo, number, id);
 
@@ -2302,6 +2306,9 @@ CREATE TABLE IF NOT EXISTS item_workflows (
   legacy_preapproval_id INTEGER,
   updated_at TEXT NOT NULL,
   step TEXT,                          -- the step it is at (src/workflow/status.ts StepName), written by the advance pass
+  pr_number INTEGER,                  -- an implement workflow: the PR it works on, the newest an attempt of its issue opened for it; null before that (src/data/workflow/link.ts)
+  version INTEGER NOT NULL DEFAULT 0, -- how often the row was written, for a write that must not pass another by
+  accepted_head TEXT,                 -- the PR head a person accepted; NULL: base_head and the merge legs say it (src/core/evidence.ts acceptedHeads)
   review_asked_at TEXT                -- a merge entry: a person asked for a model review of the head, newer than this; null when it merges without one
 );
 CREATE UNIQUE INDEX IF NOT EXISTS item_workflows_live ON item_workflows(repo, number) WHERE state IN ('running', 'waiting', 'blocked', 'recommending');

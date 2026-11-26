@@ -145,6 +145,8 @@ export interface Item extends ItemRef {
   fixups: ItemFixup[];
   /** PRs the pipeline merged: the post-merge review; null or absent when there is none. */
   postmerge?: ItemPostmerge | null;
+  /** AutoCraft merged it as a person approved it, so there is no post-merge review to come. */
+  mergedAsApproved?: boolean;
   /** PRs: the pre-merge review of every reviewed head, newest first; absent in mocks without one. */
   premerge?: ItemPremerge[];
   /** Opus checks of the patches we wrote for this item (Fix-up, Fix), oldest first. */
@@ -1614,8 +1616,6 @@ export interface WeightPlace {
 /** One row of the All, Review, Fix and Verify tabs: a work row with its place in line. */
 export interface QueueWorkRow extends WorkRow {
   queue?: QueueSlot | null;
-  /** A PR whose merge an operator holds. */
-  held: boolean;
 }
 
 /**
@@ -1628,11 +1628,10 @@ export interface QueueOrigin {
   at: string | null;
 }
 
-/** One row of the Merge tab: a merge queue row with its place by weight, hold and how it came in. */
+/** One row of the Merge tab: a merge queue row with its place by weight and how it came in. */
 export interface QueueMergeRow extends QueueRow {
   /** Null when no workflow is live for the PR. */
   place: WeightPlace | null;
-  held: boolean;
   added?: QueueOrigin;
 }
 
@@ -1651,7 +1650,6 @@ export interface QueuePendingRow {
   step: "fixup" | "review" | "ci" | "build" | "pr" | "next" | "implement";
   /** An issue AutoCraft implements: the attempt's state, what it does in words, and what it waits for. */
   implement?: { state: ImplementationStateName; text: string; wait: string | null };
-  held: boolean;
   added: QueueOrigin;
   /** An issue: the open PRs that close it. */
   prs?: number[];
@@ -1660,7 +1658,7 @@ export interface QueuePendingRow {
 }
 
 /** What a PR waits for before it merges. */
-export type MergeWait = "ready" | "refused" | "ci" | "premerge" | "verify" | "re-review" | "batch-check" | "batch-ci" | "held";
+export type MergeWait = "ready" | "refused" | "ci" | "premerge" | "verify" | "re-review" | "batch-check" | "batch-ci";
 
 /** A PR in "Next merges", in the order it merges. */
 export interface NextMerge {
@@ -2332,7 +2330,8 @@ export interface ItemBarStep {
   /** Registry stage id. */
   stage: string;
   title: string;
-  state: "done" | "current" | "failed" | "next";
+  /** `not-needed`: the post-merge review of a PR that merged as a person approved it. */
+  state: "done" | "current" | "failed" | "next" | "not-needed";
   /** The current stage has a job running (animated); otherwise it is waiting. */
   running: boolean;
   /** When a done or failed stage ended. */
@@ -2692,6 +2691,8 @@ export interface MaintainHome {
 /** GET /api/maintain/queue: who approved each started item for merge (`repo#number` to login). */
 export interface MaintainQueueMeta {
   approvedBy: Record<string, string>;
+  /** Items someone holds: open, with no work until they are resumed. `line`: who holds it, and since when. */
+  held: { repo: RepoName; number: number; kind: "pr" | "issue"; title: string; line: string }[];
 }
 
 /** GET /api/maintain/stats: headline numbers for the last 7 or 30 days and merges per UTC day (today last). Backlog change is items opened minus items closed in the period. */
@@ -2785,11 +2786,13 @@ export interface MaintainEvent { id: number; at: string; login: string; via: "gi
 
 /** Where a started item stands (src/workflow/status.ts builds every line). */
 export interface MaintainItemStatus {
-  /** The state line: "Running: fix-up: 1 and 2", "Waiting for an answer", "Stopped by …". */
+  /** The state line: "Running: fix-up: 1 and 2", "Waiting for an answer", "Held by …". */
   headline: string;
   live: boolean;
+  /** Someone holds it: nothing runs until it is resumed. */
+  held?: boolean;
   entry: "review" | "fixup" | "implement" | "merge";
-  /** Started by, approved for merge by, answered by, stopped by. */
+  /** Started by, approved for merge by, answered by, held by. */
   lines: string[];
   approved: boolean;
   weight: string | null;

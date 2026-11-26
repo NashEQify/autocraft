@@ -8,7 +8,8 @@ import { REFUSED_PREFIX } from "../remote/calls.ts";
 import { PREMERGE_OPUS } from "../agents/steps.ts";
 import { buildQueue } from "../merge/queue.ts";
 import { workflowOf } from "../core/decide.ts";
-import { mergeAllowed } from "../core/gates.ts";
+import { mergePermission } from "../core/authority.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { notDue, planned, planNow } from "../core/select.ts";
 import { EXTRAS_PENDING_REASON } from "../core/sensitive.ts";
 import { loadPass } from "../core/facts.ts";
@@ -42,6 +43,8 @@ export type PremergeParams = {
   number?: number;
   dryRun?: boolean;
   onHandled?: (n: number) => void;
+  /** Who asked; a command-line run is an operator's. */
+  by?: By;
 };
 export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic"> & { now?: () => number };
 export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; defects: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
@@ -58,14 +61,14 @@ export type PremergeItem = { repo: string; number: number; head: string; facts: 
  * The PRs whose Plan holds a `premerge` action (the queue holds them in waiting-premerge and the head is due a try), in selection order.
  * `wake` collects when the failed tries are due again (ms): nothing in the data changes then, so the planner must be told.
  */
-export async function premergeCandidates(db: Db, opts: { repo?: string; at?: number; wake?: number[]; run?: string | null; plans?: PlanSet } = {}): Promise<PremergeItem[]> {
-  const { wake, at, ...rest } = opts;
+export async function premergeCandidates(db: Db, opts: { repo?: string; at?: number; wake?: number[]; run?: string | null; plans?: PlanSet; by?: By } = {}): Promise<PremergeItem[]> {
+  const { wake, at, by = CLI_BY, ...rest } = opts;
   const pace = wake ? (opts.plans?.pass ?? loadPass(at)).rereadPaceAt : 0;
   return (await planned(db, "premerge", {
-    ...rest, ...(at !== undefined ? { now: at } : {}),
+    ...rest, by, ...(at !== undefined ? { now: at } : {}),
     onPlan: wake ? (f, plan) => {
       const pm = f.premerge;
-      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && mergeAllowed(f) && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
+      if ((plan.state === "waiting-premerge" || f.operator?.premerge) && mergePermission(f).ok && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
       if (f.diffPending) {
         const t = Math.max(f.diffPending.lastRead != null ? f.diffPending.lastRead + RETRY_AFTER_MS : 0, pace);
         if (t > f.now) wake.push(t);
@@ -84,7 +87,7 @@ const stillHead = async (db: Db, repo: string, number: number, head: string): Pr
 export async function runPremerge(db: Db, params: PremergeParams, log: (line: string) => void = console.log, deps: PremergeDeps = defaultPremergeDeps()): Promise<PremergeSummary> {
   const { repo } = params;
   const runId = `premerge-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now() });
+  let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now(), ...(params.by ? { by: params.by } : {}) });
   if (params.number !== undefined) cands = cands.filter((e) => e.number === params.number);
   const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, failed: [], moved: [], off: [] };
   cands = await takersCut(db, cands, params.limit, repo, (e) => e.number);

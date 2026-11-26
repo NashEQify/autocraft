@@ -68,6 +68,8 @@ export const planScope = (db: Db, p: string) => kx.jsonBool(db, `${p}.view`, "$.
  * unescaped. Parsing every view is the cost of the reads that filter on it, and its estimate (one row in 200) makes Postgres nest loops over all of them.
  */
 export const inPlanScope = (eb: Eb, p: string): Expression<SqlBool> => eb(eb.fn<number>("instr", [`${p}.view`, eb.val('"scope":true')]), ">", 0);
+/** The plan's view says the automatic merge rule takes the PR up by itself (PlanView.auto). */
+export const onPlanAutoPath = (eb: Eb, p: string): Expression<SqlBool> => eb(eb.fn<number>("instr", [`${p}.view`, eb.val('"auto":true')]), ">", 0);
 /** `view.cifix` of the plan row aliased `p` is `bucket`; the text test first, since parsing every view is the cost of the read. */
 export const planCifixIs = (db: Db, eb: Eb, p: string, bucket: string): Expression<SqlBool> =>
   eb.and([eb(eb.fn<number>("instr", [`${p}.view`, eb.val(`"${bucket}"`)]), ">", 0), eb(kx.jsonText(db, `${p}.view`, "$.cifix"), "=", bucket)]);

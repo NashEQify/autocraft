@@ -55,12 +55,12 @@ both("JSON fields read as SQLite's json_extract, json_type, json_valid and json_
     kx.jsonBool(db, "j", "$.ok").as("ok"), kx.jsonBool(db, "j", "$.no").as("no"), kx.jsonType(db, "j", "$.a").as("ta"),
     kx.jsonType(db, "j", "$.arr").as("tarr"), kx.jsonType(db, "j", "$.n").as("tn"), kx.jsonType(db, "j", "$.r").as("tr"),
     kx.jsonType(db, "j", "$.ok").as("tok"), kx.jsonType(db, "j", "$.nul").as("tnul"), kx.jsonType(db, "j", "$.missing").as("tmissing"),
-    kx.jsonType(db, kx.json([])).as("whole"), kx.jsonArrayLength(db, kx.jsonText(db, "j", "$.objs")).as("len"),
+    kx.jsonType(db, kx.json([])).as("whole"),
     kx.jsonText(db, kx.jsonRemoveKey(db, "j", "a"), "$.a").as("removed"), kx.jsonNum(db, kx.jsonRemoveKey(db, "j", "a"), "$.n").as("kept"),
   ]));
   assert.deepEqual(row, {
     ab: "x", cd: "y", arr1: "q", missing: null, n: 5, r: 1.5, ok: 1, no: 0, ta: "object", tarr: "array", tn: "integer", tr: "real",
-    tok: "true", tnul: "null", tmissing: null, whole: "array", len: 2, removed: null, kept: 5,
+    tok: "true", tnul: "null", tmissing: null, whole: "array", removed: null, kept: 5,
   });
   const valid = await db.all(k(db).selectFrom("t").select(["id", kx.jsonValid(db, "j").as("ok")]).where(kx.jsonValid(db, "j")).orderBy("id"));
   assert.deepEqual(valid, [{ id: 1, ok: 1 }, { id: 2, ok: 1 }]);

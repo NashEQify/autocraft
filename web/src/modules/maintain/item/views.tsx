@@ -178,8 +178,9 @@ function Parts({ s }: { s: MaintainItemStatus }) {
 /** Example commands, by what the item waits for. */
 function examples(m: MaintainItem): string {
   const s = m.status;
-  if (s?.live && (s.rec || s.unclear)) return t("yes · fix 1 and merge · drop 2 · stop");
-  if (s?.live) return s.approved ? t("urgent · stop") : t("merge · urgent · stop");
+  if (s?.live && (s.rec || s.unclear)) return t("yes · fix 1 and merge · drop 2 · hold");
+  if (s?.live) return s.approved ? t("urgent · hold") : t("merge · urgent · hold");
+  if (s?.held) return t("resume · close · backlog");
   return m.kind === "issue" ? t("implement · implement and merge · backlog · close") : t("review · fix-up and merge · merge, urgent · backlog");
 }
 

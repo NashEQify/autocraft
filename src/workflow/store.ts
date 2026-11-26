@@ -51,6 +51,7 @@ export async function insertWorkflow(db: Db, w: NewWorkflow, at = new Date().toI
     const patch: WorkflowPatch = {
       ...(w.state !== "running" ? { state: w.state } : {}),
       ...(w.approvedAt !== undefined ? { approvedAt: w.approvedAt } : {}),
+      ...(w.acceptedHead !== undefined ? { acceptedHead: w.acceptedHead } : {}),
       ...(w.stoppedBy != null ? { stoppedBy: w.stoppedBy, stoppedAt: w.stoppedAt ?? null } : {}),
       ...(w.blocker != null ? { blocker: w.blocker, blockerParams: w.blockerParams ?? null } : {}),
       ...(w.rec != null ? { rec: w.rec, recAt: w.recAt ?? null, recHead: w.recHead ?? null } : {}),

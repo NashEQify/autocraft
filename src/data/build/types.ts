@@ -117,7 +117,7 @@ export type ClaimPick = { id: number; head?: string; base?: string; plan?: TaskS
 export type ClaimFit = (task: TaskRecord) => boolean;
 export type ClaimInputs = {
   env: EnvRecord | null; running: number; candidates: TaskRecord[]; otherEnvs: EnvRecord[]; sizings: Map<string, RepoSizing>; warm: Map<string, WarmFacts>;
-  liveRepos: Set<string>; startedRefs: Set<Ref>; batches: Map<number, BatchByTask>; tracked: Map<string, TrackedRepo>;
+  startedRefs: Set<Ref>; batches: Map<number, BatchByTask>; tracked: Map<string, TrackedRepo>;
   pendingUpdate: UpdateSpec | null;
 };
 export type EnvPassState = { envs: EnvRecord[]; tasks: Map<string, EnvTasks>; reservations: { node: string; cpuM: number; memBytes: number }[] };

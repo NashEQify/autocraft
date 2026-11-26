@@ -70,3 +70,23 @@ test("the scan flags query calls, SQL text and imports of query internals, and p
   assert.equal(violation("src/x.ts", 'import { f } from "./data/mirror/index.ts";\nconst s = "select an item";'), null);
   assert.equal(violation("src/x.ts", 'import { v } from "./data/views/snapshot.ts";'), null);
 });
+
+test("one place maps pull requests to workflows: nothing else joins implementations to item_workflows or reads the attempt rule", () => {
+  // The change log names the PRs of an issue's attempts, linked or not; the switch-over converts rows once, and
+  // the conversion of merge holds runs inside a migration, on workflows that no release has linked.
+  const allowed = new Set(["src/data/workflow/link.ts", "src/data/workflow/fragments.ts", "src/db/plan-inputs.ts", "src/db/switch-over.ts", "src/db/holds-to-items.ts"]);
+  const names = (text: string, table: string) => new RegExp(`(?:From|[jJ]oin)\\(\\s*["'](?:main\\.)?${table}\\b|\\b(?:FROM|JOIN)\\s+(?:main\\.)?${table}\\b`).test(text);
+  const found: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name), file = relative(ROOT, p);
+      if (e.isDirectory()) walk(p);
+      else if (p.endsWith(".ts") && !allowed.has(file)) {
+        const text = readFileSync(p, "utf8");
+        if (/\battemptOf\b/.test(text) || (names(text, "implementations") && names(text, "item_workflows"))) found.push(file);
+      }
+    }
+  };
+  walk(join(ROOT, "src"));
+  assert.deepEqual(found, []);
+});

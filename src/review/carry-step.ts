@@ -1,4 +1,5 @@
 // The Carry step: stores the carried review (carry.ts) for each PR whose Plan holds a `carry` action. Calls no model.
+import { CLI_BY, type By } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
 import { staleReviews } from "./discussion.ts";
 import { carriedReviews, CARRIED } from "./carry.ts";
@@ -8,10 +9,10 @@ import { saveReviews, type SaveReviewInput } from "../data/review/index.ts";
 import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
 
-export async function runCarry(db: Db, repo: string, log: (line: string) => void = console.log): Promise<number> {
+export async function runCarry(db: Db, repo: string, log: (line: string) => void = console.log, by: By = CLI_BY): Promise<number> {
   const stale = await staleReviews(db, repo);
   const runId = `carry-${repo}-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`;
-  const rows = await planned(db, "carry", { repo });
+  const rows = await planned(db, "carry", { repo, by });
   const carried = await carriedReviews(db, rows.map(({ facts: f, action }) => ({ repo, number: f.number, head_oid: action.head! })), stale);
   const [repos] = await Promise.all([loadRepos(db, { names: [repo] })]);
   const saves: SaveReviewInput[] = [];

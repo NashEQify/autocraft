@@ -41,8 +41,8 @@ export function orderStages(items: { repo: string; number: number; score: number
 
 /** Orders the pipeline's open ranked items by stage, from the Plan cache: the next-step text of each item in scope, and the batch states of the PRs. One wave. */
 export async function computeStages(db: Db): Promise<Stages> {
-  // A held PR has no place in the merge order, and batched PRs are listed under their batch on the Merge tab.
-  return orderStages((await loadQueuedSteps(db, Object.keys(QUEUED))).filter((s) => s.next !== "Merge queue" || (!s.held && !BATCHED.has(s.state))));
+  // Batched PRs are listed under their batch on the Merge tab.
+  return orderStages((await loadQueuedSteps(db, Object.keys(QUEUED))).filter((s) => s.next !== "Merge queue" || !BATCHED.has(s.state)));
 }
 
 /** Slots of `repo#number` for the items in `visible` repos; places count only visible items. Pure over the ordered stages. */

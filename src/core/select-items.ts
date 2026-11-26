@@ -5,7 +5,9 @@
 // again, so an item that is no longer due drops out.
 import type { Item } from "../classify/parse.ts";
 import { embedderId, modelName } from "../embed/model.ts";
+import { mayRun } from "./authority.ts";
 import { decideItem } from "./decide-item.ts";
+import type { By } from "./gates.ts";
 import { inFlightNow } from "./select.ts";
 import { loadItemFacts, type ItemLoadOptions } from "./issue-facts.ts";
 import { loadPassBase, type PassBase } from "./pass-load.ts";
@@ -13,6 +15,7 @@ import { loadDueRefs } from "../data/planner/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import type { ItemPlanned, PlanSet } from "./plan-set.ts";
 import type { Action, ActionKind, ItemFacts, ItemPlan } from "./plan.ts";
+import { byScore } from "./work-score.ts";
 import type { Db } from "../db/index.ts";
 
 export type PlannedItem = { facts: ItemFacts; plan: ItemPlan; action: Action };
@@ -22,6 +25,10 @@ export type PlannedOptions = ItemLoadOptions & {
   bucket?: string;
   /** Plans decided already (the planner's pass, or itemPlans): no facts are loaded. */
   plans?: ItemPlans;
+  /** Who the work is selected for (default: the pipeline, whose work also needs the global switch on). */
+  by?: By;
+  /** Also the actions that may not run now (mayRun): the Next lists name why. */
+  refused?: boolean;
 };
 
 /** Item Plans decided already: a PlanSet, or the items itemPlans loaded for one kind. */
@@ -39,7 +46,7 @@ const byRef: Cmp = (a, b) => (a.facts.repo < b.facts.repo ? -1 : a.facts.repo > 
 const then = (...c: Cmp[]): Cmp => (a, b) => { for (const f of c) { const r = f(a, b); if (r) return r; } return 0; };
 const str = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
 /** Highest score first, items without one last. */
-const score: Cmp = (a, b) => (a.facts.score === null ? 1 : 0) - (b.facts.score === null ? 1 : 0) || (b.facts.score ?? 0) - (a.facts.score ?? 0);
+const score: Cmp = (a, b) => byScore(a.facts.score, b.facts.score);
 const prFirst: Cmp = (a, b) => (b.facts.kind === "pr" ? 1 : 0) - (a.facts.kind === "pr" ? 1 : 0);
 
 /** The sort keys of the items, keyed by `repo#number`: one query. */
@@ -97,19 +104,20 @@ export async function itemPlans(db: Db, kind: ActionKind, opts: ItemLoadOptions 
   return { items: (await loadItemFacts(db, { ...opts, ...(refs ? { refs } : {}), ...(base ? { base } : {}) })).map((facts): ItemPlanned => ({ facts, plan: decideItem(facts) })) };
 }
 
-/** Items the Plans say are due for `kind`, one entry per due action. */
+/** Items the Plans say are due for `kind` and may run (mayRun), one entry per due action. */
 export async function plannedItems(db: Db, kind: ActionKind, opts: PlannedOptions = {}): Promise<PlannedItem[]> {
   const out: PlannedItem[] = [];
+  const { by = "pipeline", refused, bucket, plans, ...load } = opts;
   let source: Iterable<{ facts: ItemFacts; plan: ItemPlan }>;
-  if (opts.plans) {
+  if (plans) {
     const refs = opts.refs ? new Set(opts.refs) : null;
-    source = opts.plans.items.filter((p) => (!opts.repo || p.facts.repo === opts.repo) && (!refs || refs.has(`${p.facts.repo}#${p.facts.number}`)));
-  } else source = (await itemPlans(db, kind, opts)).items;
+    source = plans.items.filter((p) => (!opts.repo || p.facts.repo === opts.repo) && (!refs || refs.has(`${p.facts.repo}#${p.facts.number}`)));
+  } else source = (await itemPlans(db, kind, load)).items;
   for (const { facts, plan } of source) {
-    for (const action of plan.actions) if (action.kind === kind && (opts.bucket === undefined || bucketOf(action) === opts.bucket)) out.push({ facts, plan, action });
+    for (const action of plan.actions) if (action.kind === kind && (bucket === undefined || bucketOf(action) === bucket) && (refused || mayRun({ facts, action }, by).ok)) out.push({ facts, plan, action });
   }
   if (out.length < 2) return out;
-  const stored = opts.plans ? await planSortKeys(db, opts.plans, out.map((p) => p.facts)) : await sortKeysOf(db, out.map((p) => p.facts));
+  const stored = plans ? await planSortKeys(db, plans, out.map((p) => p.facts)) : await sortKeysOf(db, out.map((p) => p.facts));
   const keys = new Map<PlannedItem, Keys>(out.map((p) => [p, stored.get(`${p.facts.repo}#${p.facts.number}`)!]));
   const created: Cmp = (a, b) => str(keys.get(a)!.created, keys.get(b)!.created);
   const updatedDesc: Cmp = (a, b) => str(keys.get(b)!.updated, keys.get(a)!.updated);

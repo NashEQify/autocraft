@@ -92,7 +92,7 @@ export async function loadHealthFacts(db: Db, nowMs: number, o: HealthOptions): 
     control.loadTrackedRepos(db),
     mirror.loadRepoErrors(db),
     jobs.loadDeadlineStops(db),
-    jobs.loadStepRuns(db, { requestedBy: "pipeline", sinceDays: o.stepDays, window: o.stepWindow, last: o.stepLast }),
+    jobs.loadStepRuns(db, { requestedBy: "pipeline", sinceDays: o.stepDays, window: o.stepWindow, last: o.stepLast, nowMs }),
     planner.loadLiveness(db),
     q.all(q.k.selectFrom("user_tokens").innerJoin("access", "access.login", "user_tokens.login")
       .select(["user_tokens.login", "user_tokens.updated_at"]).where("user_tokens.status", "=", "refresh-failed")

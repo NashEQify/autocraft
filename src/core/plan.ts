@@ -1,11 +1,13 @@
-// The vocabulary of a Plan: what state an item is in and which actions are due. No imports: the web build may use it.
+// The vocabulary of a Plan: what state an item is in and which actions are due. It imports types only: the web build may use it.
+
+import type { Refusal, WaitCode } from "./codes.ts";
 
 /** A repo step approval (control StepApproval). */
 export type MayApproval = { by: string; at: string };
 /** A live workflow as src/core/may.ts reads it (its WorkflowGate). */
 export type MayWorkflow = {
   live: boolean; entry: "review" | "fix-up" | "implement" | "merge"; state: string; startedBy: string; approvedBy: string | null; approvedAt: string | null;
-  blocker: string | null; baseHead: string | null; fixupAsked: boolean; leg: { state: string; head: string | null } | null;
+  blocker: string | null; baseHead: string | null; accepted?: readonly string[]; leg: { state: string; head: string | null } | null;
 };
 
 /** Why an outside author's item waits for model work: over the author's daily budget, or created in a surge. */
@@ -49,7 +51,19 @@ export type ActionKind =
 /** Who an item is assigned to as mirrored, and whether the last successful assign or unassign in the audit is our assignment of the pipeline account. `login`: the pipeline account (null when unknown: nothing is released). */
 export type AssignFacts = { login: string | null; assignees: string[]; ours: boolean };
 
-export type Action = { kind: ActionKind; head: string | null; params?: Record<string, unknown> };
+/**
+ * Whether an action that is due may run, on whose say (`by`; null when nobody's is needed or the facts do not name them) and as whom its
+ * write is made. Without the global pipeline switch, which holds back the pipeline's own jobs only (src/core/authority.ts mayRun).
+ */
+export type Permission =
+  | { ok: true; as: "app" | `user:${string}`; by: { kind: "person" | "repo"; login: string } | null }
+  | { ok: false; why: Refusal };
+
+/** `permission` is set by decidePr and decideItem, and no stored row carries it (a refused action keeps the refusal's code): without one it is judged again (mayRun), never taken as a yes. */
+export type Action = { kind: ActionKind; head: string | null; params?: Record<string, unknown>; permission?: Permission };
+
+/** Who started work acts for, and whether they count on the repo (data/access standing). `boxIdentity`: GitHub writes go out as the box account, under which nobody's standing is known. */
+export type StandingFact = { login: string; standing: "yes" | "no" | "unknown"; boxIdentity?: true };
 
 /** Where a head's unsent ask comments leave the next ask (src/core/rules.ts unsentAsk); absent when it is due. */
 export type UnsentAsk = { until: number } | "final";
@@ -70,10 +84,12 @@ export type Plan = {
   actions: Action[];
   /** The conflict-handling note ("conflict: merging main"); apart from `note`, which is the queue's own. */
   conflictNote: string | null;
-  /** What it waits on when no main-path action is due. */
+  /** What it waits on when no main-path action is due, or what ends the first refusal when none that is due may run. */
   wait: string | null;
   /** Who `wait` is on; null exactly when `wait` is. */
   waitKind: WaitKind | null;
+  /** What `wait` is, as a code; null exactly when `wait` is. A stored row has it in its view. */
+  waitCode?: WaitCode | null;
   /** The merge rule or an operator's answer lets it merge now (a refused PR still counts while its retry waits for a change). */
   eligible: boolean;
 };
@@ -84,6 +100,8 @@ export type MergePath = "rule" | "operator" | "maintainer" | null;
 /** The live maintainer workflow of an item (src/workflow/types.ts ItemWorkflow), as the planner reads it. */
 export type WorkflowFact = {
   entry: "review" | "fixup" | "implement" | "merge";
+  /** Where it is (src/workflow/types.ts WorkflowState). */
+  state?: string;
   /** Approved for merge, at the start or later. */
   approved: boolean;
   startedBy: string;
@@ -95,7 +113,7 @@ export type WorkflowFact = {
 };
 
 /** The state of an item's latest workflow when none is live (src/workflow/types.ts WorkflowState). Each means hands off (done: an open PR whose workflow ended with an answer that runs nothing): not even the auto path takes the item up again until someone starts it. */
-export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog";
+export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog" | "superseded";
 
 export const isQueueState = (s: PlanState): s is QueueState => (QUEUE_STATES as readonly string[]).includes(s);
 
@@ -111,7 +129,6 @@ export type ReviewFacts = {
   verdict: string;
   /** Unsure at this head or anywhere in the chain of heads AutoCraft pushed it from: only a hand-over of a PR approved for merge lets it merge. */
   unsure: boolean;
-  mode: string | null;
   reason: string;
   /** Number of fixes the review lists. */
   fixes: number;
@@ -120,6 +137,9 @@ export type ReviewFacts = {
   /** `stale` as the Review step counts it: a PR at its daily cap of discussion-triggered re-reviews is not due again. */
   staleActionable: boolean;
 };
+
+/** Why what a merge landed is reviewed: nobody approved the merge (`rule`), it was approved before the implementation's PR existed, or a push of ours changed code after the approved head. */
+export type LandedWhy = "rule" | "implementation" | "push";
 
 export type PrFacts = {
   repo: string; number: number;
@@ -168,8 +188,10 @@ export type PrFacts = {
   labelUnsure?: boolean;
   /** The open or merged PRs this open PR duplicates (src/data/triage/dupe-sets.ts); `compared` false until the group is compared. Holds only what nobody started. */
   duplicates?: { of: number[]; compared: boolean };
-  /** What the cached diff of the current head holds that keeps the PR outside the merge rule whatever a review says; absent when nothing, no diff is cached or it waits for its extras. */
+  /** What keeps the PR outside the merge rule whatever a review says: a base other than the default branch, and what the cached diff of the current head holds (unknown while no diff is cached or it waits for its extras); absent when nothing. */
   ruledOut?: string[];
+  /** A fix-up or CI fix of the head was about to be pushed, by a job that is at it or that stopped there. */
+  pushing?: true;
   // scope
   /** In scope: a maintainer started it, or its repo's Pipeline switch is on. */
   inScope: boolean;
@@ -177,6 +199,8 @@ export type PrFacts = {
   outsideHold?: OutsideHoldInfo;
   /** The item's live maintainer workflow; null when nobody started it. */
   workflow?: WorkflowFact | null;
+  /** Who the live workflow's merge and its other work act for, and whether they count on the repo; absent when nothing loaded it. */
+  standing?: { merge: StandingFact | null; work: StandingFact | null };
   /** Without a live one, how the item's latest workflow ended; loaded like `workflow`. */
   endedWorkflow?: EndedWorkflow | null;
   /** An integration batch PR the pipeline opened itself. */
@@ -187,8 +211,6 @@ export type PrFacts = {
   heldBacklog: boolean;
   /** The quiet pull request of a security fix that is not yet public: nothing is posted about it on GitHub. */
   quiet?: boolean;
-  /** An operator holds its merge. */
-  mergeHeld: boolean;
   /** The score of its live workflow (weight, then age), else the rank score; null when unranked. Lanes order by it, highest first, then by number. */
   score: number | null;
   repoFacts: {
@@ -197,8 +219,6 @@ export type PrFacts = {
     noCi: boolean;
     /** The default branch's CI is red. */
     mainRed: boolean;
-    /** Issue implementations are approved for the repo: the gate of an implementation PR's revisions. */
-    fixIssueApproved?: boolean;
     /** The repo's `implement` build feature is on (src/build/features.ts): the switch of an implementation PR's revisions and of the end of its attempt. */
     implementOn: boolean;
   };
@@ -238,10 +258,16 @@ export type PrFacts = {
   handOver: boolean;
   /** The merge, made as the person who approved it, waits for their sign-in or access: the merge step leaves it out, so none is proposed. */
   mergeWaiting: boolean;
+  /** It waits because that person could not write to the repo, which no sign-in of theirs changes. */
+  mergeLacksAccess?: boolean;
+  /** The before and after screenshots at the head show a clear regression, found after a person last started or answered the item. */
+  screenshots?: { summary: string | null };
 
   /** The pre-merge review row at the reviewed head. */
   premerge: { at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; defects: number; defectsAllFixable: boolean; /** Every defect's fix names a safe path, so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
   premergeFixUsed: boolean;
+  /** That round's patch is being pushed, or was pushed and the mirror still shows the head it was made on. */
+  premergeFixRunning?: boolean;
   /** Owner statements (owner_statements) that the Opus review or the pre-merge review at the reviewed head says the PR goes against; any keeps the PR off the merge rule. */
   /** Reasons from the PR's diff that keep it off the merge rule (README, brand files, third-party links); read from the diff cache at the reviewed head, null when the diff is not cached. */
   sensitive: string[] | null;
@@ -283,8 +309,8 @@ export type PrFacts = {
     /** Comments at the head that never reached GitHub, as on `fixup`. */
     unsent?: UnsentAsk;
   } | null;
-  /** The pipeline merged the PR: when, and what the stored post-merge review looks like. */
-  postmerge: { mergedAt: string; head: string | null; since: string; review: { at: string; error: string | null } | null } | null;
+  /** The pipeline merged the PR: when, why what landed is reviewed (null: it merged as a person approved it), the time merges are reviewed from, and what the stored post-merge review looks like. */
+  postmerge: { mergedAt: string; head: string | null; why: LandedWhy | null; since: string; review: { at: string; error: string | null } | null } | null;
   /** The batch the reviewed head is in. */
   batch: "batch-checking" | "in-batch" | "batch-failed" | null;
   /** The PR is one AutoCraft opened to fix main CI. */
@@ -303,10 +329,8 @@ export type PrFacts = {
     /** GitHub writes go out as the box account, under which nobody's standing is known. */
     boxIdentity?: boolean;
   } | null;
-  /** The PR's base is not its repository's default branch: it merges singly (into the base its review read), never in an integration batch. */
+  /** The PR's base is not its repository's default branch: nothing merges it. */
   baseOffDefault: boolean;
-  /** The open PR of this repository whose head branch is this PR's base (a stacked PR); null when none. */
-  stackedOn: number | null;
   /** A maintainer's formal block: why, and whether from a live read. */
   changesRequested: { why: string; live: boolean } | null;
   /** The note when live review reads failed several times in a row. */
@@ -367,9 +391,11 @@ export type ItemFacts = {
   inFlight?: boolean;
   assignment: AssignFacts;
   /** The repo's approvals for the writes below (decideItem does not apply them: gates() does). */
-  repoFacts: { labelsApproved: boolean; commentApproved: boolean; fixIssueApproved: boolean };
+  repoFacts: { labelsApproved: boolean; commentApproved: boolean };
   /** As on PrFacts. */
   workflow?: WorkflowFact | null;
+  /** As on PrFacts. */
+  standing?: { merge: StandingFact | null; work: StandingFact | null };
   /** As on PrFacts; a workflow ended `closed` lets its person's close through outside the scope. */
   endedWorkflow?: EndedWorkflow | null;
 
@@ -414,7 +440,7 @@ export type ItemFacts = {
   /** A person's close of the item that the Act step carries out now (a `workflow_actions` row in `pending`), as that person. */
   close: { id: number; by: string; weight: number; at: string } | null;
 
-  /** The open PR that holds an issue: one that closes or addresses it (`closes`), else a person's PR that mentions it by number; null when there is none. */
+  /** The open PR of an issue: one that closes or addresses it (`closes`), which holds it, else a person's PR that mentions it by number; null when there is none. */
   openPr: { number: number; closes: boolean } | null;
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */
@@ -440,6 +466,8 @@ export type ItemFacts = {
       decisionAnswered: boolean;
       /** An ended attempt, and the issue was queued again after it ended (its live implement workflow is newer). */
       requeuedAfterEnd: boolean;
+      /** When an ended attempt ended. */
+      endedAt?: string;
       /** Who an `asked` attempt waits on, from its newest question round: the issue's author (a GitHub comment) or a maintainer (the workflow's recommendation); null in other states. */
       asked: "author" | "maintainer" | null;
       /** The attempt's PR is open. */
@@ -455,10 +483,12 @@ export type ItemPlan = {
   repo: string; number: number; kind: "pr" | "issue";
   state: ItemState;
   actions: Action[];
-  /** What it waits on when no action is due. */
+  /** What it waits on when no action is due, or what ends the first refusal when none may run. */
   wait: string | null;
   /** Who `wait` is on; null exactly when `wait` is. */
   waitKind: WaitKind | null;
+  /** What `wait` is, as a code; null exactly when `wait` is. A stored row has it in its view. */
+  waitCode?: WaitCode | null;
 };
 
 /** The item's plans together: the triage plan, and for a PR the review-to-merge Plan; `actions` lists both, triage first. */

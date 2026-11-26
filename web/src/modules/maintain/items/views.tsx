@@ -48,7 +48,6 @@ function groupTitle(g: MaintainItemGroup, viewer: boolean): string {
 function byLine(r: MaintainItemRow): string | null {
   if (!r.startedBy) return null;
   const started = t("started by {login}", { login: r.startedBy });
-  if (r.stoppedBy) return t("{started}, stopped by {login}", { started, login: r.stoppedBy });
   return t("{started}, {approved}", { started, approved: r.approvedBy ? t("approved by {login}", { login: r.approvedBy }) : t("not approved") });
 }
 
@@ -67,7 +66,7 @@ function RowLine({ r }: { r: MaintainItemRow }) {
         <span className={r.group === "needs" ? "font-medium text-accent-ink" : "text-ink/80"}>{r.line}</span>
       ) : r.status ? (
         <span className="text-ink/80">
-          <span className="font-medium">{r.status.phase}</span>
+          <span className="font-medium">{r.status.phase === "Held" && !r.stoppedBy ? t("Parked") : r.status.phase}</span>
           {r.status.waiting && <span className="text-ink/70"> · {t("waiting for {what}", { what: r.status.waiting })}</span>}
         </span>
       ) : null}

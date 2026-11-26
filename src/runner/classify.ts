@@ -17,6 +17,7 @@ import { priorityDue } from "../core/decide-item.ts";
 import type { ClassifyExtras } from "../prompts/index.ts";
 import { AREAS, PRIORITY } from "../agents/steps.ts";
 import { fillClassHashes } from "../itemhash.ts";
+import { byOfJob, CLI_BY, type By } from "../core/gates.ts";
 import { itemPlans, itemsOf, plannedItems, type ItemPlans, type PlannedItem } from "../core/select-items.ts";
 import { countItems } from "../data/mirror/index.ts";
 import { keepEarlierUsage } from "../data/inference/index.ts";
@@ -107,17 +108,17 @@ async function classifyExtras(db: Db, plans: ClassifyPlans, todo: readonly Item[
  * The classify Plans of one job: loaded once, at its start, with the items a maintainer started work on (workflow.loadStartedRefs),
  * which go first in both passes.
  */
-export type ClassifyPlans = ItemPlans & { started: Set<string> };
+export type ClassifyPlans = ItemPlans & { started: Set<string>; by: By };
 
-export async function classifyPlans(db: Db, run: string): Promise<ClassifyPlans> {
+export async function classifyPlans(db: Db, run: string, by: By = CLI_BY): Promise<ClassifyPlans> {
   const plans = await itemPlans(db, "classify", { run });
-  return { ...plans, started: await loadStartedRefs(db, { refs: plans.items.filter((p) => p.plan.actions.some((a) => a.kind === "classify")).map((p) => p.facts) }) };
+  return { ...plans, by, started: await loadStartedRefs(db, { refs: plans.items.filter((p) => p.plan.actions.some((a) => a.kind === "classify")).map((p) => p.facts) }) };
 }
 
 /** The classify actions of `bucket` in the step's order, with started items first (stable). */
 async function bucketItems(db: Db, plans: ClassifyPlans, bucket: "jev" | "haiku"): Promise<PlannedItem[]> {
   const started = (p: PlannedItem) => (plans.started.has(`${p.facts.repo}#${p.facts.number}`) ? 0 : 1);
-  return (await plannedItems(db, "classify", { plans, bucket })).map((p, i) => ({ p, i })).sort((a, b) => started(a.p) - started(b.p) || a.i - b.i).map((x) => x.p);
+  return (await plannedItems(db, "classify", { plans, bucket, by: plans.by })).map((p, i) => ({ p, i })).sort((a, b) => started(a.p) - started(b.p) || a.i - b.i).map((x) => x.p);
 }
 
 /**
@@ -126,7 +127,7 @@ async function bucketItems(db: Db, plans: ClassifyPlans, bucket: "jev" | "haiku"
  */
 async function haikuItems(db: Db, run: string, limit: number, plans: ClassifyPlans, jevDone: ReadonlySet<string>): Promise<Item[]> {
   const fresh = jevDone.size ? (await itemPlans(db, "classify", { run, refs: jevDone })).items : [];
-  const now: ClassifyPlans = { started: plans.started, items: [...plans.items.filter((p) => !jevDone.has(`${p.facts.repo}#${p.facts.number}`)), ...fresh] };
+  const now: ClassifyPlans = { by: plans.by, started: plans.started, items: [...plans.items.filter((p) => !jevDone.has(`${p.facts.repo}#${p.facts.number}`)), ...fresh] };
   const todo = (await takersFirst(db, await bucketItems(db, now, "haiku"), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, limit);
   return await itemsOf(db, todo.map((p) => p.facts));
 }
@@ -180,7 +181,7 @@ async function pass(ctx: StepContext, run: string, mode: "new" | "all"): Promise
   ctx.usageRun(run);
   await ctx.progress("Finding items to classify");
   await fillClassHashes(ctx.db);
-  const plans = await classifyPlans(ctx.db, run);
+  const plans = await classifyPlans(ctx.db, run, byOfJob(ctx.job.requestedBy));
   const { open, due, hashes } = await jevItems(ctx.db, run, mode, plans);
   const todo = (await takersFirst(ctx.db, due, (x) => [x.repo], (x) => [x])).slice(0, limit);
   ctx.log(`run ${run}: ${open} open items, ${due.length} due for Jev, taking ${todo.length}`);

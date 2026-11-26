@@ -6,8 +6,9 @@
 // (src/dash/api/admin.ts).
 import { jobItem } from "../runner/job-items.ts";
 import { MAX_FAILURES } from "../core/rules.ts";
-import { effectiveCi } from "../optional-checks.ts";
-import { planned } from "../core/select.ts";
+import { ciAt } from "../core/evidence.ts";
+import { optionalChecks } from "../optional-checks.ts";
+import { planned, runnable } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { Exec } from "../fixup/git.ts";
 import { guard } from "../core/guard.ts";
@@ -21,7 +22,6 @@ import type { StepApproval } from "../data/control/types.ts";
 import { loadChecks } from "../data/mirror/index.ts";
 import { loadRunApprovals, markRereads, recordRuns as saveRuns, saveRunResults } from "../data/merge/index.ts";
 import type { RunsInput, Suite, WaitingRun } from "../data/merge/types.ts";
-import { mergeHeld } from "./holds.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -56,18 +56,17 @@ export async function markReread(db: Db, repo: string, number: number, head: str
   await markRereads(db, [{ repo, number, head }], at);
 }
 
-/** `overall` as CI reads for the PR's head, with failures of the repo's optional checks left out (effectiveOverall): "pending" while runs wait for approval or the ones we approved have not finished, since the check rollup does not list them. */
+/** `overall` as CI reads for the PR's head (ciAt), and "pending" while runs wait for approval there, since the check rollup does not list them. */
 export async function overallAt(db: Db, repo: string, number: number, head: string, overall: string): Promise<string> {
   const ref = [{ repo, number }];
-  const [checks, runs] = await db.together(() => Promise.all([
-    overall === "failure" ? loadChecks(db, ref) : Promise.resolve(null),
-    loadRunApprovals(db, ref),
+  const failed = overall === "failure";
+  const [checks, optional, runs] = await db.together(() => Promise.all([
+    failed ? loadChecks(db, ref) : null, failed ? optionalChecks(db, repo) : [], loadRunApprovals(db, ref),
   ]));
-  const row = checks?.get(`${repo}#${number}`);
-  const eff = overall === "failure" ? await effectiveCi(db, repo, overall, row?.head_oid === head ? row.checks : undefined) : overall;
   const r = runs.get(headOf(repo, number, head));
-  if (!r) return eff;
-  return r.reread || r.runs.length || r.approved.length ? "pending" : eff;
+  if (r && (r.reread || r.runs.length)) return "pending";
+  const row = checks?.get(`${repo}#${number}`);
+  return ciAt({ head_oid: head, overall, checks: row?.head_oid === head ? row.checks : null }, head, { optional, approvedRuns: r?.approved.length ?? 0 });
 }
 
 export type Candidate = { number: number; head: string; runs: WaitingRun[]; reread: boolean; failed: Record<string, number>; crossRepo: boolean };
@@ -77,8 +76,9 @@ export type Candidate = { number: number; head: string; runs: WaitingRun[]; rere
  * batch PRs with runs waiting at the batch tip (their code is the members' code, and every member is reviewed at the head it was batched at).
  * The runs are read from the recorded row at the action's head.
  */
-export async function needsWork(db: Db, repo: string, run?: string | null, plans?: PlanSet): Promise<Candidate[]> {
-  const due = await planned(db, "approve-ci", { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) });
+export async function needsWork(db: Db, repo: string, by: By = CLI_BY, log: (line: string) => void = () => {}): Promise<Candidate[]> {
+  const { may: due, held } = runnable(await planned(db, "approve-ci", { repo, refused: true }), by);
+  if (held) log(`${repo}: ${held}`);
   const rows = await loadRunApprovals(db, due.map((p) => ({ repo, number: p.facts.number })));
   const out: Candidate[] = [];
   for (const { facts, action } of due) {
@@ -128,10 +128,8 @@ export async function approveRuns(db: Db, repo: string, d: ApproveDeps): Promise
   const out: ApproveResult = { approved: [], skipped: [], failed: [] };
   const save = async (c: Candidate, runs: WaitingRun[], approved: number[], failed: Record<string, number>): Promise<void> =>
     await saveRunResults(db, [{ key: headOf(repo, c.number, c.head), runs, approved, failed, approvedNow: approved.length > 0 }]);
-  for (const c of await needsWork(db, repo)) {
+  for (const c of await needsWork(db, repo, d.by, log)) {
     if (out.approved.length + out.failed.length >= d.limit) break;
-    if (!await ciApprovalOf(db, repo)) throw new Error(`approving CI runs in ${repo} is not approved`);
-    if (await mergeHeld(db, repo, c.number)) continue;
     const ref = `${repo}#${c.number}`;
     let runs = c.runs;
     let pr: { state?: string; draft?: boolean; head?: { sha?: string; repo?: { full_name?: string } | null }; base?: { repo?: { full_name?: string } | null } };
@@ -155,7 +153,6 @@ export async function approveRuns(db: Db, repo: string, d: ApproveDeps): Promise
     const done: number[] = [];
     let stopped: string | null = null;
     for (const run of todo) {
-      if (!await ciApprovalOf(db, repo)) throw new Error(`approving CI runs in ${repo} is not approved`);
       const g = await guard(db, { repo, number: c.number }, { kind: "approve-ci", head: c.head }, d.by ?? CLI_BY);
       if ("refused" in g) { stopped = g.refused; break; }
       const r = await ghApproveRun(w, d.exec, g, run.id, { head: c.head, workflow: run.name });

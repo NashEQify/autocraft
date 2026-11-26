@@ -25,7 +25,7 @@ test("stop on the PR of an implement workflow halts the issue's workflow, its me
     await w.db.run(w.db.k.insertInto("main.operator_fixups").values({ repo: "app", number: 8, from_head: "sha8", instructions: "x", by: MAINT, at: T0 }));
     const r = await runCommand(w.db, actor, via, { parsed: parse(via === "discord" ? "stop: app#8" : "stop"), items: via === "discord" ? [] : [{ repo: "app", number: 8 }] });
     assert.equal(r.items[0]!.outcome, "run", r.lines.join("\n"));
-    assert.match(r.lines[0]!, /app#7: Stopped/);
+    assert.match(r.lines[0]!, /app#7: On hold/);
     const [wf] = await workflowHistory(w.db, "app", 7);
     assert.deepEqual([wf!.state, wf!.stoppedBy], ["stopped", MAINT]);
     assert.deepEqual((await legs8(w)).map((l) => l.state), ["cancelled"]);
@@ -34,7 +34,7 @@ test("stop on the PR of an implement workflow halts the issue's workflow, its me
     assert.deepEqual([e.kind, e.workflowId, e.via], ["stopped", wf!.id, via]);
     assert.match(e.line!, /app#8/, "where it was said");
     await w.db.run(w.db.k.updateTable("main.items").set({ url: "https://github.com/storytold/app/issues/7" }).where("number", "=", 7));
-    assert.match((await statusDue(w.db, "app")).find((d) => d.number === 7)!.line, /Stopped by mira/, "the issue's status comment says so");
+    assert.match((await statusDue(w.db, "app")).find((d) => d.number === 7)!.line, /Held by mira/, "the issue's status comment says so");
     assert.deepEqual(await workflowHistory(w.db, "app", 8), [], "the PR gets no workflow");
     assert.equal((await send(w, "stop", 8)).outcome, "refused", "nothing is left running");
     w.close();
@@ -47,7 +47,7 @@ test("a stop halts the issue's workflow and the one its PR has of its own, from 
     await insertWorkflow(w.db, { repo: "app", number: 8, kind: "pr", entry: "review", state: "running", startedBy: MAINT, startedAt: T0, startedVia: "dashboard" });
     const o = await send(w, "stop", number);
     assert.equal(o.outcome, "run", o.line);
-    assert.match(o.line, new RegExp(`app#${15 - number} stopped too`));
+    assert.match(o.line, new RegExp(`app#${15 - number} is held too`));
     for (const n of [7, 8]) {
       assert.deepEqual((await workflowHistory(w.db, "app", n)).map((x) => x.state), ["stopped"]);
       assert.equal((await eventsOf(w.db, "app", n)).at(-1)!.kind, "stopped");
@@ -157,7 +157,7 @@ test("a revision runs for whoever last answered, approved or started the issue's
   const plan = await w.prPlan(8);
   assert.deepEqual([plan.waitKind, plan.wait?.includes(MAINT)], ["person", true], plan.wait ?? "");
   const issue = implementStep((await loadItemFact(w.db, "app", 7))!);
-  assert.ok(issue && "wait" in issue && issue.wait.includes(MAINT), JSON.stringify(issue));
+  assert.ok(issue && "wait" in issue && issue.wait.text.includes(MAINT), JSON.stringify(issue));
   assert.deepEqual(await implementJobs(w), [[9, "plan"]]);
 
   // The plans may be older than the access they were made on: the job that may not run is passed over.

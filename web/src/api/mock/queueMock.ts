@@ -2,6 +2,7 @@
 import type { Api } from "../client";
 import type { MergeWait, NextMerge, QueueBatch, QueueMergeRow, QueueOrigin, QueuePage, QueuePendingRow, QueueRow, User, WeightPlace } from "../types";
 import { PIPELINE_REPOS, queueBatches, queueRows } from "./queueFixtures";
+import { heldItems } from "./heldMock";
 
 const WAITS: Record<string, [MergeWait, string, number]> = {
   ready: ["ready", "Ready", 0],
@@ -24,9 +25,10 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "queue
     if (r.number % 11 === 0) return { how: "preapproved", by: "jonas-k", at: r.reviewedAt };
     return { how: "review", by: null, at: r.reviewedAt };
   };
-  // One designcraft PR starts out held, so the Merge tab shows a held row.
-  const first = allMerge.find((r) => r.repo === "designcraft" && r.state === "ready");
-  const held = new Set<string>(first ? [`${first.repo}#${first.number}`] : []);
+  const hold = (ref: string) => {
+    const row = [...allMerge, ...fixtureBatches.flatMap((b) => b.prs)].find((r) => key(r) === ref);
+    heldItems.set(ref, { title: row?.title ?? ref, kind: "pr", line: `Held by ${me.login}, ${new Date().toISOString().slice(11, 16)} UTC` });
+  };
   const removed = new Set<string>();
   const stopped = new Set<number>();
   const key = (r: { repo: string; number: number }) => `${r.repo}#${r.number}`;
@@ -49,7 +51,7 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "queue
       const inScope = (repo: string) => (repos === "all" ? true : repos === "pipeline" ? PIPELINE_REPOS.includes(repo) : repo === repos);
       const batches: QueueBatch[] = fixtureBatches
         .filter((b) => (b.state === "open" || b.state === "checking") && inScope(b.repo))
-        .map((b) => ({ ...b, prs: b.prs.filter((p) => !removed.has(key(p)) && !stopped.has(b.id)) }))
+        .map((b) => ({ ...b, prs: b.prs.filter((p) => !removed.has(key(p)) && !heldItems.has(key(p)) && !stopped.has(b.id)) }))
         .filter((b) => !stopped.has(b.id));
       const inBatch = new Set(batches.flatMap((b) => b.prs.map(key)));
       const returned = fixtureBatches.filter((b) => stopped.has(b.id)).flatMap((b) => b.prs);
@@ -57,12 +59,12 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "queue
       const seen = new Set<string>();
       const entries = base
         .filter((r) => !seen.has(key(r)) && !!seen.add(key(r)))
-        .map((r): QueueMergeRow => ({ ...r, state: inBatch.has(key(r)) ? r.state : r.state === "in-batch" || r.state === "batch-checking" ? "ready" : r.state, place: pos(r), held: held.has(key(r)), added: originOf(r) }))
-        .filter((r) => r.state !== "merged" && inScope(r.repo));
+        .map((r): QueueMergeRow => ({ ...r, state: inBatch.has(key(r)) ? r.state : r.state === "in-batch" || r.state === "batch-checking" ? "ready" : r.state, place: pos(r), added: originOf(r) }))
+        .filter((r) => r.state !== "merged" && inScope(r.repo) && !heldItems.has(key(r)));
       // Approved for merge, no take review yet.
       const pending: QueuePendingRow[] = [
-        { repo: "designcraft", number: 3311, kind: "pr" as const, title: "Keep the swatch order when importing a palette", author: "contributor", size: "S" as const, step: "fixup" as const, held: false, added: { how: "queued" as const, by: "operator", at: new Date(Date.now() - 3600_000).toISOString() } },
-        { repo: "designcraft", number: 3317, kind: "pr" as const, title: "Frame tool: snap to the baseline grid", author: "contributor", size: "M" as const, step: "review" as const, held: false, added: { how: "preapproved" as const, by: "operator", at: new Date(Date.now() - 1800_000).toISOString() } },
+        { repo: "designcraft", number: 3311, kind: "pr" as const, title: "Keep the swatch order when importing a palette", author: "contributor", size: "S" as const, step: "fixup" as const, added: { how: "queued" as const, by: "operator", at: new Date(Date.now() - 3600_000).toISOString() } },
+        { repo: "designcraft", number: 3317, kind: "pr" as const, title: "Frame tool: snap to the baseline grid", author: "contributor", size: "M" as const, step: "review" as const, added: { how: "preapproved" as const, by: "operator", at: new Date(Date.now() - 1800_000).toISOString() } },
       ].filter((r) => inScope(r.repo));
       const merge = entries.length + pending.length;
       const counts = { all: merge, review: 0, fix: 0, verify: 0, merge };
@@ -73,39 +75,33 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "queue
       out.total = free.length;
       out.next = offset + out.mergeRows.length < free.length ? offset + out.mergeRows.length : null;
       out.pending = pending;
-      out.batches = batches.map((b) => ({ ...b, prs: b.prs.map((p): QueueMergeRow => ({ ...p, place: pos(p), held: held.has(key(p)), added: originOf(p) })) }));
+      out.batches = batches.map((b) => ({ ...b, prs: b.prs.map((p): QueueMergeRow => ({ ...p, place: pos(p), added: originOf(p) })) }));
       const batchOf = new Map(batches.flatMap((b) => b.prs.map((p) => [key(p), { id: b.id, branch: b.branch }] as const)));
       const items = entries.flatMap((e) => {
-        const w: [MergeWait, string, number] | undefined = held.has(key(e)) && e.state in WAITS ? ["held", "Merge held by an operator", 9] : WAITS[e.state];
+        const w: [MergeWait, string, number] | undefined = WAITS[e.state];
         return w ? [{ e, w }] : [];
       });
-      items.sort((a, b) => (a.w[2] === 9 ? 1 : 0) - (b.w[2] === 9 ? 1 : 0) || rank(a.e) - rank(b.e) || a.w[2] - b.w[2]);
+      items.sort((a, b) => rank(a.e) - rank(b.e) || a.w[2] - b.w[2]);
       out.nextMerges = items.slice(0, 10).map(({ e, w }): NextMerge => ({ repo: e.repo, number: e.number, title: e.title, waitsFor: w[0], label: w[1], batch: batchOf.get(key(e)) ?? null }));
       return wait(out);
     },
     controls: {
       async run(input) {
         need();
-        if (input.control === "resume-breaker") return { ok: true, line: `Resumed ${input.key}` };
-        const { control } = input;
-        const k = key(input);
-        if (control === "hold-merge") held.add(k);
-        else held.delete(k);
-        changed();
-        return { ok: true, line: control === "hold-merge" ? `${k} is held out of the next merge.` : `${k} can merge again.` };
+        return { ok: true, line: `Resumed ${input.key}` };
       },
     },
     queueControl: {
       async batchRemove(item) {
         need();
         removed.add(item);
-        held.add(item);
+        hold(item);
         changed();
       },
       async stopBatch(id) {
         need();
         stopped.add(id);
-        for (const p of fixtureBatches.find((b) => b.id === id)?.prs ?? []) held.add(key(p));
+        for (const p of fixtureBatches.find((b) => b.id === id)?.prs ?? []) hold(key(p));
         changed();
       },
     },

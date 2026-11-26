@@ -19,7 +19,7 @@ import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-err
 import { exclusive } from "./async-seq.ts";
 import { isFenced } from "./db/fence.ts";
 import type { Db } from "./db/index.ts";
-import { dbLockName, openDb, setDbRole } from "./db/open.ts";
+import { closeDb, dbLockName, openDb, setDbRole } from "./db/open.ts";
 import { loadTrackedRepos, readSettingsSnapshot, withSettingsSnapshot } from "./data/control/index.ts";
 import { effect } from "./db/effects.ts";
 import {
@@ -1044,6 +1044,8 @@ async function sync(args: string[]): Promise<void> {
   }
   const release = acquireLock(opts.full ? fullLockPath() : lockPath());
   if (!release) return;
+  // Chores still running past their limit; the process cannot wait for them to end on their own.
+  const stuck: string[] = [];
   try {
     // The periodic container runs this command in a loop.
     setDbRole("periodic");
@@ -1070,40 +1072,25 @@ async function sync(args: string[]): Promise<void> {
       const { mode, items } = await runSync(db, querier, opts).finally(() => clearInterval(mainCiTimer));
       await finishSyncRun(db, row, { endedAt: iso(new Date()), mode, items });
       console.log(`sync: mode=${mode} items=${items} points=${client.spent} left=${client.remaining}`);
+      const chores = !opts.full && !opts.only.length;
       // Files, commits and label events of the items that changed; a failed read leaves them for the next run.
-      if (!opts.full && !opts.only.length) {
-        try {
+      if (chores) {
+        await chore("activity", async () => {
           const n = await syncActivity(db, querier);
           if (n) console.log(`activity: ${n} items read, ${client.remaining} points left`);
-        } catch (e) {
-          console.log(`activity: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-        }
+        }, stuck);
       }
-      if (pollsMainCi) await mainCi.run();
+      if (pollsMainCi) await chore("main-ci", () => mainCi.run(), stuck);
       // Release download and star counts for the Downloads report; one failing repo is logged and skipped.
-      if (!opts.full && !opts.only.length) {
-        try {
-          await (await import("./downloads/poll.ts")).pollReleasesIfDue(db, undefined, Date.now(), (l) => console.log(l));
-        } catch (e) {
-          console.log(`releases: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-        }
-      }
+      if (chores) await chore("releases", async () => void await (await import("./downloads/poll.ts")).pollReleasesIfDue(db, undefined, Date.now(), (l) => console.log(l)), stuck);
       // GitHub App installations on accounts that are not allowed owners.
-      if (!opts.full && !opts.only.length) {
-        try {
-          await (await import("./github/allowed-owners.ts")).sweepInstallationsIfDue(db);
-        } catch (e) {
-          console.log(`github app: sweep: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-        }
-      }
+      if (chores) await chore("github app: sweep", async () => void await (await import("./github/allowed-owners.ts")).sweepInstallationsIfDue(db), stuck);
       // Findings whose fix is landing: a merged pull request, or a fix that reached the default branch through an advisory.
-      if (!opts.full && !opts.only.length) {
-        try {
+      if (chores) {
+        await chore("security", async () => {
           const { exec, fixupDir } = await import("./fixup/git.ts");
           await (await import("./security/land.ts")).pollLandingIfDue(db, { exec, root: fixupDir(), log: (l) => console.log(l) });
-        } catch (e) {
-          console.log(`security: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-        }
+        }, stuck, async () => `at ${(await import("./security/land.ts")).landingStage()}`);
       }
     } catch (e) {
       await finishSyncRun(db, row, { endedAt: iso(new Date()), error: String((e as Error)?.message ?? e).slice(0, 300) });
@@ -1111,6 +1098,47 @@ async function sync(args: string[]): Promise<void> {
     }
   } finally {
     release();
+  }
+  await endRun(stuck.length ? 1 : 0);
+}
+
+/** How long the end of a sync run waits for the database handle to close. */
+const CLOSE_MS = 5_000;
+
+/**
+ * Ends the sync process once its run is done. Whatever still holds the event loop is logged first: nothing should, so a
+ * line here names a handle some code left open. A chore left running past its limit is one of them.
+ */
+async function endRun(code: number): Promise<never> {
+  const open = process.getActiveResourcesInfo();
+  if (open.length) console.log(`sync: open at the end of the run: ${open.join(", ")}`);
+  let t: NodeJS.Timeout | undefined;
+  await Promise.race([closeDb().catch(() => undefined), new Promise((r) => { t = setTimeout(r, CLOSE_MS); })]);
+  clearTimeout(t);
+  process.exit(code);
+}
+
+/** Longest a chore after the mirror run may take before the run goes on without it. */
+const CHORE_MS = 15 * 60_000;
+
+/**
+ * Runs one chore after the mirror run. Its failure is logged under `name` and does not fail the run; one still running after
+ * `ms` is logged with `where` it is and the process's open resources, added to `stuck` and left behind.
+ */
+async function chore(name: string, fn: () => Promise<void>, stuck: string[], where?: () => Promise<string>, ms = CHORE_MS): Promise<void> {
+  let t: NodeJS.Timeout | undefined;
+  const late = new Promise<false>((r) => { t = setTimeout(() => r(false), ms); });
+  const run = fn().then(() => true, (e: unknown) => {
+    console.log(`${name}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    return true;
+  });
+  try {
+    if (await Promise.race([run, late])) return;
+    stuck.push(name);
+    const place = where ? ` (${await where()})` : "";
+    console.log(`${name}: still running after ${Math.round(ms / 60_000)} min${place}; the run goes on without it; open resources: ${process.getActiveResourcesInfo().join(", ")}`);
+  } finally {
+    clearTimeout(t);
   }
 }
 

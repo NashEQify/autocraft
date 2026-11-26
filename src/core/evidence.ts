@@ -1,6 +1,7 @@
 // What the rows say about a head of a pull request, one rule per question: the planner, the workflow pass, the merge legs and the merge
 // itself ask here. Pure.
 import type { PushEdge } from "../data/changes/types.ts";
+import type { LandedWhy } from "./plan.ts";
 
 /** A push of ours that moved a PR's head: the head it was made on and its commit. */
 export type OwnPush = { from: string; to: string };
@@ -73,6 +74,16 @@ export function pushesSince(pushes: readonly RecordedPush[], head: string, since
 /** The head the person chose to go on with: `head` without our pushes since. */
 export const approvedHead = (pushes: readonly RecordedPush[], head: string, since: string): string => pushesSince(pushes, head, since).at(-1)?.from ?? head;
 
+/**
+ * Our pushes after `since` that changed more than a checked merge does and that the head holds (`reached`: its ownHeads): the ones it was
+ * reached through, and those under someone else's commits. One that never landed, or is gone from the branch again, is not.
+ */
+const codePushes = (pushes: readonly RecordedPush[], reached: ReadonlySet<string>, since: string): RecordedPush[] =>
+  pushes.filter((p) => !p.small && p.from !== p.to && p.at > since && (reached.has(p.to) || (p.landed && !reached.has(p.from))));
+
+/** Up to when a person accepted a PR's code: an approval that answers no question (made after they last started or answered it, `said`) accepts what was pushed before it, else what they had seen (`since`). */
+export const agreedAt = (w: { approvedAt: string | null; since: string; said: string }): string => (w.approvedAt !== null && w.approvedAt > w.said ? w.approvedAt : w.since);
+
 /** A started PR as its person last left it. `since`: up to when they have seen it. `reviewAskedAt`: they asked for a model review newer than this of a PR that merges without one. */
 export type GoneOnPr = { entry: string; startedAt: string; since: string; reviewAskedAt: string | null };
 /** A head a model reviewed, and when. */
@@ -93,14 +104,80 @@ export function neededReview(w: GoneOnPr, pushes: readonly RecordedPush[], head:
   let from = w.since, owed = false, reviewed = w.reviewAskedAt !== null || w.since > w.startedAt;
   const owe = (at: string): void => { owed = true; if (at > from) from = at; };
   if (w.reviewAskedAt !== null && !made.some((r) => r.at > w.reviewAskedAt!)) owe(w.reviewAskedAt);
-  for (const p of pushes) {
-    if (p.small || p.from === p.to || p.at <= w.startedAt) continue;
+  for (const p of codePushes(pushes, reached, w.startedAt)) {
     const on = reached.has(p.to);
-    // It never landed, or is gone from the branch again.
-    if (!on && (!p.landed || reached.has(p.from))) continue;
     reviewed = true;
     // A head on the push was reviewed after it, whatever the times say; one that followed someone else's commits goes by them.
     if (!made.some((r) => (on ? chainsOwn(pushes, p.to, r.head) : r.at > p.at))) owe(on ? w.since : p.at);
   }
   return owed || (reviewed && made.some((r) => r.at > w.since)) ? { from } : null;
 }
+
+// ---- the review after a merge
+
+/** A person's approval of a merge. `since`: up to when they accepted the PR's code (agreedAt). `prOpenedAt`: an implementation's PR, when it was opened. */
+export type LandedApproval = { approvedAt: string; since: string; prOpenedAt: string | null };
+
+/** Why the merge of `head` gets a review of what it landed; null when it merged as a person approved it. */
+export function landedWhy(m: { head: string; approval: LandedApproval | null; pushes: readonly RecordedPush[] }): LandedWhy | null {
+  const a = m.approval;
+  if (!a) return "rule";
+  if (a.prOpenedAt !== null && Date.parse(a.prOpenedAt) > Date.parse(a.approvedAt)) return "implementation";
+  return codePushes(m.pushes, ownHeads(m.pushes, m.head), a.since).length ? "push" : null;
+}
+
+// ---- CI
+
+export type CiState = "success" | "failure" | "pending" | "none" | "unknown";
+type CheckLike = { name: string; state: string };
+
+/**
+ * The CI state merging acts on: a failure whose failing checks are all on the optional list reads as if those
+ * checks had not run (success when nothing else is pending or failing and some other check succeeded).
+ * The stored `overall` and `checks` stay as GitHub reported them.
+ */
+function effectiveOverall(overall: string, checks: CheckLike[], optional: readonly string[]): string {
+  if (overall !== "failure" || !optional.length) return overall;
+  const failing = checks.filter((c) => c.state === "failure");
+  if (!failing.length || failing.some((c) => !optional.includes(c.name))) return overall;
+  const rest = checks.filter((c) => c.state !== "failure").map((c) => c.state);
+  if (rest.includes("pending")) return "pending";
+  return rest.includes("success") ? "success" : "none";
+}
+
+/** effectiveOverall with the repo's optional list and the PR's stored checks (JSON text or parsed). */
+function effectiveCiWith(optional: readonly string[], overall: string, checks: string | CheckLike[] | null | undefined): string {
+  if (overall !== "failure") return overall;
+  let list: CheckLike[] = [];
+  try { list = typeof checks === "string" ? (JSON.parse(checks) as CheckLike[]) : checks ?? []; } catch { /* unreadable: stays failure */ }
+  return effectiveOverall(overall, list, optional);
+}
+
+/**
+ * CI at `head` from the stored checks of the PR: "unknown" when they describe another head or none were read, "pending" while workflow
+ * runs we approved there have not finished (`approvedRuns`), else what the checks say without the repo's optional ones.
+ */
+export function ciAt(
+  c: { head_oid: string | null; overall: string | null; checks: string | CheckLike[] | null } | null | undefined, head: string, o: { optional: readonly string[]; approvedRuns?: number },
+): CiState {
+  if (!c || c.head_oid !== head) return "unknown";
+  if (o.approvedRuns) return "pending";
+  return effectiveCiWith(o.optional, c.overall ?? "none", c.checks) as CiState;
+}
+
+// ---- the heads a person accepted
+
+/**
+ * The heads of the workflow's PR that a person accepted (our own pushes on top of them are accepted too, `isAccepted`). A PR's is its base head,
+ * which every release writes. An issue's is the accepted head of its implementation PR; a row without one says it with the base head and the
+ * heads its merge legs (`legs`: the workflow's, of any state) started from and were at.
+ */
+export function acceptedHeads(
+  w: { kind: "pr" | "issue"; baseHead: string | null; acceptedHead: string | null }, legs: readonly { from_head: string | null; head: string | null }[],
+): string[] {
+  const heads = w.kind === "pr" ? [w.baseHead ?? w.acceptedHead] : w.acceptedHead !== null ? [w.acceptedHead] : [w.baseHead, ...legs.flatMap((l) => [l.from_head, l.head])];
+  return heads.filter((h) => h !== null);
+}
+
+/** Whether `head` is one of `heads` or our own pushes on top of one. */
+export const isAccepted = (heads: readonly string[], pushes: readonly OwnPush[], head: string): boolean => heads.some((h) => chainsOwn(pushes, h, head));

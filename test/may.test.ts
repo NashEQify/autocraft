@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mayMerge, mayPush, mergeApproved, type WorkflowGate } from "../src/core/may.ts";
 import type { OwnPush } from "../src/core/evidence.ts";
 
-const wf = (o: Partial<WorkflowGate> = {}): WorkflowGate => ({ live: true, entry: "review", state: "running", startedBy: "starter", approvedBy: null, approvedAt: null, blocker: null, baseHead: "h1", fixupAsked: false, leg: { state: "queued", head: "h1" }, ...o });
+const wf = (o: Partial<WorkflowGate> = {}): WorkflowGate => ({ live: true, entry: "review", state: "running", startedBy: "starter", approvedBy: null, approvedAt: null, blocker: null, baseHead: "h1", leg: { state: "queued", head: "h1" }, ...o });
 const repo = { by: "op", at: "2026-01-01T00:00:00Z" };
 const merge = (workflow: WorkflowGate | null, head = "h1", repoApproval: typeof repo | null = null, pushes: OwnPush[] = []) => mayMerge({ repoApproval, workflow, ended: null, head, pushes });
 const push = (kind: Parameters<typeof mayPush>[0]["kind"], workflow: WorkflowGate | null, repoApproval: typeof repo | null = null, operatorFix = false) => mayPush({ kind, repoApproval, workflow, operatorFix, by: "asker" });
@@ -48,7 +48,6 @@ test("mayMerge without a live workflow uses the repo switch", () => {
 test("mayPush", () => {
   assert.deepEqual(push("fixup", wf(), null, true), { ok: true, as: "person", by: "asker" });
   for (const entry of ["fix-up", "implement", "merge"] as const) assert.equal(push("fixup", wf({ entry })).ok, true);
-  assert.equal(push("fixup", wf({ fixupAsked: true })).ok, true);
   assert.deepEqual(push("fixup", wf({ approvedBy: "ann" })), { ok: true, as: "person", by: "ann" });
   assert.equal(push("fixup", wf()).ok, false);
   for (const kind of ["cifix", "conflict"] as const) {
@@ -56,8 +55,6 @@ test("mayPush", () => {
     assert.deepEqual(push(kind, wf({ approvedBy: "ann" })), { ok: true, as: "person", by: "ann" });
     assert.equal(push(kind, wf()).ok, false);
   }
-  assert.equal(push("implement-revision", wf({ entry: "implement" })).ok, true);
-  assert.equal(push("implement-revision", wf()).ok, false);
   assert.deepEqual(push("cifix", null, repo), { ok: true, as: "repo", by: "op" });
   assert.equal(push("cifix", null).ok, false);
 });

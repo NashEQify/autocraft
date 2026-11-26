@@ -16,7 +16,6 @@ import { isHalt, poolRoom, takersCut } from "../agents/call.ts";
 import { pushesAreUnsettled } from "../fixup/unsettled.ts";
 import { audit } from "../dash/audit.ts";
 import { optionalChecks } from "../optional-checks.ts";
-import { commentApprovalOf } from "../act/approval.ts";
 import { finishInfraRerun, finishPatch, loadPatchFacts, recordPushing, startInfraRerun, storePatch } from "../data/changes/index.ts";
 import { loadTaskStates } from "../data/build/index.ts";
 import { loadArtifactFiles } from "../data/build/index.ts";
@@ -125,6 +124,8 @@ export type CifixDeps = {
   now: () => Date;
   /** Directory holding one bare cache repository per repo. */
   root: string;
+  /** Stands in for the app lane's token and client (tests). */
+  lane?: Pick<Writer, "mint" | "appClient">;
 };
 
 /** The note for a comment about a model-written patch. */
@@ -198,8 +199,8 @@ class Recorder {
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
-  async dropUnlisted(repo: string, listed: CifixCandidate[]): Promise<void> {
-    await dropUnlistedPatches(this.db, "cifix", repo, new Set(listed.map((c) => c.lint!.rowid)));
+  async dropUnlisted(repo: string, listed: number[]): Promise<void> {
+    await dropUnlistedPatches(this.db, "cifix", repo, new Set(listed));
   }
 
   /**
@@ -365,7 +366,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   const at = () => (deps?.now() ?? new Date()).toISOString();
   const runId = `cifix-${repo}-${at().replace(/[-:]/g, "").slice(0, 15)}`;
   const summary: CifixSummary = { runId, repo, dryRun, pushed: [], asked: [], queued: [], infra: [], skipped: [], failed: [], held: [], unasked: [] };
-  const sel = await selectCifix(db, repo);
+  const sel = await selectCifix(db, repo, undefined, undefined, params.by);
   const collect = params.limit === undefined ? sel.collect : sel.collect.slice(0, params.limit);
   const work = await takersCut(db, sel.work, params.limit === undefined ? undefined : params.limit - collect.length, repo, (c) => c.number);
   log(`cifix ${repo}: ${sel.work.length} PRs with a failing check to read, ${sel.collect.length} formatter results to apply, ${sel.rerun.length} reruns due`);
@@ -377,10 +378,9 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
   }
   const d = deps ?? defaultDeps();
   const rec = new Recorder(db, at);
-  await rec.dropUnlisted(repo, sel.lint);
-  const gw: Writer = { db, login: ACTOR };
+  await rec.dropUnlisted(repo, sel.listed);
+  const gw: Writer = { db, login: ACTOR, ...d.lane };
   const git = new Git(d.exec, d.root, repo);
-  const commenting = await commentApprovalOf(db, repo);
   const titles = new Map([...await loadItems(db, [...sel.work, ...sel.collect.map((x) => x.c), ...sel.lint].map((c) => ({ repo: c.repo, number: c.number })), "card")].map(([k, r]) => [k, (r.title ?? "").slice(0, 300)]));
   const titleOf = (c: { repo: string; number: number }) => titles.get(refOf(c)) ?? "";
   let whoP: ReturnType<typeof whoAmI> | undefined;
@@ -397,6 +397,7 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     return pr;
   };
 
+  const isQuiet = async (number: number): Promise<boolean> => (await loadQuiet(db, [`${repo}#${number}`])).size > 0;
   /** Applies a validated patch to the PR head: pushed to the branch, or posted as a comment where the branch is closed to us. */
   const deliver = async (c: CifixCandidate, kind: "format" | "code", pr: PrNode, v: Fix, checkName: string, check?: (patch: string) => Promise<string | null>, shown: CifixPr["files"] = [], folded: string | null = null, ses: SessionAsk = {}): Promise<void> => {
     const ref = refOf(c);
@@ -408,12 +409,12 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
     };
     const writes = pr.headRepository ? await ensureAuthorWrites(db, repo, c.number, pr.headRepository.nameWithOwner) : "no";
     if (writes === "unknown") { log(`  ${ref}: skipped: the author's permission could not be read yet`); return; }
-    const canPush = !!pr.headRepository && pushable(pr.headRepository.nameWithOwner, repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, repo), !!pr.headRef?.branchProtectionRule, writes === "yes");
-    if (canPush ? c.pushRefused !== null : !commenting) {
-      const reason = canPush ? `the push is not approved: ${c.pushRefused}` : HOLD_CANNOT_PUSH;
-      await rec.set(c, kind, "cannot-push", reason, { files: v.files });
-      summary.held.push({ ref, reason });
-      log(`  ${ref}: held: ${reason}`);
+    // A patch planned as a comment is not pushed without an approval of the push, also when the branch is open to us by now.
+    const canPush = c.mayPush && !!pr.headRepository && pushable(pr.headRepository.nameWithOwner, repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, repo), !!pr.headRef?.branchProtectionRule, writes === "yes");
+    if (!canPush && (!c.mayComment || await isQuiet(c.number))) {
+      await rec.set(c, kind, "cannot-push", HOLD_CANNOT_PUSH, { files: v.files });
+      summary.held.push({ ref, reason: HOLD_CANNOT_PUSH });
+      log(`  ${ref}: held: ${HOLD_CANNOT_PUSH}`);
       return;
     }
     const head = await git.fetchPr(ownerOf(repo), repo, c.number);
@@ -748,6 +749,13 @@ async function runCifixWith(db: Db, params: CifixParams, log: (line: string) => 
       // A maintainer's changes request is the person's to resolve first; an unreadable answer counts as blocked.
       const blocked = await readGate(db, d.querier, ownerOf(repo), repo, c.number, log);
       if (blocked !== null) { const why = blocked ?? "the PR's reviews could not be read"; await rec.set(c, "code", "skipped", why); summary.skipped.push(ref); log(`  ${ref}: skipped: ${why}`); continue; }
+      if (await isQuiet(c.number)) {
+        const reason = "a quiet pull request is not asked for changes";
+        await rec.set(c, "code", "cannot-push", reason);
+        summary.held.push({ ref, reason });
+        log(`  ${ref}: held: ${reason}`);
+        continue;
+      }
       const g = await guard(db, { repo, number: c.number }, { kind: "cifix", bucket: "ask", head: c.head }, params.by ?? CLI_BY, liveOf(db, d.querier));
       if ("refused" in g) { summary.skipped.push(ref); log(`  ${ref}: skipped: ${g.refused}`); continue; }
       const cm = await ghAskComment(gw, d.exec, "cifix-comment", g, { by: "fixed" }, askCiText(reading.failure.checks.map((x) => x.name)), { run: runId, head: c.head });
@@ -798,7 +806,7 @@ export async function runRerun(db: Db, params: CifixParams, log: (line: string) 
   const { repo } = params;
   const dryRun = params.dryRun ?? true;
   const out: RerunSummary = { repo, reran: [], skipped: [] };
-  const due = (await selectCifix(db, repo)).rerun;
+  const due = (await selectCifix(db, repo, undefined, undefined, params.by)).rerun;
   const picks = params.limit === undefined ? due : due.slice(0, params.limit);
   log(`cifix-rerun ${repo}: ${due.length} heads due a rerun`);
   if (dryRun) {

@@ -1,8 +1,9 @@
 // Predicates other modules embed in their statements (src/data/** only).
 import type { AliasableExpression, Expression, SelectQueryBuilder, SqlBool } from "kysely";
+import { LOW_WEIGHT, STARTED_SCORE, WEIGHT_STEP } from "../../core/work-score.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
-import { registerKeySource } from "../keys.ts";
+import { registerKeySource, resolveKeys, type KeySource } from "../keys.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { ASKING_STATES } from "../../workflow/types.ts";
 import * as control from "../control/fragments.ts";
@@ -28,6 +29,10 @@ export const isGoOn = (eb: kx.AnyEb, e: string): Expression<SqlBool> => eb(`${e}
 export const goOnAt = (eb: kx.AnyEb, w: string) =>
   kx.schemaEb(eb).selectFrom("main.workflow_events as ge").select((g: any) => g.fn.max(seenAt(g, "ge")).as("at")).where("ge.workflow_id", "=", kx.ref<number>(w)).where((g: any) => isGoOn(g, "ge"));
 
+/** When a person last said so: the newest of the workflow's go-on events (`w`: its id column). */
+export const saidAt = (eb: kx.AnyEb, w: string) =>
+  kx.schemaEb(eb).selectFrom("main.workflow_events as gs").select((g: any) => g.fn.max("gs.at").as("at")).where("gs.workflow_id", "=", kx.ref<number>(w)).where((g: any) => isGoOn(g, "gs"));
+
 /** Attempt states that no longer work a PR (src/implement/types.ts ENDED_STATES). */
 const ENDED_ATTEMPTS = ["merged", "closed", "failed", "cancelled"];
 
@@ -47,6 +52,111 @@ export const attemptOf = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBoo
   ]);
 };
 
+/**
+ * The attempt `i` opened the PR that the implement workflow `w` of its issue works on: the newest with a PR of those the workflow works on
+ * (attemptOf). An attempt made after a later implement workflow of the issue started is that one's.
+ */
+export const linkingAttempt = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> => {
+  const t = kx.schemaEb(eb);
+  // COALESCE: a plain IS NOT NULL makes SQLite walk the repo's attempts by PR instead of the issue's.
+  const of = (x: kx.AnyEb, a: string): Expression<SqlBool> => x.and([
+    x(x.fn.coalesce(`${a}.pr_number`, x.lit(0)), "<>", 0), attemptOf(x, a, w),
+    x.not(x.exists(t.selectFrom("main.item_workflows as nw").select(one(x)).where("nw.repo", "=", kx.ref<string>(`${w}.repo`)).where("nw.number", "=", kx.ref<number>(`${w}.number`))
+      .where("nw.id", ">", kx.ref<number>(`${w}.id`)).where("nw.entry", "=", "implement").where("nw.started_at", "<=", kx.ref<string>(`${a}.created_at`)))),
+  ]);
+  const newer = t.selectFrom("main.implementations as nj").select(one(eb)).where("nj.repo", "=", kx.ref<string>(`${i}.repo`)).where("nj.number", "=", kx.ref<number>(`${i}.number`))
+    .where("nj.id", ">", kx.ref<number>(`${i}.id`)).where((x) => of(x as unknown as kx.AnyEb, "nj"));
+  return eb.and([of(eb, i), eb.not(eb.exists(newer))]);
+};
+
+/** The PR `pr` was merged or closed before the workflow `w` started (src/workflow/work.ts overBefore): it is none of its work. */
+export const prOverBefore = (eb: kx.AnyEb, w: string, pr: kx.Ex): Expression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.items as ob").select(one(eb)).where("ob.repo", "=", kx.ref<string>(`${w}.repo`)).where("ob.number", "=", kx.exprOf(eb, pr))
+    .where("ob.state", "<>", "OPEN").where("ob.closed_at", "<", kx.ref<string>(`${w}.started_at`)));
+
+/**
+ * The implement workflow of the row `w` (an alias of `item_workflows`) works on the PR `pr`: the one it is linked to (`pr_number`, written by
+ * linkWorkflows), or, for a row without a link, the one it would be linked to.
+ */
+export const worksOnPr = (eb: kx.AnyEb, w: string, pr: kx.Ex): Expression<SqlBool> => {
+  const p = kx.exprOf(eb, pr);
+  const would = kx.schemaEb(eb).selectFrom("main.implementations as wi").select(one(eb)).where("wi.repo", "=", kx.ref<string>(`${w}.repo`)).where("wi.number", "=", kx.ref<number>(`${w}.number`))
+    .where("wi.pr_number", "=", p).where((x) => linkingAttempt(x as unknown as kx.AnyEb, "wi", w));
+  return eb.and([
+    eb(`${w}.entry`, "=", "implement"),
+    eb.or([eb(`${w}.pr_number`, "=", p), eb.and([eb(`${w}.pr_number`, "is", null), eb.exists(would)])]),
+    eb.not(prOverBefore(eb, w, p)),
+  ]);
+};
+
+/**
+ * `(wid, repo, issue, pr, live)`: the implement workflows and the PR each works on (worksOnPr); those in `states`, null for every state. `by`
+ * narrows both arms by workflow, by the PR or by the issue, so each arm starts from its index.
+ */
+export function linkRows(db: Db, states: readonly string[] | null, by: { ids?: readonly number[]; prs?: KeySource; issues?: KeySource } = {}): SelectQueryBuilder<any, any, { wid: number; repo: string; issue: number; pr: number; live: number }> {
+  const k = queryDb(db).k as any;
+  const arm = (b: any, pr: string) => b
+    .$if(!!by.prs, (x: any) => x.innerJoin(resolveKeys(db, by.prs!, "kp"), (j: any) => j.onRef("kp.repo", "=", "lw.repo").onRef("kp.number", "=", pr)))
+    .$if(!!by.issues, (x: any) => x.innerJoin(resolveKeys(db, by.issues!, "ki"), (j: any) => j.onRef("ki.repo", "=", "lw.repo").onRef("ki.number", "=", "lw.number")))
+    .$if(!!by.ids, (x: any) => x.where(kx.inList(db, "lw.id", by.ids!, "bigint")))
+    .$if(states !== null, (x: any) => x.where("lw.state", "in", states))
+    .where("lw.entry", "=", "implement").where((eb: any) => eb.not(prOverBefore(eb, "lw", pr)))
+    .select((eb: any) => ["lw.id as wid", "lw.repo as repo", "lw.number as issue", `${pr} as pr`, eb.case().when("lw.state", "in", LIVE_STATES).then(eb.lit(1)).else(eb.lit(0)).end().as("live")]);
+  const stored = arm(k.selectFrom("main.item_workflows as lw").where("lw.pr_number", "is not", null), "lw.pr_number");
+  const unlinked = arm(k.selectFrom("main.implementations as li").innerJoin("main.item_workflows as lw", (j: any) => j.onRef("lw.repo", "=", "li.repo").onRef("lw.number", "=", "li.number"))
+    .where("lw.pr_number", "is", null).where((eb: any) => linkingAttempt(eb, "li", "lw")), "li.pr_number");
+  return stored.unionAll(unlinked);
+}
+
+/** A live implement workflow works on the PR: one probe per arm of `worksOnPr`, each on its index. */
+export function implementsLive(eb: kx.AnyEb, repo: kx.Ex, pr: kx.Ex): AliasableExpression<SqlBool> {
+  const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), p = kx.exprOf(eb, pr);
+  const live = (x: any) => x.where("lw.entry", "=", "implement").where("lw.state", "in", LIVE_STATES).where((e: any) => e.not(prOverBefore(e, "lw", p)));
+  return eb.or([
+    eb.exists(live(t.selectFrom("main.item_workflows as lw").select(one(eb)).where("lw.repo", "=", r).where("lw.pr_number", "=", p))),
+    eb.exists(live(t.selectFrom("main.implementations as li").innerJoin("main.item_workflows as lw", (j) => j.onRef("lw.repo", "=", "li.repo").onRef("lw.number", "=", "li.number")).select(one(eb))
+      .where("li.repo", "=", r).where("li.pr_number", "=", p).where("lw.pr_number", "is", null).where((x) => linkingAttempt(x as unknown as kx.AnyEb, "li", "lw")))),
+  ]);
+}
+
+/**
+ * The implement workflow `w` of an issue speaks for the PR of its attempt `i`: the attempt belongs to it (attemptOf). Ends are read from every
+ * attempt, not from the link alone: an older PR of an issue that was stopped stays stopped when someone reopens it. An issue's workflow that
+ * ended as a PR of it merged says nothing about the issue's other PRs.
+ */
+const speaksFor = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> => eb.and([
+  eb(`${w}.entry`, "=", "implement"), attemptOf(eb, i, w),
+  eb.or([eb(`${w}.state`, "<>", "done"), eb.not(eb.exists(
+    kx.schemaEb(eb).selectFrom("main.implementations as im").innerJoin("main.items as mi", (j) => j.onRef("mi.repo", "=", "im.repo").onRef("mi.number", "=", "im.pr_number")).select(one(eb))
+      .where("im.repo", "=", kx.ref<string>(`${w}.repo`)).where("im.number", "=", kx.ref<number>(`${w}.number`)).where("mi.state", "=", "MERGED")
+      .where((m) => m.or([m("mi.closed_at", "is", null), m("mi.closed_at", ">=", kx.ref<string>(`${w}.started_at`))]))))]),
+]);
+
+/** `(repo, number, state, id)`: for each PR of `keys`, the implement workflows, live and ended, of the issue it was opened for (speaksFor). */
+export function prIssueWorkflows(db: Db, keys: KeySource): SelectQueryBuilder<any, any, { repo: string; number: number; state: string; id: number }> {
+  const k = queryDb(db).k as any;
+  const on = (alias: string, repo: string, number: string) => (j: any) => j.onRef(`${alias}.repo`, "=", repo).onRef(`${alias}.number`, "=", number);
+  return k.selectFrom("main.implementations as i").innerJoin(resolveKeys(db, keys, "kf"), on("kf", "i.repo", "i.pr_number"))
+    .innerJoin("main.item_workflows as w", on("w", "i.repo", "i.number")).where((eb: any) => speaksFor(eb, "i", "w"))
+    .select(["i.repo as repo", "i.pr_number as number", "w.state as state", "w.id as id"]);
+}
+
+/** States in which a person ended a workflow. */
+const ENDED_BY_PERSON = ["stopped", "backlog", "closed"];
+
+/**
+ * A person ended the item: its newest workflow, or the newest of the issue a PR was opened for (speaksFor), whichever is newer, is stopped,
+ * closed or in the backlog (loadEndedWorkflows is the set form).
+ */
+function endedByPerson(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Expression<SqlBool> {
+  const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
+  const own = t.selectFrom("main.item_workflows as ew").select(["ew.id as id", "ew.state as state"]).where("ew.repo", "=", r).where("ew.number", "=", n);
+  const ofPr = t.selectFrom("main.implementations as ei").innerJoin("main.item_workflows as ew", (j) => j.onRef("ew.repo", "=", "ei.repo").onRef("ew.number", "=", "ei.number"))
+    .select(["ew.id as id", "ew.state as state"]).where("ei.repo", "=", r).where("ei.pr_number", "=", n).where((x) => speaksFor(x as unknown as kx.AnyEb, "ei", "ew"));
+  const newest = t.selectFrom(own.unionAll(ofPr).as("eu")).select("eu.state").orderBy("eu.id", "desc").limit(1);
+  return eb(eb.fn.coalesce(newest as any, eb.val("")), "in", ENDED_BY_PERSON);
+}
+
 /** The PR has a live workflow of the merge entry. */
 export const inMergeEntry = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as mw").select(one(eb)).where("mw.repo", "=", kx.exprOf(eb, repo)).where("mw.number", "=", kx.exprOf(eb, number))
@@ -58,65 +168,41 @@ export const handedOverAt = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, head: kx.
     .where("hl.repo", "=", kx.exprOf(eb, repo)).where("hl.number", "=", kx.exprOf(eb, number)).where("hl.head", "=", kx.exprOf(eb, head)).where("hl.state", "=", "queued")
     .where("hw.state", "in", LIVE_STATES).where((w) => w.or([w("hw.approved_by", "is not", null), w("hw.entry", "=", "merge")])));
 
-/** The item has a live workflow, or is the PR of a live implement workflow. */
+/** The item has a live workflow, or a live implement workflow works on it (implementsLive). */
 export function liveWorkflowExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
-  const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
-  // One probe by item and one by PR, each on its index: a single subquery with both would read every live workflow for every item.
+  const r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
+  // One probe by item and one per link arm, each on its index: a single subquery with all would read every live workflow for every item.
   return eb.or([
-    eb.exists(t.selectFrom("main.item_workflows as pw").select(one(eb)).where("pw.repo", "=", r).where("pw.number", "=", n).where("pw.state", "in", LIVE_STATES)),
-    eb.exists(t.selectFrom("main.implementations as pwi").innerJoin("main.item_workflows as pw", (j) => j.onRef("pw.repo", "=", "pwi.repo").onRef("pw.number", "=", "pwi.number")).select(one(eb))
-      .where("pwi.repo", "=", r).where("pwi.pr_number", "=", n).where("pw.entry", "=", "implement").where("pw.state", "in", LIVE_STATES).where((w) => attemptOf(w, "pwi", "pw"))),
+    eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as pw").select(one(eb)).where("pw.repo", "=", r).where("pw.number", "=", n).where("pw.state", "in", LIVE_STATES)),
+    implementsLive(eb, r, n),
   ]);
 }
 
-/** `1e15 + weight * 1e12 - id` of the workflow row aliased `w`: what orders started items. */
-export const workScore = (eb: any): AliasableExpression<number> => eb(eb(eb.lit(1e15), "+", eb("w.weight", "*", eb.lit(1e12))), "-", eb.ref("w.id"));
+/** The work score (src/core/work-score.ts) of the workflow row aliased `w`. */
+export const workScore = (eb: any): AliasableExpression<number> => eb(eb(eb.case().when("w.weight", ">", eb.lit(LOW_WEIGHT)).then(eb.lit(STARTED_SCORE)).else(eb.lit(-STARTED_SCORE)).end(), "+", eb("w.weight", "*", eb.lit(WEIGHT_STEP))), "-", eb.ref("w.id"));
 
-/** The work score `s` of every item with a live workflow and of the PR of a live implement workflow, the highest when both apply. */
+/** The work score `s` of every item with a live workflow and of the PR a live implement workflow works on, the highest when both apply. */
 export function workScores(db: Db): SelectQueryBuilder<any, any, { repo: string; number: number; s: number }> {
   const k = queryDb(db).k as any;
   const own = k.selectFrom("main.item_workflows as w").select((eb: any) => ["w.repo as repo", "w.number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES);
-  const viaPr = k.selectFrom("main.item_workflows as w").innerJoin("main.implementations as i", (j: any) => j.onRef("i.repo", "=", "w.repo").onRef("i.number", "=", "w.number"))
-    .select((eb: any) => ["i.repo as repo", "i.pr_number as number", workScore(eb).as("s")]).where("w.state", "in", LIVE_STATES).where("w.entry", "=", "implement").where("i.pr_number", "is not", null).where((eb: any) => attemptOf(eb, "i", "w"));
+  const viaPr = k.selectFrom(linkRows(db, LIVE_STATES).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select((eb: any) => ["l.repo as repo", "l.pr as number", workScore(eb).as("s")]);
   return k.selectFrom(own.unionAll(viaPr).as("ws")).select((eb: any) => ["ws.repo", "ws.number", eb.fn.max("ws.s").as("s")]).groupBy(["ws.repo", "ws.number"]);
 }
 
 /**
- * The item is in the pipeline: `liveWorkflowExpr`, or auto-eligible (the repo's pipeline is on and an outside-author hold does not keep it back). Not ended
- * by a person (stopped, backlog, closed).
+ * The item is in the pipeline: `liveWorkflowExpr`, or auto-eligible: the repo's pipeline is on, an outside-author hold does not keep it back,
+ * and no person ended it or the issue it implements.
  */
 export function inScopeExpr(_db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
-  const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
-  const endedByPerson = t.selectFrom("main.item_workflows as ew").select(one(eb)).where("ew.repo", "=", r).where("ew.number", "=", n).where("ew.state", "in", ["stopped", "backlog", "closed"])
-    .where((w) => w.not(w.exists(t.selectFrom("main.item_workflows as lw").select(one(eb)).where("lw.repo", "=", kx.ref<string>("ew.repo")).where("lw.number", "=", kx.ref<number>("ew.number")).where("lw.state", "in", LIVE_STATES))))
-    .where("ew.id", "=", t.selectFrom("main.item_workflows as mw").select((e) => e.fn.max("mw.id").as("m")).where("mw.repo", "=", kx.ref<string>("ew.repo")).where("mw.number", "=", kx.ref<number>("ew.number")));
   return eb.or([
     liveWorkflowExpr(eb, repo, number),
     eb.and([
       control.pipelineOn(eb, repo),
       eb.not(intake.heldExpr(eb, repo, number)),
-      eb.not(eb.exists(endedByPerson)),
+      eb.not(endedByPerson(eb, repo, number)),
     ]),
   ]);
 }
-
-/** Every ref of a call (`refs`, a column holding JSON or the caller's list) has a live workflow the login started or approved, directly or through an implementation PR. */
-export function boundToExpr(db: Db, eb: kx.AnyEb, refs: readonly { repo: string; number: number }[], login: string): AliasableExpression<SqlBool> {
-  if (!refs.length) return eb.val(false) as unknown as AliasableExpression<SqlBool>;
-  return eb.and(refs.map((ref) => {
-    const t = kx.schemaEb(eb);
-    return eb.exists(t.selectFrom("main.item_workflows as bw").select(one(eb)).where("bw.repo", "=", ref.repo).where("bw.state", "in", LIVE_STATES)
-      .where((w) => w.or([kx.ciEq(db, "bw.started_by", login), kx.ciEq(db, "bw.approved_by", login)]))
-      .where((w) => w.or([
-        w("bw.number", "=", ref.number),
-        w.and([w("bw.entry", "=", "implement"), w.exists(t.selectFrom("main.implementations as bi").select(one(eb)).where("bi.repo", "=", kx.ref<string>("bw.repo")).where("bi.number", "=", kx.ref<number>("bw.number")).where("bi.pr_number", "=", ref.number).where((x) => attemptOf(x, "bi", "bw")))]),
-      ])));
-  })) as AliasableExpression<SqlBool>;
-}
-
-/** The PR has a merge hold. */
-export const mergeHeldExpr = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
-  eb.exists(kx.schemaEb(eb).selectFrom("main.merge_holds as mh").select(one(eb)).where("mh.repo", "=", kx.exprOf(eb, repo)).where("mh.number", "=", kx.exprOf(eb, number)));
 
 /** A live workflow that came back to a person. */
 export const needsPerson = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> =>
@@ -125,6 +211,11 @@ export const needsPerson = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): Aliasable
 /** The repo has a live workflow. */
 export const startedRepo = (eb: kx.AnyEb, repoCol: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as sr").select(one(eb)).where("sr.repo", "=", kx.exprOf(eb, repoCol)).where("sr.state", "in", LIVE_STATES));
+
+/** A close a person asked for in the repo is to be carried out. */
+export const closeDueIn = (eb: kx.AnyEb, repoCol: kx.Ex): AliasableExpression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.workflow_actions as ca").select(one(eb)).where("ca.repo", "=", kx.exprOf(eb, repoCol)).where("ca.state", "=", "pending")
+    .where("ca.kind", "in", ["close", "comment-close"]));
 
 /** Items with a live workflow, optionally of some repos. */
 registerKeySource<{ repos?: string[] }>("workflow.liveItems", (db, o) =>

@@ -32,36 +32,6 @@ export async function setOptionalCheck(db: Db, by: string, repo: string, name: s
   return true;
 }
 
-type CheckLike = { name: string; state: string };
-
-/**
- * The CI state merging acts on: a failure whose failing checks are all on the optional list reads as if those
- * checks had not run (success when nothing else is pending or failing and some other check succeeded).
- * The stored `overall` and `checks` stay as GitHub reported them.
- */
-export function effectiveOverall(overall: string, checks: CheckLike[], optional: string[]): string {
-  if (overall !== "failure" || !optional.length) return overall;
-  const failing = checks.filter((c) => c.state === "failure");
-  if (!failing.length || failing.some((c) => !optional.includes(c.name))) return overall;
-  const rest = checks.filter((c) => c.state !== "failure").map((c) => c.state);
-  if (rest.includes("pending")) return "pending";
-  return rest.includes("success") ? "success" : "none";
-}
-
-/** effectiveOverall with the repo's list and the PR's stored checks (JSON text or parsed). */
-export async function effectiveCi(db: Db, repo: string, overall: string, checks: string | CheckLike[] | null | undefined): Promise<string> {
-  if (overall !== "failure") return overall;
-  return effectiveCiWith(await optionalChecks(db, repo), overall, checks);
-}
-
-/** effectiveCi with the repo's optional list given (optionalChecksOf). */
-export function effectiveCiWith(optional: string[], overall: string, checks: string | CheckLike[] | null | undefined): string {
-  if (overall !== "failure") return overall;
-  let list: CheckLike[] = [];
-  try { list = typeof checks === "string" ? (JSON.parse(checks) as CheckLike[]) : checks ?? []; } catch { /* unreadable: stays failure */ }
-  return effectiveOverall(overall, list, optional);
-}
-
 /** Check names seen on each repo's recent PRs and default-branch heads, for the add control. */
 export async function seenChecksOf(db: Db, repos: string[]): Promise<Map<string, string[]>> {
   return new Map([...await loadCheckSamples(db, repos)].map(([repo, seen]) => [repo, [...new Set([...seen.pr, ...seen.main])].sort()]));

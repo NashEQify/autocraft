@@ -61,7 +61,7 @@ Not taken: Archivo display headings, uppercase letter-spaced mono labels, regist
 Shared components in `web/src/ui/` are grouped by size:
 
 - `atoms/`: one element, no data fetching, no app domain types, styled only with tokens. ActionTag, Avatar, Badge, Button, Card, Chip, EmptyState, ErrorLine, GithubButton, Heading, Input, ItemIcon, Kbd, Logo, Pending, PriorityBadge, Select, Textarea, TextLink, Th, TimeAgo, Tooltip.
-- `molecules/`: a few atoms doing one job, props only (no queries, no routing except `Link`). Block, CheckRow, ConfirmButton, Dialog, DisclosurePanel, ExpandableText, FilterOption, FilterSection, ItemRef, LabelledSelect, Markdown, OpusWorking, OverflowMenu, Pager, QueueBadge, RadioRow, RateBar, RepoFilter, RepoSelect, SearchField, Segmented, Stat, StepDraft.
+- `molecules/`: a few atoms doing one job, props only (no queries, no routing except `Link`). Block, CheckRow, ConfirmButton, Dialog, DisclosurePanel, ExpandableText, FilterOption, FilterSection, ItemRef, LabelledSelect, Markdown, MessageSample, OpusWorking, OverflowMenu, Pager, QueueBadge, RadioRow, RateBar, RepoFilter, RepoSelect, SearchField, Segmented, Stat, StepDraft, StepFlow.
 - `ActionTag` is a muted pill (Phosphor icon and a word) for one GitHub write. It is never interactive: no border emphasis, no hover. `RadioRow` and `CheckRow` are the rows of a pick-one and a tick list (title, optional tag, content under the title, `CheckRow` also an action at the right edge). The item page's decision answer (`modules/item/ChoiceGroup.tsx`) shows each core action as a bordered card (an accordion that behaves as a radio group: `role=radio`, `aria-checked`, `aria-expanded`); the open card holds the parameters, the extras as `CheckRow`s, the note and the card's own button. Each card has a "GitHub" line (`ActionTag` pills) and an "AutoCraft" line (plain text, from the server's `ChoiceCore.autocraft`). `RadioRow` serves the plain answer of decisions without choices.
 - `organisms/`: a self-contained block with layout and behaviour (sorting, the phone switch). It may take domain-shaped props and never fetches. BrowseLayout, ItemPreview, Page, PreapprovalRow.
 - `ui/` itself holds helpers that are not components (`cn.ts`, `markdownHtml.ts`).
@@ -141,10 +141,10 @@ interface FeatureModule {
 
 ### Item status and command box
 
-- The status names the entry the item runs from (review, fix-up, implement or merge queue), the step it is at, and who started or approved it ("approved by mira", "stopped by david").
+- The status names the entry the item runs from (review, fix-up, implement or merge queue), the step it is at, and who started or approved it ("approved by mira", "held by david").
 - The plan is a numbered list of parts (findings and changes). `drop 2` removes a part by number or by words of its title.
 - The recommendation is one plain sentence of what AutoCraft does next and whether it then merges or comes back. Its reason stands under it when the model gave one.
-- The command box takes the same text as every other surface (`yes`, `fix 1 and 2, then merge`, `stop`). Text that is not fully understood runs nothing; AutoCraft shows what it read. Every accepted answer gets one confirmation line.
+- The command box takes the same text as every other surface (`yes`, `fix 1 and 2, then merge`, `hold`). Text that is not fully understood runs nothing; AutoCraft shows what it read. Every accepted answer gets one confirmation line.
 - Weight shows as a word next to the item when it is not normal.
 
 Description rendering is for untrusted input: raw HTML is dropped, only `http(s)`, `mailto`, relative and anchor links survive, links open in a new tab with `rel="noopener noreferrer nofollow"`, and only GitHub-hosted images load inline. The CSP allows only same-origin images, so the renderer sends images on the hosts the server allows through the image proxy; others show as a link.
@@ -153,7 +153,7 @@ Description rendering is for untrusted input: raw HTML is dropped, only `http(s)
 
 | Reader | May |
 |---|---|
-| Operator or maintainer with write access on the repo | start, answer, approve the merge and stop any item of that repo; the name is kept with the action |
+| Operator or maintainer with write access on the repo | start, answer, approve the merge, hold and resume any item of that repo; the name is kept with the action |
 | Operator | also the instance settings (access, accounts, global pipeline switch, limits, prompts) |
 | Viewer | read only |
 

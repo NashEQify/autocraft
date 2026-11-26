@@ -7,6 +7,7 @@
 //   w.models((input) => reply | undefined)
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { acting } from "./acting.ts";
 import { fakeTaskRunner } from "./fake-runner.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
 import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
@@ -192,12 +193,7 @@ export async function world() {
     },
     /** The app identity, and the people who may act on the repo: write permission on it, read just now. */
     async acting(...logins: string[]) {
-      await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
-      const at = new Date().toISOString();
-      for (const login of logins.length ? logins : [OPERATOR]) {
-        await db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES (?, 'maintainer')").run(login);
-        await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'app', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = 'write', checked_at = excluded.checked_at").run(login, at);
-      }
+      await acting(db, logins.length ? logins : [OPERATOR]);
       return w;
     },
     /** A running workflow of the PR, started (and by default approved for merge) before anything the stages write (T0). */

@@ -308,10 +308,10 @@ const strip = ({ detail: _d, ...e }: Ev): TraceEvent => e;
 
 // ---- events from the view's rows -------------------------------------------------------------------------------------------------
 
-const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Stopped", archived: "Earlier question", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
+const WORKFLOW_WORDS: Record<string, string> = { started: "Started", answered: "Answered", stopped: "Held", resumed: "Resumed", archived: "Earlier question", approved: "Approved", closed: "Closed", backlog: "Moved to the backlog" };
 /** The row of an earlier system an archived event stands for (src/db/switch-over.ts): a question, or an action taken for one. */
 const legacyOf = (parsed: unknown): string => { const l = (parsed as { legacy?: unknown } | null | undefined)?.legacy; return typeof l === "string" ? l : ""; };
-/** A workflow event (an answer, a start, a stop), of kind "decision". An archived one is the person's who answered, a question nobody answered the pipeline's. */
+/** A workflow event (an answer, a start, a hold), of kind "decision". An archived one is the person's who answered, a question nobody answered the pipeline's. */
 export const workflowEvent = (e: { id: number; login: string; kind: string; parsed?: unknown; line?: string | null; at: string }, r: Pick<Reader, "staff" | "hidden">): Ev => {
   const archived = e.kind === "archived", act = archived && legacyOf(e.parsed).startsWith("action:");
   const line = blankIfHidden(e.line ?? "", r.hidden);
@@ -410,7 +410,7 @@ export function headerOf(c: Ctx, r: ItemTraceRows): ItemTraceHeader {
   const { box, hidden } = c;
   const { plan, hold } = r.header;
   const view = obj(plan?.view);
-  const acts = (plan?.actions ?? []).filter((a) => a && typeof a.kind === "string") as { kind: string; head?: unknown }[];
+  const acts = (plan?.actions ?? []).filter((a) => a && typeof a.kind === "string" && !a.refused) as { kind: string; head?: unknown }[];
   const assignees = arr(r.detail.item?.assignees).filter((x): x is string => typeof x === "string");
   // The planner's texts as this reader may see them: no item of a hidden repo, and for viewers no note and plain reasons.
   const wait = waitFor(c, plan?.wait ?? null);
@@ -422,7 +422,7 @@ export function headerOf(c: Ctx, r: ItemTraceRows): ItemTraceHeader {
       text: plan ? (next ?? wait ?? note ?? plan.state) : "Not planned yet", waitsOn: wait, reasons: reasonsFor(c, plan?.reasons ?? []), note,
     },
     next: acts.map((a) => ({ kind: a.kind, head: typeof a.head === "string" ? a.head : null })),
-    who: { assignees, autocraftAssigned: box !== "" && assignees.includes(box), holds: hold ? [{ by: hold.heldBy, at: hold.heldAt }] : [] },
+    who: { assignees, autocraftAssigned: box !== "" && assignees.includes(box), holds: hold ? [hold] : [] },
   };
 }
 

@@ -20,7 +20,7 @@ import { DEFAULT_PER_DAY, LIMIT_STEPS } from "../../runner/autopilot.ts";
 import { loadMaintainHome } from "../../data/views/home.ts";
 import { loadMaintainRepos, loadQueueMeta } from "../../data/views/maintain.ts";
 import { loadQuiet } from "../../data/security/index.ts";
-import { countWaiting } from "../../data/workflow/index.ts";
+import { countWaiting, loadHeldWorkflows } from "../../data/workflow/index.ts";
 import { loadMaintainStats } from "../../data/views/stats.ts";
 import { loadItemRowFacts, loadItemsBase } from "../../data/views/maintain-items.ts";
 import type { ItemBase } from "../../data/views/types.ts";
@@ -93,7 +93,13 @@ function runnerLine(r: NonNullable<Awaited<ReturnType<typeof loadMaintainHome>>[
 export async function queueMeta(db: Db, req: Req): Promise<MaintainQueueMeta> {
   const repos = await visibleRepos(db, req);
   const meta = await loadQueueMeta(db, { repos });
-  return { approvedBy: Object.fromEntries(meta.approvedBy) };
+  const quiet = await quietFor(db, canSeeInternals(req), meta.held);
+  return {
+    approvedBy: Object.fromEntries(meta.approvedBy),
+    held: meta.held.map((w) => ({
+      repo: w.repo, number: w.number, kind: w.kind, title: quiet.has(`${w.repo}#${w.number}`) ? `${w.repo}#${w.number}` : w.title ?? `${w.repo}#${w.number}`, line: stateLine(w),
+    })),
+  };
 }
 
 const DAY = 86400_000;
@@ -218,20 +224,22 @@ async function itemRows(db: Db, req: Req, page: Placed[], staff: boolean): Promi
     req.user.role === "viewer" ? repos.map(() => false) : Promise.all(repos.map((r) => mayRunRepo(req.user, r))),
   ]);
   const key = (r: { repo: string; number: number }) => `${r.repo}#${r.number}`;
+  const unstarted = page.filter((p) => !facts.workflows.has(key(p))).map((p) => ({ repo: p.repo, number: p.number }));
+  const held = new Map((await loadHeldWorkflows(db, { refs: unstarted })).map((w) => [key(w), w]));
   const quiet = await quietFor(db, staff, [...facts.workflows.values()]);
   const mayRepo = new Map(repos.map((r, i) => [r, may[i]!]));
   return page.map((p): MaintainItemRow => {
-    const wf = facts.workflows.get(key(p)) ?? null;
+    const wf = facts.workflows.get(key(p)) ?? null, on = wf ?? held.get(key(p)) ?? null;
     let status: ItemStatus | null = null;
-    if (!wf) {
+    if (!on) {
       const view = facts.plans.get(key(p))?.view as PlanView | undefined;
       status = view?.status ? statusFor(reader, p.repo, p.number, view.status) : statusFromItem({ merged_at: p.mergedAt, closed_at: p.closedAt }, p.updatedAt);
     }
     const area = facts.areas.get(key(p)) as { area: string | null } | undefined;
     return {
       repo: p.repo, number: p.number, kind: p.kind, state: itemState(p.state), title: p.title || `${p.repo}#${p.number}`, author: p.author,
-      group: p.group, line: wfLine(wf, p.unclear, quiet.has(key(p))), status, blocked: wf?.state === "blocked", asked: wf?.rec ? wf.recAt : null, weight: wf ? weightLabel(wf.weight) : null,
-      startedBy: wf?.startedBy ?? null, approvedBy: wf?.approvedBy ?? null, stoppedBy: wf?.stoppedBy ?? null,
+      group: p.group, line: wfLine(on, p.unclear, quiet.has(key(p))), status, blocked: wf?.state === "blocked", asked: wf?.rec ? wf.recAt : null, weight: wf ? weightLabel(wf.weight) : null,
+      startedBy: wf?.startedBy ?? null, approvedBy: wf?.approvedBy ?? null, stoppedBy: on?.stoppedBy ?? null,
       duplicate: facts.duplicateGroups.get(key(p))?.role === "close", outside: (facts.holds.get(key(p))?.reason ?? null) !== null, stuck: facts.stuck.has(key(p)), area: area?.area ?? null,
       may: mayRepo.get(p.repo) ?? false, updatedAt: p.updatedAt, ...(p.merged && { merged: p.merged }),
     };

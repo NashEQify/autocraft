@@ -32,6 +32,8 @@ export async function loadMaintainRepos(db: Db, scope: Pick<Scope, "allRepos">, 
 
 /** Who approved each started item for merge, by `repo#number`. */
 export async function loadQueueMeta(db: Db, scope: Pick<Scope, "repos">): Promise<QueueMeta> {
-  const live = await workflow.listWorkflows(db, { live: true, approved: true, repos: scope.repos });
-  return { approvedBy: new Map(live.map((w) => [`${w.repo}#${w.number}`, w.approvedBy!])) };
+  const [live, held] = await db.together(() => Promise.all([workflow.listWorkflows(db, { live: true, approved: true, repos: scope.repos }), workflow.loadHeldWorkflows(db, { repos: [...scope.repos] })]));
+  return {
+    held, approvedBy: new Map(live.map((w) => [`${w.repo}#${w.number}`, w.approvedBy!])),
+  };
 }

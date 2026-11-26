@@ -4,7 +4,8 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
-import { startedRepo } from "../workflow/fragments.ts";
+import { repoInScope } from "../../core/scope.ts";
+import { repoScopeCols, repoScopeOf } from "../workflow/scope.ts";
 import { addAudit } from "./audit.ts";
 import { SETTINGS } from "./settings.ts";
 import type { RepoGuard, RepoNeed, Step, StepApproval, StepApprovals } from "./types.ts";
@@ -76,8 +77,8 @@ export async function loadRepoGuards(db: Db, repos: RepoKeys, need?: RepoNeed): 
 }
 
 /**
- * Why Act cannot run for each repo, null when it can: the pipeline is off or draining, the repo is outside the pipeline's scope
- * (its flag is off, and it has no live workflow), or the Act limit is 0. `defaults` are the step
+ * Why Act cannot run for each repo, null when it can: the pipeline is off or draining, the repo is out of scope for cards
+ * (src/core/scope.ts), or the Act limit is 0. `defaults` are the step
  * defaults of the daily limits, for an Act limit nobody set.
  */
 export async function loadActBlocked(db: Db, repos: RepoKeys, defaults?: Record<string, number | null>): Promise<Map<string, string | null>> {
@@ -86,7 +87,7 @@ export async function loadActBlocked(db: Db, repos: RepoKeys, defaults?: Record<
   const q = queryDb(db);
   const [rows, sw, act] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom(repoSet(db, repos).as("rk")).leftJoin("main.tracked_repos as t", "t.name", "rk.repo")
-      .select((eb) => ["rk.repo as repo", eb.fn.coalesce("t.pipeline", eb.lit(0)).as("on"), startedRepo(eb, "rk.repo").as("live")])),
+      .select((eb) => ["rk.repo as repo", "t.name as tracked", ...repoScopeCols(eb, "t")])),
     q.get(q.k.selectFrom("main.settings").select("value").where("key", "=", "pipeline_enabled")),
     q.get(q.k.selectFrom("main.stage_limits").select(["per_day", "limit_set"]).where("step", "=", "act")),
   ]));
@@ -94,7 +95,7 @@ export async function loadActBlocked(db: Db, repos: RepoKeys, defaults?: Record<
   const off = SETTINGS.pipelineEnabled.read(raw) ? null : SETTINGS.pipelineDraining.read(raw) ? "the pipeline is draining" : "the pipeline is off";
   const perDay = act && act.limit_set === 1 ? act.per_day : defaults?.act ?? null;
   for (const r of rows) {
-    const inScope = Number(r.on) === 1 || !!Number(r.live);
+    const inScope = repoInScope(r.tracked === null ? undefined : repoScopeOf(r), "cards");
     out.set(r.repo, off ?? (!inScope ? `the pipeline is off for ${r.repo}` : perDay === 0 ? "the daily limit of Act is 0" : null));
   }
   return out;

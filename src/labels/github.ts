@@ -5,7 +5,7 @@ import { guardItem, guardRepo, type GuardedItem } from "../core/guard.ts";
 import { setTimeout as sleepMs } from "node:timers/promises";
 import { addLabels, createLabel, WritePacedError, type Writer } from "../github/write.ts";
 import { Transient, type Querier } from "../mirror.ts";
-import { approvalOf } from "./approval.ts";
+import { runnable } from "../core/select.ts";
 import { plannedItems } from "../core/select-items.ts";
 import { ALL_LABELS, type LabelDef } from "./set.ts";
 import { jobItem } from "../runner/job-items.ts";
@@ -64,7 +64,7 @@ export async function ensureLabels(client: Querier, repo: string, apply: boolean
   return missing;
 }
 
-export type ApplyResult = { planned: number; labeled: number; failed: number[]; skipped: number; batches: number; dryRun: boolean; /** True when applyLabels stopped before the last batch because `stopAt` passed. */ stopped?: boolean; /** True when applyLabels stopped because the GitHub write budget for bulk writes was used up. */ paced?: boolean };
+export type ApplyResult = { planned: number; labeled: number; failed: number[]; skipped: number; batches: number; dryRun: boolean; /** Why items that miss labels may not get them now, or null. */ held: string | null; /** True when applyLabels stopped before the last batch because `stopAt` passed. */ stopped?: boolean; /** True when applyLabels stopped because the GitHub write budget for bulk writes was used up. */ paced?: boolean };
 export type ApplyOpts = { runId: string; limit?: number; apply: boolean; login?: string; /** Who asked; default: an operator at the command line. */ by?: By; wait?: Wait; log?: (s: string) => void;
   /** Called with the running count of items labelled, after each batch. */
   onLabeled?: (labeled: number) => void;
@@ -79,17 +79,13 @@ export async function applyLabels(db: Db, client: Querier, repo: string, o: Appl
   const wait = o.wait ?? (sleepMs as Wait);
   const log = o.log ?? (() => {});
   const w: Writer = { db, login: o.login ?? "cli" };
-  const approval = await approvalOf(db, repo);
-  if (o.apply && !approval) {
-    throw new LabelsError(`${repo} is not approved for labelling. An operator approves it on the dashboard Repos page.`);
-  }
-  let todo: Todo[] = (await plannedItems(db, "label", { repo, run: o.runId })).map((p) => ({ number: p.facts.number, add: p.action.params!.add as string[] }));
+  const { may, held } = runnable(await plannedItems(db, "label", { repo, run: o.runId, refused: true }), o.by ?? CLI_BY);
+  if (held) log(`${repo}: ${held}`);
+  let todo: Todo[] = may.map((p) => ({ number: p.facts.number, add: p.action.params!.add as string[] }));
   if (o.limit !== undefined) todo = todo.slice(0, o.limit);
-  const res: ApplyResult = { planned: todo.length, labeled: 0, failed: [], skipped: 0, batches: 0, dryRun: !o.apply };
-  if (!o.apply) {
-    for (const r of todo) log(`${repo}#${r.number}: would add ${r.add.join(", ")}`);
-    return res;
-  }
+  const res: ApplyResult = { planned: todo.length, labeled: 0, failed: [], skipped: 0, batches: 0, dryRun: !o.apply, held };
+  if (!o.apply) for (const r of todo) log(`${repo}#${r.number}: would add ${r.add.join(", ")}`);
+  if (!o.apply || !todo.length) return res;
   const have = await repoLabels(client, repo, wait);
   const needed = new Set(todo.flatMap((r) => r.add.map((a) => a.toLowerCase())));
   const unknown = [...needed].filter((n) => !have.labels.has(n));

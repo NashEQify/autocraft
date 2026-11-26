@@ -3,6 +3,7 @@
 // reasons, prompts, model output, account data or anything about a security fix, and it knows only public tracked repos.
 import type { Db } from "../db/index.ts";
 import { loadPublicRepoNames, loadPublicStats, loadPublicStatusRows, PUBLIC_QUEUED } from "../data/views/public-status.ts";
+import { NO_WORKFLOW_SCORE } from "../core/work-score.ts";
 import type { PublicStatusRow, QueueMember } from "../data/views/types.ts";
 
 export const STEPS = ["New", "Triaged", "In review", "Waiting for CI", "Fix-up in progress", "Needs a maintainer decision", "In the merge queue", "Merged", "Closed"] as const;
@@ -24,7 +25,7 @@ export type PublicStatus = {
 //   issue: no item_stage row                                      -> New
 //   issue: any other                                              -> Triaged
 //   PR plan state in-batch, batch-checking, ready,
-//     decision-answered-merge, and not held (view.queue.held)     -> In the merge queue (#n of m)
+//     decision-answered-merge                                     -> In the merge queue (#n of m)
 //   PR plan state needs-fix-up, or view.fixup = fix,
 //     or view.cifix = cifix-queued | cifix-rerun                  -> Fix-up in progress
 //   PR plan state waiting-ci, waiting-premerge, waiting-verify,
@@ -64,7 +65,7 @@ function statusOf(repo: string, row: PublicStatusRow, place: () => { position: n
     // An unreadable cached view counts as no view.
   }
   const plan = row.planState ?? "";
-  if (PUBLIC_QUEUED.includes(plan) && !view.queue?.held) {
+  if (PUBLIC_QUEUED.includes(plan) ) {
     const q = place();
     if (q) return { ...open, step: "In the merge queue", queue: q };
   }
@@ -102,10 +103,10 @@ export async function commentStatuses(db: Db, refs: readonly { repo: string; num
 
 /**
  * Open PRs of a repo that are queued to merge, in merge order: members of an integration batch first (they merge before
- * anything else), then by weight (higher first; unweighted last), work rank and number. A PR waiting on a maintainer decision is left out.
+ * anything else), then in work order (src/core/work-score.ts), unstarted ones by work rank and number. A PR waiting on a maintainer decision is left out.
  */
 const queueOrder = (queue: QueueMember[]): number[] =>
-  [...queue].sort((a, b) => Number(b.batched) - Number(a.batched) || (b.weight ?? -1) - (a.weight ?? -1) || (b.score ?? -1) - (a.score ?? -1) || a.number - b.number).map((m) => m.number);
+  [...queue].sort((a, b) => Number(b.batched) - Number(a.batched) || (b.work ?? NO_WORKFLOW_SCORE) - (a.work ?? NO_WORKFLOW_SCORE) || (b.score ?? -1) - (a.score ?? -1) || a.number - b.number).map((m) => m.number);
 
 const queuePlace = (order: number[], number: number): { position: number; of: number } | null => {
   const at = order.indexOf(number);

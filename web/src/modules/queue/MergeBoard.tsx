@@ -37,7 +37,7 @@ const BLOCKED: QueueState[] = ["refused", "ci-failed", "conflict", "needs-fix-up
 const STEP_OF = new Map<QueueState, StepId>(STEPS.flatMap((s) => s.states.map((st) => [st, s.id] as const)));
 const key = (r: { repo: string; number: number }) => `${r.repo}#${r.number}`;
 
-type Row = QueueRow & { held?: boolean; batch?: number; added?: QueueOrigin };
+type Row = QueueRow & { batch?: number; added?: QueueOrigin };
 type Next = Map<string, { position: number; merge: NextMerge }>;
 
 const COLUMNS: WorkableColumn[] = [
@@ -86,7 +86,6 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
           <span className="flex flex-col items-start gap-0.5">
             <span className="flex flex-wrap items-center gap-1">
               <StateChip row={r} />
-              {r.held && <Badge tone="warn">Held</Badge>}
             </span>
             {r.conflictNote && <span className="text-2xs text-ink/55">{r.conflictNote}</span>}
             {wait && wait !== STATE[r.state][0] && <span className="text-2xs text-ink/50">{wait}</span>}
@@ -102,7 +101,7 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
           </span>
         ),
         added: <Added r={r} />,
-        actions: <RowMenu repo={r.repo} number={r.number} held={!!r.held} pr inBatch={r.batch !== undefined} backlog={r.state !== "held-backlog"} />,
+        actions: <RowMenu repo={r.repo} number={r.number} inBatch={r.batch !== undefined} backlog={r.state !== "held-backlog"} />,
       }}
     />
   );
@@ -135,14 +134,13 @@ function PendingRow({ r }: { r: QueuePendingRow }) {
         step: (
           <span className="flex flex-wrap items-center gap-1">
             {label && <Badge tone={im ? IMPLEMENTATION_STATE[im.state].tone : "neutral"}>{label}</Badge>}
-            {r.held && <Badge tone="warn">Held</Badge>}
           </span>
         ),
         ...checkCells(null),
         size: r.size ? <Size size={r.size} /> : null,
         author: <span className="block truncate text-xs text-ink/70">{r.author || "unknown"}</span>,
         added: <Added r={r} />,
-        actions: <RowMenu repo={r.repo} number={r.number} held={r.held} pr={r.kind === "pr"} inBatch={false} backlog />,
+        actions: <RowMenu repo={r.repo} number={r.number} inBatch={false} backlog />,
       }}
     />
   );
@@ -200,7 +198,7 @@ export function MergeBoard({ repo }: { repo: string | null }) {
     const steps = new Map<StepId, Row[]>(STEPS.map((s) => [s.id, []]));
     const blocked: Row[] = [];
     for (const r of rows.values()) {
-      if (r.held || BLOCKED.includes(r.state)) blocked.push(r);
+      if (BLOCKED.includes(r.state)) blocked.push(r);
       else {
         const s = STEP_OF.get(r.state);
         if (s) steps.get(s)!.push(r);

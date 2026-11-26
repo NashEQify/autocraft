@@ -9,13 +9,14 @@ import { join } from "node:path";
 import type { Db } from "../db/index.ts";
 import { listAudit } from "../data/control/index.ts";
 import { applyLocal, loadItems } from "../data/mirror/index.ts";
-import { listWorkflows } from "../data/workflow/index.ts";
+import { linkWorkflows, listWorkflows } from "../data/workflow/index.ts";
 import { diffStat } from "../build/workspaces.ts";
 import { guardItem, guardRepo, type GuardedItem, type ItemWant } from "../core/guard.ts";
 import { implementMay } from "./gate.ts";
 import type { By } from "../core/gates.ts";
+import { mergesFor } from "../core/may.ts";
 import { branchOf, forkOf } from "../github/fork.ts";
-import { hasOpenPr } from "../core/open-prs.ts";
+import { closedByOpenPr } from "../core/open-prs.ts";
 import { EMPTY_TREE, exec as realExec, fixupDir, Git, type Exec } from "../fixup/git.ts";
 import { buildScriptsAt, type BuildScripts } from "../fixup/patch.ts";
 import { ownPrSelect } from "../github/adopt.ts";
@@ -266,7 +267,11 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
   const stale = (): OpenPrResult => { d.log(`  ${ref}: the implementation left opening meanwhile; nothing more is written`); return { ok: false, reason: "the implementation left opening meanwhile", retry: true, stale: true }; };
   const move = async (from: ImplementationState, to: ImplementationState | null, patch: ImplementationPatch = {}): Promise<boolean> =>
     !!await writeStep(db, im, { ...(to && { to }), patch, expect: [from] });
-  const write = (patch: ImplementationPatch, to: "pr-opened" | null = null) => move("opening", to, patch);
+  const write = (patch: ImplementationPatch, to: "pr-opened" | null = null): Promise<boolean> => db.write(async () => {
+    if (!await move("opening", to, patch)) return false;
+    if (patch.prNumber !== undefined) await linkWorkflows(db, { issues: [{ repo, number }] });
+    return true;
+  });
   try {
     if (!im.baseSha) return fail("the implementation has no base commit", false);
     if (input.base !== im.baseSha) return fail(`the workspace diff is against ${input.base.slice(0, 12)}, not the implementation's base commit ${im.baseSha.slice(0, 12)}`, false);
@@ -308,7 +313,7 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
     let pushed: { commit: string; compileTime: CompileTimeChange[] };
 
     if (url === null) {
-      if (await hasOpenPr(db, repo, number)) return fail("another pull request already covers the issue", false);
+      if (await closedByOpenPr(db, repo, number)) return fail("another pull request already covers the issue", false);
       const git = new Git(d.exec, d.root, repo);
       if (!await git.fetchBranch(ownerOf(repo), repo, base, im.baseSha)) return fail("the base commit is no longer in the repository", false);
       const author = await commitIdentity(db, repo, async () => who);
@@ -361,12 +366,12 @@ export async function openImplementationPr(db: Db, input: OpenPrInput, d: PrDeps
     let notPreapproved: string | null = null;
     if (pushed.compileTime.length) notPreapproved = `a maintainer decides on its compile-time changes: ${pushed.compileTime.map((c) => `${c.path} ${c.what}`).join("; ")}`;
     else {
-      const wf = (await listWorkflows(db, { live: true, refs: [{ repo, number }] }))[0] ?? null;
+      const wf = (await listWorkflows(db, { live: true, refs: [{ repo, number }] }))[0], by = mergesFor(wf);
       // The PR merges only when its issue's workflow is approved; otherwise its review ends in a recommendation.
-      if (!wf?.approvedBy) notPreapproved = "the merge is not approved: the review ends in a recommendation";
+      if (!wf || by === null) notPreapproved = "the merge is not approved: the review ends in a recommendation";
       // The approver's merge leg belongs to the issue's workflow (src/workflow/advance.ts).
       else try {
-        await preapproveMerge(db, { repo, number: prNumber, by: wf.approvedBy, via: "implement", head: pushed.commit, workflowId: wf.id });
+        await preapproveMerge(db, { repo, number: prNumber, by, via: "implement", head: pushed.commit, workflowId: wf.id });
       } catch (e) {
         const why = oneLine(String((e as Error).message ?? e));
         if (!(e instanceof PreapprovalRefused)) return fail(`#${prNumber} could not be pre-approved: ${why}`, true);

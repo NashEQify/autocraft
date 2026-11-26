@@ -1,6 +1,6 @@
-// The overflow menu on a merge queue row: merge hold, Backlog and, for batch members, remove from batch. Whoever runs the repo.
+// The overflow menu on a merge queue row: hold, Backlog and, for batch members, remove from batch (which holds the PR). Whoever runs the repo.
 import { DropdownMenu } from "radix-ui";
-import { ArchiveIcon, DotsThreeIcon, PauseIcon, PlayIcon, SignOutIcon } from "@phosphor-icons/react";
+import { ArchiveIcon, DotsThreeIcon, PauseIcon, SignOutIcon } from "@phosphor-icons/react";
 import { useApi } from "../../api/client";
 import { useUser } from "../../shell/UserContext";
 import { canRun } from "../../registry/permissions";
@@ -10,18 +10,14 @@ const menuCls = "z-50 min-w-[200px] rounded-md border border-line-strong bg-rais
 const itemCls = "flex h-8 cursor-default items-center gap-2.5 rounded px-2 text-sm outline-none data-[highlighted]:bg-ink/[0.07] max-md:h-11";
 
 /** `backlog`: the row may be put on the Backlog (it is not there already). */
-export function RowMenu({ repo, number, held, pr, inBatch, backlog }: { repo: string; number: number; held: boolean; pr: boolean; inBatch?: boolean; backlog?: boolean }) {
+export function RowMenu({ repo, number, inBatch, backlog }: { repo: string; number: number; inBatch?: boolean; backlog?: boolean }) {
   const api = useApi();
   const write = useWrite();
   if (!canRun(useUser(), repo)) return null;
   const ref = `${repo}#${number}`;
   const run = (key: string, f: () => Promise<unknown>) => () => void write.run(key, f);
-  const hold = async () => {
-    const r = await api.controls.run({ control: held ? "release-merge" : "hold-merge", repo, number });
-    if (!r.ok) throw new Error(r.line);
-  };
-  const toBacklog = async () => {
-    const r = await api.maintainItem.command(repo, number, "backlog");
+  const send = (word: string) => async () => {
+    const r = await api.maintainItem.command(repo, number, word);
     if (!r.ok) throw new Error(r.lines.join(" "));
   };
   return (
@@ -34,14 +30,12 @@ export function RowMenu({ repo, number, held, pr, inBatch, backlog }: { repo: st
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content align="end" sideOffset={4} className={menuCls}>
-            {pr && (
-              <DropdownMenu.Item className={itemCls} onSelect={run("hold", hold)}>
-                {held ? <PlayIcon size={16} /> : <PauseIcon size={16} />}
-                {held ? "Release" : "Hold merge"}
-              </DropdownMenu.Item>
-            )}
+            <DropdownMenu.Item className={itemCls} onSelect={run("hold", send("hold"))}>
+              <PauseIcon size={16} />
+              Hold
+            </DropdownMenu.Item>
             {backlog && (
-              <DropdownMenu.Item className={itemCls} onSelect={run("backlog", toBacklog)}>
+              <DropdownMenu.Item className={itemCls} onSelect={run("backlog", send("backlog"))}>
                 <ArchiveIcon size={16} />
                 Backlog
               </DropdownMenu.Item>

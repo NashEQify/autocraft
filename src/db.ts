@@ -21,6 +21,7 @@ import { SIM_THRESHOLD } from "./dupes/scan.ts";
 import { splitStageTripsSqlite } from "./db/trip-split.ts";
 import { retireFixAttemptsSqlite } from "./db/fix-retire.ts";
 import { featuresRepoOnlySqlite } from "./db/feature-repo-only.ts";
+import { holdsToItemsSqlite } from "./db/holds-to-items.ts";
 import { ACTIVE_LEG_INDEX, ACTIVE_LEG_STATES, builtAfterCopy, copyStateSqlite, oneActiveLegSqlite } from "./db/state-copy.ts";
 
 export const DEFAULT_DB = join(homedir(), ".local/share/autocraft/mirror.db");
@@ -342,6 +343,14 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "workflow", "TEXT"],
   // The step a maintainer workflow is at, recorded by its advance pass (src/workflow/advance.ts).
   ["item_workflows", "step", "TEXT"],
+  // The PR an implement workflow works on, written by linkWorkflows (src/data/workflow/link.ts).
+  ["item_workflows", "pr_number", "INTEGER"],
+  // How often a workflow row was written, and the PR head a person accepted (src/core/evidence.ts acceptedHeads).
+  ["item_workflows", "version", "INTEGER NOT NULL DEFAULT 0"],
+  ["item_workflows", "accepted_head", "TEXT"],
+  // Why a merge leg ended, as a code with what it names (src/core/codes.ts StopCode).
+  ["preapprovals", "reason_code", "TEXT"],
+  ["preapprovals", "reason_params", "TEXT"],
   // A review a person asked for of a PR that merges without one, and when the question an answer is for was asked.
   ["item_workflows", "review_asked_at", "TEXT"],
   ["workflow_events", "seen_at", "TEXT"],
@@ -376,6 +385,9 @@ const BASE_INDEXES = [
   "CREATE TRIGGER IF NOT EXISTS main.decisions_answered_role AFTER UPDATE OF answered_by ON decisions BEGIN UPDATE decisions SET answered_role = (SELECT role FROM access WHERE login = NEW.answered_by) WHERE id = NEW.id; END",
   "CREATE INDEX IF NOT EXISTS main.comments_mention ON comments(created_at) WHERE mentions_pipeline = 1",
   "CREATE INDEX IF NOT EXISTS main.comments_author_item ON comments(author, repo, number)",
+  // Operators' comments and conversation turns by login without letter case: the owner-statement candidates (src/data/conversations/statements.ts).
+  "CREATE INDEX IF NOT EXISTS main.comments_author_nocase ON comments(author COLLATE NOCASE)",
+  "CREATE INDEX IF NOT EXISTS main.conversation_turns_operator ON conversation_turns(login COLLATE NOCASE) WHERE kind = 'operator'",
   "CREATE INDEX IF NOT EXISTS main.dupe_carries_item ON dupe_carries(repo, number)",
   "CREATE INDEX IF NOT EXISTS main.classifications_alone ON classifications(at) WHERE classifier = 'haiku' AND input_hash IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS main.jobs_step_repo ON jobs(step, repo, id)",
@@ -443,6 +455,8 @@ const STATE_INDEXES = [
   "CREATE INDEX IF NOT EXISTS main.agent_runs_first ON agent_runs(first_repo, started_at)",
   // The implementation a PR belongs to.
   "CREATE INDEX IF NOT EXISTS main.implementations_pr ON implementations(repo, pr_number) WHERE pr_number IS NOT NULL",
+  // The implement workflows linked to a PR.
+  "CREATE INDEX IF NOT EXISTS main.item_workflows_pr ON item_workflows(repo, pr_number) WHERE pr_number IS NOT NULL",
   // One active pre-approved merge leg per PR: a second one is refused by the insert. Built after oneActiveLeg (src/db/state-copy.ts).
   `CREATE UNIQUE INDEX IF NOT EXISTS main.${ACTIVE_LEG_INDEX} ON preapprovals(repo, number) WHERE state IN (${ACTIVE_LEG_STATES.map((s) => `'${s}'`).join(", ")})`,
 ];
@@ -504,6 +518,7 @@ function backfill(db: DatabaseSync): void {
   splitRunnerTokens(db);
   retireFixAttemptsSqlite(db);
   featuresRepoOnlySqlite(db);
+  holdsToItemsSqlite(db);
   // Reviews made before snapshots existed count as having read everything up to now: no wave of re-reviews.
   const now = new Date().toISOString();
   db.prepare("UPDATE main.opus_reviews SET seen_at = ? WHERE seen_at IS NULL").run(now);

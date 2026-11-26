@@ -1,13 +1,12 @@
 import type { Selectable } from "kysely";
 import type { DB } from "../../db/types.ts";
 import type { Blocker, Entry, ItemKind, ItemWorkflow, Parsed, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState } from "../../workflow/types.ts";
+import type { Params, StopCode } from "../../core/codes.ts";
 import type { RefKey } from "../mirror/types.ts";
 
 export type { Blocker, Entry, ItemKind, ItemWorkflow, PlanPart, Recommendation, Surface, WorkflowEventKind, WorkflowState, RefKey };
-export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog";
+export type EndedWorkflow = "done" | "stopped" | "closed" | "backlog" | "superseded";
 
-/** Score at or above this means "started": `1e15 + weight * 1e12 - workflow.id`. */
-export const FAST_FLOOR = 1e15 / 2;
 
 export type WorkflowFact = {
   id: number; entry: Entry; approved: boolean; approvedBy: string | null; startedBy: string; startedAt: string;
@@ -25,10 +24,9 @@ export type OperatorWork = { requests: (FixupRequest & { maker_checked_at?: stri
 export type WorkflowPassFacts = {
   live: Map<RefKey, WorkflowFact>;
   ofPr: Map<RefKey, WorkflowFact>;
-  /** Who each live implement workflow acts for, newest first (workflowActors), by its id. */
+  /** Who each live workflow acts for, newest first (workflowActors), by its id. */
   actors: Map<number, string[]>;
   ended: Map<RefKey, EndedWorkflow>;
-  holds: Set<RefKey>;
   operator: Map<RefKey, OperatorWork>;
 };
 
@@ -36,13 +34,15 @@ export type NewWorkflow = {
   repo: string; number: number; kind: ItemKind; entry: Entry; weight: number; startedBy: string; startedVia: Surface; baseHead?: string | null;
   approvedBy?: string | null; approvedVia?: Surface | null; plan?: PlanPart[]; step?: string | null; at?: string;
 };
-/** The fields of `ItemWorkflow` except identity. */
-export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" | "kind" | "startedBy" | "startedAt" | "startedVia" | "updatedAt">>;
+/** The fields of `ItemWorkflow` except identity and the PR, which only `linkWorkflows` writes. */
+export type WorkflowPatch = Partial<Omit<ItemWorkflow, "id" | "repo" | "number" | "kind" | "startedBy" | "startedAt" | "startedVia" | "prNumber" | "version" | "updatedAt">>;
+/** An implement workflow of an issue and the PR it works on. */
+export type WorkflowLink = { workflowId: number; repo: string; issue: number; pr: number; live: boolean };
 export type WorkflowFilter = { live?: boolean; ids?: number[]; repos?: string[]; refs?: { repo: string; number: number }[]; states?: WorkflowState[]; logins?: string[]; approved?: boolean; recAfter?: string };
 /** `via` defaults to `cli` (the archived rows of retired decisions have no surface). */
 export type WorkflowEvent = { workflowId: number | null; repo: string; number: number; login: string; kind: WorkflowEventKind | "archived"; via?: Surface | null; parsed?: Parsed | null; line?: string | null; at?: string; /** An answer's: when its question was asked. */ seenAt?: string | null };
-/** Up to when a person has seen an item and chose to go on with it (`since`), and when they said so (`said`). */
-export type GoneOn = { since: string; said: string };
+/** Up to when a person has seen an item and chose to go on with it (`since`), when they said so (`said`), and when someone last resumed it. */
+export type GoneOn = { since: string; said: string; resumed: string | null };
 export type StoredEvent = WorkflowEvent & { id: number; at: string };
 /** A stored event of the maintainer workflow itself. */
 export type SaidEvent = StoredEvent & { kind: WorkflowEventKind };
@@ -56,10 +56,12 @@ export type StartedFilter = { /** Live states only. */ states?: WorkflowState[];
 export type LegState = "fixup" | "review" | "ci" | "queued" | "merged" | "cancelled" | "failed";
 export type Preapproval = Omit<Selectable<DB["preapprovals"]>, "state"> & { state: LegState };
 export type LegRow = Preapproval;
-export type LegContext = { workflowId: number; entry: Entry; startedAt: string; since: string; reviewAskedAt: string | null; approvedBy: string | null };
+export type LegContext = { workflowId: number; entry: Entry; startedAt: string; since: string; reviewAskedAt: string | null };
 /** `requests`: the queued requests of the active legs. */
 export type LegPass = { rows: LegRow[]; context: Map<number, LegContext | "ended" | "unlinked">; requests: FixupRequest[] };
-export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; by?: string; via?: string };
+export type LegMove = { id: number; from: LegState; to: LegState; head?: string | null; reason?: string | null; /** What `reason` is, as a code, with its parts. */ code?: StopCode; params?: Params; by?: string; via?: string };
+/** What a row was read with, for a write that takes place only while it is still the same. */
+export type WorkflowRead = { state: WorkflowState; updatedAt: string; version: number };
 /** A queued fix-up request follows the PR's head from `from` to `to`. */
 export type FixupRequestMove = { id: number; from: string; to: string };
 export type LegMoved = LegMove & { repo: string; number: number };
@@ -67,8 +69,6 @@ export type LegMoved = LegMove & { repo: string; number: number };
 export type NewLeg = { repo: string; number: number; by: string; workflowId: number; head: string; fromHead?: string; state: "review" | "fixup"; instructions?: string; fixId?: number; via?: string };
 export type FixupRequest = Omit<Selectable<DB["operator_fixups"]>, "state"> & { state: "queued" | "started" | "ended" };
 export type NewFixupRequest = { repo: string; number: number; fromHead: string; instructions: string; by: string; merge?: boolean; workflowId?: number; at?: string };
-
-export type MergeHold = { heldBy: string; heldAt: string };
 
 export type CommandRow = Selectable<DB["github_commands"]>;
 export type NewCommand = Pick<CommandRow, "comment_id" | "repo" | "number" | "pr" | "login" | "github_id" | "created_at" | "requested_at" | "parsed">;

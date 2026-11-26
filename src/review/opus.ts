@@ -10,6 +10,7 @@ import { Client, type Querier } from "../mirror.ts";
 import { checksOf, refreshChecks } from "./checks.ts";
 import { recordReviewFailure, reviewHolds } from "./gate.ts";
 import { MAX_RERUNS_PER_DAY, discussionOf, ensurePipelineLogin, liveDiscussion, staleReviews, withRetry, type Snapshot } from "./discussion.ts";
+import type { By } from "../core/gates.ts";
 import { notDue, planNow } from "../core/select.ts";
 import { recordLiveBase } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
@@ -32,6 +33,7 @@ import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadReviewRows, saveReviews, type ReviewRow } from "../data/review/index.ts";
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
+import { settledBy } from "../core/settled.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
 import { droppedTitles, keptFixes } from "../workflow/work.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
@@ -44,6 +46,8 @@ export type OpusParams = {
   repo: string; limit?: number; dryRun?: boolean;
   /** Called with the running count of PRs handled. */
   onHandled?: (n: number) => void;
+  /** Who asked; a command-line run is an operator's. */
+  by?: By;
 };
 export type OpusDeps = {
   /** Reads the live head and state of the candidates just before the model calls; absent: the mirror's view stands. */
@@ -139,13 +143,10 @@ export type PreparedOpus =
   | { kind: "no-threads"; error: string }
   | { kind: "ready"; input: OpusPr; snap: Snapshot; mode: "full" | "delta"; base: string | null; baseRef: string | null; /** A maintainer's entry was left out of the discussion for length. */ maintDropped?: boolean };
 
-/**
- * The person's decision that the change belongs in the app: they approved its merge, or started it at an entry that works towards
- * one. A review entry that is not approved asks the review for that as well.
- */
+/** The person's decision that the change belongs in the app (core settledBy), as the prompt input carries it. */
 export function scopeSettled(w: ItemWorkflow | undefined): { scope_settled?: NonNullable<OpusPr["scope_settled"]> } {
-  if (!w || (w.approvedBy === null && w.entry === "review")) return {};
-  return { scope_settled: w.approvedBy !== null ? { answer: "merge approved", by: w.approvedBy, note: null } : { answer: `started at ${w.entry === "fixup" ? "fix-up" : w.entry}`, by: w.startedBy, note: null } };
+  const by = settledBy(w);
+  return by ? { scope_settled: { ...by, note: null } } : {};
 }
 
 /**
@@ -232,7 +233,7 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
 export async function runOpusReview(db: Db, params: OpusParams, log: (line: string) => void = console.log, deps: OpusDeps = defaultOpusDeps()): Promise<OpusSummary> {
   const { repo } = params;
   const runId = `opus-review-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands = await selectOpusCandidates(db, repo);
+  let cands = await selectOpusCandidates(db, repo, undefined, params.by);
   const uncapped = await staleReviews(db, repo, true);
   const allStale = await staleReviews(db, repo);
   const capped = [...allStale].filter((k) => !uncapped.has(k));

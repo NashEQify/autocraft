@@ -2,6 +2,7 @@
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { appIdentity } from "../control/fragments.ts";
 
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 const WRITE = ["write", "maintain", "admin"];
@@ -46,6 +47,6 @@ export const linkedLogin = (eb: kx.AnyEb, userHashCol: kx.Ex): Expression<string
 /** The setup link's creator is still an operator. */
 export const creatorIsOperator = (db: Db, eb: kx.AnyEb, createdByCol: kx.Ex): AliasableExpression<SqlBool> => isOperator(db, eb, createdByCol);
 
-/** The cached half of the act rule: the login is staff and holds a cached write permission on the repo. */
-export const canActExpr = (db: Db, eb: kx.AnyEb, loginCol: kx.Ex, repoCol: kx.Ex, afterIso?: string): AliasableExpression<SqlBool> =>
-  eb.and([isStaff(db, eb, loginCol), writePermission(db, eb, loginCol, repoCol, afterIso)]) as AliasableExpression<SqlBool>;
+/** `standing` (permissions.ts) in SQL, as "yes" or not: GitHub writes go out as the app, the login is staff, and GitHub confirmed its write permission on the repo after `afterIso` (HOLD_MAX ago). */
+export const canActExpr = (db: Db, eb: kx.AnyEb, loginCol: kx.Ex, repoCol: kx.Ex, afterIso: string): AliasableExpression<SqlBool> =>
+  eb.and([appIdentity(eb), isStaff(db, eb, loginCol), writePermission(db, eb, loginCol, repoCol, afterIso)]) as AliasableExpression<SqlBool>;

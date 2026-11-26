@@ -13,10 +13,12 @@ build-script-rule.test.ts
 build-warm-mount.test.ts
 checktool.test.ts
 classify.test.ts
+codes.test.ts
 conflict-note-edit.test.ts
 data-layer.test.ts
 decide-item.test.ts
 decide-pr.test.ts
+decision-boundary.test.ts
 discord-perms.test.ts
 downloads-classify.test.ts
 env-crypto.test.ts
@@ -50,6 +52,7 @@ old-links.test.ts
 parsers.test.ts
 patch-guards-sec3.test.ts
 pg-schema.test.ts
+preapproval-paths.test.ts
 premerge-review.test.ts
 prepush.test.ts
 prompt-harness.test.ts

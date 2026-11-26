@@ -5,6 +5,7 @@
 //   autocraft-server dupes [--limit N] [--dry-run]
 import { localEmbedder, modelName } from "../embed/model.ts";
 import { VectorIndex } from "../embed/vectors.ts";
+import { CLI_BY, type By } from "../core/gates.ts";
 import { plannedItems, type PlannedItem } from "../core/select-items.ts";
 import { queueRoomPass } from "../agents/call.ts";
 import { checkPairs, defaultCheckDeps, type CheckDeps, type PairKey } from "./check.ts";
@@ -27,6 +28,8 @@ export type DupesParams = {
   limit?: number;
   dryRun?: boolean;
   onHandled?: (n: number) => void;
+  /** Who asked; a command-line run is an operator's. */
+  by?: By;
   progress?: (text: string) => Promise<void>;
   /** A cancel or a passed deadline: no new unit or model call starts. */
   cancelled?: () => Promise<boolean>;
@@ -71,7 +74,8 @@ export async function runDupes(db: Db, params: DupesParams = {}, log: (line: str
   const model = d.index.embedder.id;
   if (!params.dryRun) await fillEmbedHashes(db); // planning writes nothing; a row whose hash was cleared by an edit outside sync would drop out of the scan and its pairs
   if (!params.dryRun) await resetScansForCutoff(db, SIM_THRESHOLD);
-  const planned = await plannedItems(db, "dupes", { model });
+  const by = params.by ?? CLI_BY;
+  const planned = await plannedItems(db, "dupes", { model, by });
   const todo = scanRefs(planned, SCAN_MAX);
   if (params.dryRun) {
     s.scanned = todo.length;
@@ -89,7 +93,7 @@ export async function runDupes(db: Db, params: DupesParams = {}, log: (line: str
     log(`dupes: scanned ${s.scanned} items, ${s.pairsAdded} new pairs`);
   }
   // A scan adds pairs, which changes what the Plans send to the pair check: loaded again. Without a scan the Plans loaded above stand.
-  const keys = await cancelled() ? [] : await pairsToCheck(db, todo.length ? await plannedItems(db, "dupes", { model }) : planned, limit);
+  const keys = await cancelled() ? [] : await pairsToCheck(db, todo.length ? await plannedItems(db, "dupes", { model, by }) : planned, limit);
   if (keys.length) {
     const said = (verdicts: Record<string, number>) => Object.entries(verdicts).map(([k, n]) => `${n} ${k}`).join(", ") || "no verdicts";
     let handled = 0, haikuAlone = 0, done = 0;

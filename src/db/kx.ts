@@ -62,11 +62,6 @@ export function jsonType(d: D, e: Ex, path?: string): RawBuilder<JsonType | null
   return sql`(SELECT CASE json_typeof(v) WHEN 'string' THEN 'text' WHEN 'boolean' THEN v::text WHEN 'number' THEN CASE WHEN v::text ~ '^-?[0-9]+$' THEN 'integer' ELSE 'real' END ELSE json_typeof(v) END FROM (SELECT ${v} AS v) AS jt)`;
 }
 
-/** The number of elements of the JSON array `e`; NULL for NULL. */
-export function jsonArrayLength(d: D, e: Ex): RawBuilder<number | null> {
-  return pgOf(d) ? sql`json_array_length((${x(e)})::json)` : sql`json_array_length(${x(e)})`;
-}
-
 /** Whether `e` is valid JSON: a predicate for `where(...)`; selected, it reads 1/0 on both. */
 export function jsonValid(d: D, e: Ex): RawBuilder<SqlBool> {
   return pgOf(d) ? sql`((${x(e)}) IS JSON)` : sql`json_valid(${x(e)})`;
@@ -295,6 +290,14 @@ export function literal<V extends string | number>(value: V): RawBuilder<V> {
 /** Case-insensitive equality (ASCII, as SQLite's NOCASE); also for a citext column against a text one on Postgres. */
 export function ciEq(d: D, a: Ex, b: Ex): RawBuilder<SqlBool> {
   return pgOf(d) ? sql`(${x(a)})::citext = (${x(b)})::citext` : sql`${x(a)} = ${x(b)} COLLATE NOCASE`;
+}
+
+/**
+ * `ciEq` for a text column that has an index on `col COLLATE NOCASE` (on Postgres the index holds `lower(col)`): Postgres
+ * compares `lower(a) = lower(b)`, which that index serves, where ciEq's citext cast of the column keeps every index out of use.
+ */
+export function nocaseEq(d: D, a: Ex, b: Ex): RawBuilder<SqlBool> {
+  return pgOf(d) ? sql`lower(${x(a)}) = lower(${x(b)})` : sql`${x(a)} = ${x(b)} COLLATE NOCASE`;
 }
 
 /**

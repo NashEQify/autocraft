@@ -8,6 +8,25 @@ import { selectFixups } from "../src/fixup/select.ts";
 import { T0 } from "./world-db.ts";
 import { acts, baseMerged, conflicting, conflictRow, MAINT, mergesAsPerson, pushRecorded, reviewed, run, send, settle, unstarted } from "./workflow-start-world.ts";
 
+test("an approved start of a conflicting PR says who settles the conflict, before any review of it", async () => {
+  for (const [canModify, text] of [[false, /until (the contributor|someone) resolves the conflict/], [true, /AutoCraft merges that branch into it first/]] as const) {
+    for (const start of ["merge", "review and merge", "fix-up and merge"]) {
+      const w = await unstarted(false);
+      await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING", maintainer_can_modify: canModify ? 1 : 0 }).where("number", "=", 1));
+      await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING", maintainer_can_modify: canModify ? 1 : 0 }));
+      const o = await send(w, start);
+      assert.equal(o.outcome, "run", o.line);
+      assert.match(o.line, text, start);
+      w.close();
+    }
+    // Nothing to say without the approval.
+    const w = await unstarted(false);
+    await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "main", mergeable: "CONFLICTING" }).where("number", "=", 1));
+    assert.doesNotMatch((await send(w, "review")).line, /conflict/);
+    w.close();
+  }
+});
+
 test("the recommendation on a conflicting PR runs on a yes: the merge is approved, the base is merged in, then the fixes nobody dropped are made", async () => {
   const fixes = [{ file: "src/lib.rs", change: "rename a to b", title: "rename a" }, { file: "src/lib.rs", change: "drop the copy", title: "drop the copy" }];
   for (const text of ["yes", "fix 1, drop 2, merge", "fix-up and merge", "drop 2"]) {
@@ -143,6 +162,8 @@ test("a yes to the pre-merge review's findings on a conflicting PR keeps them: t
   await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "MERGEABLE" }));
   await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
   await w.premerge(1, "defect");
+  // The one fix-up round of the pre-merge review is spent.
+  await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: "sha0", state: "failed", attempt: 1, created_at: T0, source: "premerge" }));
   await run(w, "merge");
   await settle(w);
   const blocked = (await liveWorkflow(w.db, "app", 1))!;

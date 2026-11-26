@@ -23,7 +23,7 @@ async function actorsOf(db: Db, refs: Ref[]): Promise<Map<string, Actor[]>> {
   const [live, identity] = await db.together(() => Promise.all([listWorkflows(db, { live: true, refs }), githubIdentity(db)]));
   const first = new Map(live.toReversed().map((w) => [refOf(w), w]));
   const flows = [...first.values()].filter((w) => w.entry === "implement");
-  const answers = await loadAnswers(db, flows.map((w) => w.id));
+  const answers = await loadAnswers(db, flows.map((w) => w.id), { resumes: true });
   const logins = new Map(flows.map((w) => [refOf(w), workflowActors(w, answers.get(w.id))]));
   const at = await standings(db, flows.flatMap((w) => logins.get(refOf(w))!.map((login) => ({ login, repo: w.repo }))), { identity });
   return new Map(refs.map((r) => [refOf(r), (logins.get(refOf(r)) ?? []).map((login) => ({ login, standing: at.get(permKey(login, r.repo))! }))]));
@@ -60,7 +60,7 @@ export async function moveTurns(db: Db, repo: string, number: number): Promise<v
 /** Whether the issue's implementation may write to the repo without its approval: as the person it runs for. */
 export async function implementMay(db: Db, repo: string, number: number): Promise<MayResult> {
   const by = await queuerOf(db, repo, number);
-  return by ? { ok: true, as: "person", by } : { ok: false, why: `${repo}#${number} is not queued` };
+  return by ? { ok: true, as: "person", by } : { ok: false, code: "not-approved", why: `${repo}#${number} is not queued` };
 }
 
 /** Why an implement job of the issue may not run, or null. `dry`: a dry run, which may run while the repo's Implement switch is off. */

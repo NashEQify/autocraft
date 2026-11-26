@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import type { Db } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
-import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadHolds, loadLegPass, loadLegs, loadPrWorkflows, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
+import { permKey, standings } from "../../src/data/access/index.ts";
+import { adoptLegs, listWorkflowLegs, loadFixupRequests, loadLandedApprovals, loadLegPass, loadLegs, loadPrWorkflows, loadWorkflowFacts, recordEvents, saveWorkflows, startWorkflows } from "../../src/data/workflow/index.ts";
 import { AT, both, openApp, seedPrs } from "./planner-helpers.ts";
 
 const wf = (repo: string, number: number, o: Record<string, unknown> = {}) => ({ repo, number, kind: "pr" as const, entry: "review" as const, weight: 5, startedBy: "ann", startedVia: "cli" as const, at: AT, ...o });
@@ -37,14 +38,13 @@ both("loadLegs: oldest first, active only, latest only; loadLegPass reads each l
   const ctx = (n: number) => pass.context.get(pass.rows.find((r) => r.number === n)!.id);
   assert.equal((ctx(2) as { since: string }).since, "2026-03-01T00:00:00.000Z");
   assert.equal((ctx(3) as { since: string }).since, AT);
-  assert.equal((ctx(2) as { approvedBy: string | null }).approvedBy, "ann");
   // PR 1's leg has no workflow id yet: it reads the live workflow of its PR until adoptLegs links it.
   assert.equal((ctx(1) as { workflowId: number }).workflowId, ids.get("o/a#1"));
   assert.equal(await adoptLegs(db, [{ id: pass.rows.find((r) => r.number === 1)!.id, workflowId: ids.get("o/a#1")! }]), 1);
   assert.equal(await adoptLegs(db, [{ id: pass.rows.find((r) => r.number === 2)!.id, workflowId: 999 }]), 0, "a linked leg is not adopted again");
 });
 
-both("loadPrWorkflows: a PR's own live workflow, else its leg's, else its issue's implement workflow; listWorkflowLegs finds an issue's legs", async ({ db }) => {
+both("loadPrWorkflows: a PR's own live workflow, else its issue's implement workflow, and no workflow for a leg alone; listWorkflowLegs finds an issue's legs", async ({ db }) => {
   const q = queryDb(db);
   const k = q.k as any;
   const ids = await seed(db, 4);
@@ -52,12 +52,12 @@ both("loadPrWorkflows: a PR's own live workflow, else its leg's, else its issue'
   const [byLeg, byAttempt] = [issues.get("o/a#90")!, issues.get("o/a#91")!];
   const impl = (number: number, pr: number, attempt: number, state: string) => ({ repo: "o/a", number, queued_by: "ann", state, attempt, text_hash: "h", pr_number: pr, created_at: AT, updated_at: AT });
   await q.run(k.insertInto("main.implementations").values([impl(91, 2, 1, "closed"), impl(91, 4, 2, "pr-opened")]));
-  // PR 3 and 4 have no live workflow of their own; PR 3's leg is the first issue's, PR 4 was opened for the second.
+  // PR 3 and 4 have no live workflow of their own; PR 3's leg is the first issue's, which does not work on it; PR 4 was opened for the second.
   await saveWorkflows(db, [3, 4].map((n) => ({ id: ids.get(`o/a#${n}`)!, patch: { state: "stopped" as const } })));
   await q.run(k.updateTable("main.preapprovals").set({ workflow_id: byLeg }).where("number", "=", 3));
   const refs = [1, 2, 3, 4, 5].map((number) => ({ repo: "o/a", number }));
   assert.deepEqual([...await loadPrWorkflows(db, refs)].map(([key, w]) => [key, w.id]).sort(),
-    [["o/a#1", ids.get("o/a#1")], ["o/a#2", ids.get("o/a#2")], ["o/a#3", byLeg], ["o/a#4", byAttempt]]);
+    [["o/a#1", ids.get("o/a#1")], ["o/a#2", ids.get("o/a#2")], ["o/a#4", byAttempt]]);
   assert.deepEqual((await listWorkflowLegs(db, [byLeg])).map((l) => l.number), [3]);
 });
 
@@ -66,6 +66,7 @@ both("loadFixupRequests: queued requests of makers who may act, ordered, narrowe
   const k = q.k as any;
   await q.run(k.insertInto("main.tracked_repos").values({ name: "o/a" }));
   await q.run(k.insertInto("main.access").values([{ login: "ann", role: "maintainer" }, { login: "bob", role: "viewer" }]));
+  await q.run(k.insertInto("main.settings").values({ key: "github_identity", value: "app" }));
   const now = new Date().toISOString();
   await q.run(k.insertInto("main.repo_permissions").values([{ login: "ann", repo: "o/a", permission: "write", checked_at: now }, { login: "bob", repo: "o/a", permission: "write", checked_at: now }]));
   await q.run(k.insertInto("main.operator_fixups").values([
@@ -78,13 +79,27 @@ both("loadFixupRequests: queued requests of makers who may act, ordered, narrowe
   assert.deepEqual((await loadFixupRequests(db, { open: true, nowMs: Date.now() + 3_600_000 })).map((r) => r.instructions), [], "an old permission read stops counting");
 });
 
-both("loadHolds reads the held PRs of a repo or of refs", async ({ db }) => {
-  const q = queryDb(db);
-  await q.run((q.k as any).insertInto("main.merge_holds").values([{ repo: "o/a", number: 2, held_by: "ann", held_at: AT }, { repo: "o/b", number: 1, held_by: "bob", held_at: AT }]));
-  assert.deepEqual([...await loadHolds(db)].map(([key]) => key), ["o/a#2", "o/b#1"]);
-  assert.deepEqual([...await loadHolds(db, { repo: "o/b" })], [["o/b#1", { heldBy: "bob", heldAt: AT }]]);
-  assert.equal((await loadHolds(db, { refs: [{ repo: "o/a", number: 2 }, { repo: "o/a", number: 3 }] })).size, 1);
-  assert.equal((await loadHolds(db, { refs: [] })).size, 0);
+both("a request's maker counts in SQL exactly when standing says yes: role, permission, its age and the identity", async ({ db }) => {
+  const k = queryDb(db).k as any;
+  const run = (b: any) => queryDb(db).run(b);
+  const now = Date.parse("2026-03-01T12:00:00.000Z");
+  const people = ["operator", "maintainer", "viewer", null].flatMap((role) => ["admin", "maintain", "write", "triage", "read", null]
+    .flatMap((permission) => (permission === null ? [null] : [1, 11, 59, 61]).map((age) => ({ role, permission, age }))))
+    .map((p, i) => ({ ...p, login: `User${i}`, repo: "o/a" }));
+  await run(k.insertInto("main.tracked_repos").values({ name: "o/a" }));
+  await run(k.insertInto("main.access").values(people.filter((p) => p.role !== null).map((p) => ({ login: p.login.toLowerCase(), role: p.role }))));
+  await run(k.insertInto("main.repo_permissions").values(people.filter((p) => p.permission !== null).map((p) => ({ login: p.login.toUpperCase(), repo: p.repo, permission: p.permission, checked_at: new Date(now - p.age! * 60_000).toISOString() }))));
+  await run(k.insertInto("main.operator_fixups").values(people.map((p, i) => ({ repo: p.repo, number: i + 1, from_head: "h", instructions: p.login, by: p.login, at: AT, state: "queued" }))));
+  for (const identity of ["app", "box"] as const) {
+    await run(k.deleteFrom("main.settings").where("key", "=", "github_identity"));
+    if (identity === "app") await run(k.insertInto("main.settings").values({ key: "github_identity", value: identity }));
+    const js = await standings(db, people, { identity, now });
+    const want = people.filter((p) => js.get(permKey(p.login, p.repo)) === "yes").map((p) => p.login);
+    assert.equal(want.length > 0, identity === "app");
+    assert.deepEqual((await loadFixupRequests(db, { nowMs: now })).map((r) => r.by).sort(), [...want].sort(), identity);
+    const facts = await loadWorkflowFacts(db, people.map((p, i) => ({ repo: p.repo, number: i + 1 })), { nowMs: now });
+    assert.deepEqual([...facts.operator.values()].flatMap((o) => o.requests.map((r) => r.by)).sort(), [...want].sort(), identity);
+  }
 });
 
 async function seeded(n: number): Promise<{ db: Db; run(): Promise<unknown>; close(): Promise<void> }> {
@@ -97,9 +112,9 @@ async function seeded(n: number): Promise<{ db: Db; run(): Promise<unknown>; clo
     db: o.db, close: () => o.t.close(),
     run: async () => {
       await loadLegs(o.db, keys, { latestOnly: true });
+      await loadLandedApprovals(o.db, keys);
       await loadLegPass(o.db);
       await loadFixupRequests(o.db, { open: true });
-      await loadHolds(o.db, { refs: keys });
     },
   };
 }

@@ -10,7 +10,7 @@ import { forgetLink, loginOf, redeemLinkCode } from "./links.ts";
 import { PERM_WRITE_TTL, cachedWrite } from "../dash/server/sessions.ts";
 import { t } from "../i18n/index.ts";
 import { parse } from "../workflow/parse.ts";
-import { runCommand } from "../workflow/apply.ts";
+import { READ_OWN_MAX, refsIn, runText, type ReadDeps } from "../workflow/read.ts";
 import { COMMANDS, WEIGHT_HELP } from "../workflow/vocab.ts";
 import { plain } from "./reply.ts";
 import type { Db } from "../db/index.ts";
@@ -59,7 +59,7 @@ export const HELP = [
   "AutoCraft's bot reaction on a message means AutoCraft counted it for the issues it names.",
 ].join("\n");
 
-export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number }): void {
+export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number; read?: ReadDeps }): void {
   const { db, keys } = deps;
   const tries = new Map<string, number[]>();
   /** Sliding window per key: false when `lim.n` uses are already inside it. Keys whose uses have all expired are dropped. */
@@ -116,11 +116,13 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     const login = await loginOf(db, keys, call.userId);
     if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft link.") }));
-    const parsed = parse(call.option("text") ?? "");
-    // Discord has no item the text was written on, so the items come from the list in the text.
+    const text = call.option("text") ?? "";
+    const parsed = parse(text);
+    // Discord has no item the text was written on, so the items come from the list in the text; text the parser cannot read is read by a model (runText).
     const userHash = keys.hash("author", call.userId);
     const shown = await loadShownQuestions(db, userHash);
-    const result = await runCommand(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord", { parsed, items: [], asked: ({ workflow }) => shown.get(workflow.id) });
+    const result = await runText(db, { login, canWrite: (repo) => cachedWrite(db, login, repo, PERM_WRITE_TTL) }, "discord", { parsed, items: [], asked: ({ workflow }) => shown.get(workflow.id) },
+      { text, own: refsIn(text).slice(0, READ_OWN_MAX), named: true, ...(deps.read ? { deps: deps.read } : {}) });
     // The reply shows the question that took the answered one's place, as an alert does.
     const sentAt = new Date().toISOString();
     await addSentAlerts(db, result.items.flatMap((o) => (o.question ? [{ userHash, ...o.question, sentAt }] : [])));
