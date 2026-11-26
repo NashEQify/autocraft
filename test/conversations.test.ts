@@ -14,6 +14,7 @@ import { answerPending } from "../src/conversations/run.ts";
 import { cleanReason } from "../src/act/templates.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import * as conv from "../src/dash/api/conversations.ts";
+import { postChat, postChatWithdraw } from "../src/dash/api/item-chat.ts";
 import { HttpError } from "../src/dash/server/util.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
@@ -305,19 +306,6 @@ describe("Do it", () => {
     assert.equal(await settles("op", "operator", null), true);
     assert.equal(await settles("op", "operator", "read"), false);
   });
-
-  test("a message with ask false is stored without a pending state and queues no Opus reply", async () => {
-    const db = await fresh();
-    await conv.postMessage(db, req("operator", { repo: "app", n: "3" }, { text: "Note for later", ask: false }));
-    const row = (await db.get(db.k.selectFrom("conversation_turns").select(["status", "seq"]).where("repo", "=", "app").where("number", "=", 3)))!;
-    assert.equal(row.status, null);
-    assert.ok(row.seq);
-    const pending = async () => Number((await db.get(db.k.selectFrom("conversation_turns").select((eb) => eb.fn.countAll<number>().as("n")).where("status", "=", "pending")))!.n);
-    assert.equal(await pending(), 0);
-    // A question can follow at once.
-    await conv.postMessage(db, req("operator", { repo: "app", n: "3" }, { text: "What do you think?" }));
-    assert.equal(await pending(), 1);
-  });
 });
 
 function req(role: "operator" | "viewer", params: Record<string, string>, json?: unknown): Req {
@@ -326,31 +314,30 @@ function req(role: "operator" | "viewer", params: Record<string, string>, json?:
 }
 
 describe("access", () => {
-  test("a viewer cannot write; no conversation route is operator-only", async () => {
+  test("a viewer cannot write; no chat route is operator-only; a second question while Opus has not answered the first is refused", async () => {
     const db = await fresh();
-    await assert.rejects(() => conv.postMessage(db, req("viewer", { repo: "app", n: "1" }, { text: "Hi" })), (e) => e instanceof HttpError && e.status === 403);
-    const writes = apiRoutes().filter((r) => r.method === "POST" && /conversation/.test(r.pattern));
+    const say = (role: "operator" | "viewer", text: string) => postChat(db, req(role, { repo: "app", n: "1" }, { conversation: "main", text }));
+    await assert.rejects(() => say("viewer", "Hi?"), (e) => e instanceof HttpError && e.status === 403);
+    const writes = apiRoutes().filter((r) => r.method === "POST" && /\/chat/.test(r.pattern));
     assert.equal(writes.length, 2);
     // No route is operator-only: messages and withdrawals check who may write in the handler (refused for the viewer above).
     assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern), []);
-    // A second message while Opus has not answered the first is refused.
-    await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Hi" }));
-    await assert.rejects(() => conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Again" })), (e) => e instanceof HttpError && e.status === 409);
+    assert.deepEqual((await say("operator", "Why?")).lines, []);
+    assert.equal((await say("operator", "Again?")).lines.length, 1, "the second question gets the refusal and asks nothing");
   });
 });
 
 describe("maintainers talk to Opus", () => {
-  test("a maintainer asks Opus only with write access, with the pipeline on and a ready runner of theirs; a post without Opus needs only the write access", async () => {
+  test("a maintainer asks Opus only with write access, with the pipeline on and a ready runner of theirs", async () => {
     const db = await fresh();
-    const maint = (write: boolean, json: unknown): Req => ({ ...req("viewer", { repo: "app", n: "1" }, json), user: { login: "maint", role: "maintainer", canWrite: async () => write, canRead: async () => true } });
-    const refused = async (r: Req, status: number, re?: RegExp) => await assert.rejects(() => conv.postMessage(db, r), (e) => e instanceof HttpError && e.status === status && (!re || re.test(e.message)));
-    await refused(maint(false, { text: "Hi" }), 403, /write in conversations/);
-    await refused(maint(true, { text: "Hi" }), 409, /pipeline is off/);
+    const maint = (write: boolean, text: string): Req => ({ ...req("viewer", { repo: "app", n: "1" }, { conversation: "main", text }), user: { login: "maint", role: "maintainer", canWrite: async () => write, canRead: async () => true } });
+    const refusal = async (write: boolean) => (await postChat(db, maint(write, "Is this in scope?"))).lines.join(" ");
+    await assert.rejects(() => postChat(db, maint(false, "Hi?")), (e) => e instanceof HttpError && e.status === 403);
+    assert.match(await refusal(true), /pipeline is off/);
     await setEnabled(db, true, "test");
-    await refused(maint(true, { text: "Hi" }), 409, /Task Runner must be connected and ready/);
-    const view = await conv.postMessage(db, maint(true, { text: "A note", ask: false }));
-    assert.equal(view.canTalk, true);
-    assert.deepEqual(view.turns.map((t) => [t.kind, t.login]), [["maintainer", "maint"]]);
+    assert.match(await refusal(true), /Task Runner must be connected and ready/);
+    const turns = await db.all(db.k.selectFrom("conversation_turns").select("id").where("number", "=", 1));
+    assert.equal(turns.length, 0, "a refused question asks nothing");
   });
 });
 
@@ -373,14 +360,13 @@ describe("maintainers' messages wait and are withdrawn", () => {
     assert.equal((await turn()).status, "pending");
     assert.equal(handled, 0, "a message given back is no work done");
     const as = (login: string, role: "maintainer" | "operator"): Req => ({ ...req("viewer", { repo: "app", n: "1" }), user: { login, role, canWrite: async () => true, canRead: async () => true } });
-    await assert.rejects(() => conv.postWithdraw(db, as("someone", "maintainer")), (e) => e instanceof HttpError && e.status === 403);
-    const view = await conv.postWithdraw(db, as("maint", "maintainer"));
-    assert.equal(view.pending, false);
+    await assert.rejects(() => postChatWithdraw(db, as("someone", "maintainer")), (e) => e instanceof HttpError && e.status === 403);
+    await postChatWithdraw(db, as("maint", "maintainer"));
     assert.match((await turn()).error ?? "", /withdrawn by maint/);
     await addMessage(db, "app", 1, { login: "maint", kind: "maintainer" }, "And now?");
-    const after = await conv.postWithdraw(db, as("op", "operator"));
+    await postChatWithdraw(db, as("op", "operator"));
     assert.equal((await turn()).status, "failed");
-    assert.equal(after.canWithdraw, false, "nothing waits any more");
+    await assert.rejects(() => postChatWithdraw(db, as("op", "operator")), (e) => e instanceof HttpError && e.status === 409, "nothing waits any more");
   });
 
   test("withdrawing a turn that is being answered withdraws its model call", async () => {

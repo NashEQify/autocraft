@@ -1,7 +1,6 @@
-// GET /api/maintain/home: Home's read. Items come from the live workflow rows
-// (src/workflow/store.ts) of the repos the reader may see, narrowed to the picked project. An item needs an answer when its
-// recommendation is open (its steps are done, or a blocker stopped it) or its last answer was unclear; it counts for the reader only where they may act on the repo
-// (mayRunRepo: operators on every repo, maintainers where GitHub grants write). Text is built by src/workflow/status.ts.
+// GET /api/maintain/home: Home's read. The reader's own items (src/data/chat/mine.ts) of the repos they may see, newest chat entry
+// first, each with the conversation's last message and whether its open question is addressed to them (src/workflow/asked.ts);
+// viewers get the newest updated items instead. Text is built by src/workflow/status.ts.
 import type { MaintainHome, MaintainItemGroup, MaintainItemRow, MaintainItems, MaintainItemsFilter, MaintainItemsShow, MaintainQueueMeta, MaintainRepo, MaintainRow, MaintainRunnerLine, MaintainStats } from "../../../web/src/api/types.ts";
 import { t } from "../../i18n/index.ts";
 import { recommendationText, stateLine, weightLabel } from "../../workflow/status.ts";

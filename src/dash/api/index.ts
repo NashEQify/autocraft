@@ -34,7 +34,6 @@ import * as discord from "./discord.ts";
 import * as agents from "./agents.ts";
 import * as build from "./build.ts";
 import * as workspaces from "./workspaces.ts";
-import * as conv from "./conversations.ts";
 import * as mcp from "./mcp.ts";
 import * as userSettings from "./user-settings.ts";
 import * as maintain from "./maintain.ts";
@@ -414,8 +413,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/downloads", downloads),
     get("/api/items/:repo/:n/trace", itemTrace),
     get("/api/items/:repo/:n/trace/event", itemTraceDetail),
-    { method: "POST", pattern: "/api/conversations/:repo/:n/messages", handler: ok(async (db, req) => conv.postMessage(db, req)) },
-    { method: "POST", pattern: "/api/conversations/:repo/:n/withdraw", handler: ok(async (db, req) => conv.postWithdraw(db, req)) },
     { method: "POST", pattern: "/api/items/:repo/:n/preapproval/cancel", handler: ok(operator.cancelItemPreapproval) },
     { method: "POST", pattern: "/api/items/:repo/:n/preapproval/retry", handler: ok(operator.retryItemPreapproval) },
     { method: "POST", pattern: "/api/items/:repo/:n/review-again", handler: ok(operator.reviewItemAgain) },

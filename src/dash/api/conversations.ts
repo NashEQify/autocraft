@@ -1,16 +1,15 @@
 // Opus conversations on items. Everyone who may see the repo reads them. Operators write to Opus, and so do maintainers with
 // write access to the repo, whose messages run on their own Task Runners.
-import type { Conversation, ConversationCard, ConversationTurn } from "../../../web/src/api/types.ts";
+import type { ConversationCard } from "../../../web/src/api/types.ts";
 import { actionRefusal, buttonLabel, cardEffect, cardLines, cardRepos, commandText, followupsOf, headline, isRegistry, readParams, type CardParams } from "../../conversations/cards.ts";
 import { queueReason } from "../../conversations/queue.ts";
-import { cardDigest, isStaleRunning, sweepRunningCards, type CardRow } from "../../conversations/act.ts";
+import { cardDigest, type CardRow } from "../../conversations/act.ts";
 import { addMessage, loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
-import { ConversationError, loadQueue, loadThreads, type Queue, type Thread } from "../../data/conversations/index.ts";
+import { ConversationError, loadQueue, type Queue } from "../../data/conversations/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { listWorkflows } from "../../data/workflow/index.ts";
-import { needVisible } from "./visible.ts";
 import { PERM_READ_TTL } from "../server/sessions.ts";
 import { githubIdentity } from "../../github/identity.ts";
 import { canActMany, permKey } from "../../data/access/index.ts";
@@ -128,80 +127,12 @@ function issueOf(p: CardParams): { title: string } | undefined {
   return followupsOf(p)[0] ?? (p.kind === "command" && !isRegistry(p.command) && p.command.word === "open_issue" ? p.command : undefined);
 }
 
-export type ConversationView = Conversation;
-
-async function threadView(db: Db, repo: string, n: number, who?: Viewer): Promise<{ thread: Thread | undefined; view: Omit<ConversationView, "canTalk" | "canWithdraw"> }> {
-  const key = `${repo}#${n}`;
-  let thread = (await loadThreads(db, [key])).get(key);
-  // A card left Running by a crash must not show as running until the next restart.
-  if (thread?.cards.some((c) => isStaleRunning(c))) {
-    await sweepRunningCards(db);
-    thread = (await loadThreads(db, [key])).get(key);
-  }
-  if (!thread) return { thread, view: { repo, number: n, exists: false, pending: false, startedBy: null, turns: [] } };
-  const shared = await cardsView(db, thread.cards, who);
-  const actions = new Map<number, ConversationCard[]>();
-  const views = thread.cards.map((c) => viewOf(c, shared));
-  for (const [i, c] of thread.cards.entries()) (actions.get(c.turn_id) ?? actions.set(c.turn_id, []).get(c.turn_id)!).push(views[i]!);
-  const turns: ConversationTurn[] = thread.turns.map((t) => ({
-    id: t.id, kind: t.kind, login: t.login, at: t.at, body: t.body,
-    actions: actions.get(t.id) ?? [],
-    notes: t.notes ? (JSON.parse(t.notes) as string[]) : [],
-    ...(t.status && { status: t.status as ConversationTurn["status"] }),
-    ...(t.error && { error: t.error }),
-  }));
-  const wait = thread.waiting;
-  const progress = wait?.status === "answering" && wait.progress ? (JSON.parse(wait.progress) as string[]) : [];
-  return { thread, view: { repo, number: n, exists: true, pending: !!wait, ...(progress.length > 0 && { progress }), startedBy: thread.conversation.created_by, turns } };
-}
-
-export const conversationView = async (db: Db, repo: string, n: number, who?: Viewer): Promise<Omit<ConversationView, "canTalk" | "canWithdraw">> => (await threadView(db, repo, n, who)).view;
-
-function itemOf(req: Req): { repo: string; n: number } {
-  const n = Number(req.params.n);
-  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "the item number must be a whole number");
-  return { repo: req.params.repo!, n };
-}
-
-function text(req: Req): string {
-  const b = req.json;
-  if (!b || typeof b !== "object" || Array.isArray(b) || typeof (b as { text?: unknown }).text !== "string") throw new HttpError(400, "the body must be an object with a text");
-  return (b as { text: string }).text;
-}
-
-/** `ask: false` stores the message without asking Opus. */
-function ask(req: Req): boolean {
-  const a = (req.json as { ask?: unknown } | null)?.ask;
-  if (a !== undefined && typeof a !== "boolean") throw new HttpError(400, "ask must be true or false");
-  return a !== false;
-}
-
-/** The conversation as the requester sees it, with whether they may write to Opus and withdraw the maintainer's message that waits. */
-async function viewFor(db: Db, req: Req, repo: string, n: number): Promise<ConversationView> {
-  const [{ thread, view }, may] = await Promise.all([threadView(db, repo, n, req.user), canTalk(db, req.user, repo)]);
-  const wait = thread?.waiting;
-  const canWithdraw = wait?.kind === "maintainer" && (isOperator(req) || wait.login.toLowerCase() === req.user.login.toLowerCase());
-  return { ...view, canTalk: may, canWithdraw };
-}
-
 /** Why a maintainer's message to Opus would not be answered now, or null: the pipeline is off or draining, its step is paused, or none of their Task Runners is ready. */
 async function ownAskRefusal(db: Db, login: string, repo: string): Promise<string | null> {
   if (!await isEnabled(db)) return "The pipeline is off, so Opus cannot answer now. You can still post without Opus.";
   const paused = await pauseReason(db, MAINTAINER_STEP, Date.now(), { backoff: false });
   if (paused) return `Opus cannot answer now: ${paused}. You can still post without Opus.`;
   return await ownTaker(db, login, { prompt_id: CONVERSATION_PROMPT_ID, repos: [repo], tier: tierOfModel(CLAUDE_PROMPTS[CONVERSATION_PROMPT_ID].models[0]!) }) ? null : NO_OWN_RUNNER;
-}
-
-/** A message to Opus, or with `ask: false` a post without asking. A maintainer's asked message runs on their own Task Runner, so it is refused while it would not be answered (ownAskRefusal). */
-export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<ConversationView> {
-  const { repo, n } = itemOf(req);
-  await needVisible(db, req, repo);
-  if (!await canTalk(db, req.user, repo)) throw new HttpError(403, "only operators, and maintainers with write access to the repository, write in conversations");
-  const kind = isOperator(req) ? "operator" : "maintainer", asking = ask(req), body = text(req);
-  const refused = kind === "maintainer" && asking ? await ownAskRefusal(db, req.user.login, repo) : null;
-  if (refused) throw new HttpError(409, refused);
-  await guard(() => addMessage(db, repo, n, { login: req.user.login, kind }, body, deps, asking));
-  return await viewFor(db, req, repo, n);
 }
 
 /** Questions a person may put to Opus per hour and per day. */
@@ -217,7 +148,7 @@ export async function assertAskRate(db: Db, login: string): Promise<void> {
 }
 
 /**
- * Puts a question to Opus on the sender's own runner, as postMessage does, for a message the chat has stored already. Returns the
+ * Puts a question to Opus on the sender's own runner, for a message the chat has stored already. Returns the
  * turn it created, or why the question was not asked (the message stays in the chat): a maintainer's refusal (ownAskRefusal) or an
  * open question that Opus has not answered.
  */
@@ -230,14 +161,6 @@ export async function askOpus(db: Db, req: Req, repo: string, n: number, body: s
     if (e instanceof ConversationError && e.status === 409) return { refusal: e.message };
     throw e;
   }
-}
-
-/** Withdraws the maintainer's message that waits for Opus: an operator, or the maintainer who wrote it, so an item is never held by a message no runner takes. */
-export async function postWithdraw(db: Db, req: Req): Promise<ConversationView> {
-  const { repo, n } = itemOf(req);
-  await needVisible(db, req, repo);
-  await withdrawMessage(db, req, repo, n);
-  return await viewFor(db, req, repo, n);
 }
 
 /** Withdraws the message on the item that waits for Opus, as the reader: an operator, or the person who wrote it. */
