@@ -3,7 +3,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import type { MadePush, OutcomePush } from "../../core/evidence.ts";
-import { BREAKER_WINDOW, breakerTripped, classifyPush, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Before, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
+import { BREAKER_WINDOW, breakerTripped, classifyPush, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { RefKey } from "../mirror/types.ts";
 import { loadChecks } from "../mirror/checks.ts";
@@ -61,33 +61,21 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
   if (!list.length) return;
   const fresh = list.filter((p) => !p.from), moved = list.filter((p) => p.from && p.number !== null);
   const freshRepos = [...new Set(fresh.map((p) => p.repo))];
-  const movedRepos = [...new Set(moved.map((p) => p.repo))];
-  const q0 = queryDb(db);
-  const [ciAt, ciHeads, stored, optional, fromTimes, mainHeads] = await db.together(() => Promise.all([
+  const [ciAt, ciHeads, stored, optional] = await db.together(() => Promise.all([
     loadMainCiAt(db, fresh.filter((p) => p.base).map((p) => ({ repo: p.repo, sha: p.base! }))),
     freshRepos.length ? loadMainCi(db, { repos: freshRepos }) : Promise.resolve(new Map<string, { state: string; committed_at: string | null; first_seen_at: string }[]>()),
     loadChecks(db, moved.map((p) => ({ repo: p.repo, number: p.number! }))),
     loadOptionalChecks(db, moved.map((p) => p.repo)),
-    // When the head before each push was committed: its CI cannot have run earlier.
-    Promise.all(kx.chunks(moved.filter((p) => p.number !== null).map((p) => ({ repo: p.repo, number: p.number!, oid: p.from! }))).map((c) => q0.all(q0.k.selectFrom("main.pr_commits").select(["repo", "number", "oid", "committed_at"])
-      .where(kx.tupleIn(db, ["repo", "number", "oid"], c.map((r) => [r.repo, r.number, r.oid]), ["text", "bigint", "text"]))))),
-    movedRepos.length ? loadMainCi(db, { repos: movedRepos }) : Promise.resolve(new Map<string, { state: string; committed_at: string | null; first_seen_at: string }[]>()),
   ]));
-  const fromAt = new Map(fromTimes.flat().map((r) => [`${r.repo}#${r.number}@${r.oid}`, r.committed_at] as const));
-  // The default branch's newest commit time seen so far: a green older than it ran against a base that has since moved.
-  const mainAt = (repo: string): string | null => (mainHeads.get(repo) ?? []).reduce<string | null>((m, h) => (h.committed_at !== null && (m === null || h.committed_at > m) ? h.committed_at : m), null);
   const now = new Date().toISOString();
   const rows = list.map((p) => {
-    let before: Before = "unknown";
+    let before: Required | "unknown" = "unknown";
     if (!p.from) {
       const m = (p.base ? ciAt.get(`${p.repo}@${p.base}`)?.state : undefined) ?? latestMainState(ciHeads.get(p.repo) ?? []);
       before = m === "green" || m === "optional" ? "green" : m === "red" ? "red" : "unknown";
     } else if (p.number !== null) {
       const row = stored.get(`${p.repo}#${p.number}`);
       if (row && row.head_oid === p.from) before = requiredResult(parse(row.checks), optional(p.repo));
-      // Without the CI run's own finish time, the commit time of the head stands in for it.
-      const ranAt = fromAt.get(`${p.repo}#${p.number}@${p.from}`), baseAt = mainAt(p.repo);
-      if (before === "green" && ranAt && baseAt && baseAt > ranAt) before = "stale";
     }
     return { at: p.at ?? now, stage: PUSH_STAGE[p.action]!, action: p.action, repo: p.repo, number: p.number, from_oid: p.from, to_oid: p.to, before_res: before };
   });
@@ -126,7 +114,7 @@ export async function resolvePushes(db: Db, rows: { repo: string; number: number
     if (!open.length) continue;
     const after = requiredResult(parse(r.checks), optional(r.repo));
     for (const p of open) {
-      const outcome = classifyPush(p.before_res as Before, after);
+      const outcome = classifyPush(p.before_res as Required | "unknown", after);
       if (outcome === null) continue;
       done.add(p.id);
       settled.push({ id: p.id, number: r.number, after_res: after, outcome, resolved_at: at });

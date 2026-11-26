@@ -2149,7 +2149,7 @@ CREATE TABLE IF NOT EXISTS own_commits (
 -- Every push of ours to a PR branch (fix-up, conflict merge, CI fix, fix-issue PR) and what it did to the PR's required checks.
 -- before_res / after_res: green | red | pending | none | unknown (required checks only; optional ones are ignored). A branch created
 -- by the push has no earlier head: it counts as green before. outcome stays NULL until the checks at to_oid are final;
--- then kept-green | fixed | broke | still-red | stale | unknown (stale: a red after a green that ran on an older base; it does not count toward the breaker). number is NULL for a fix-issue push until its PR's checks arrive.
+-- then kept-green | fixed | broke | still-red | unknown. number is NULL for a fix-issue push until its PR's checks arrive.
 -- stage: fixup | cifix | fixissue (the circuit breaker's stage); action: the audit action of the push.
 CREATE TABLE IF NOT EXISTS push_outcomes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
