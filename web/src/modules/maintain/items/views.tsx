@@ -1,4 +1,4 @@
-// Items: four lists of the open items (needs an answer, started, handled automatically, not started), or the Backlog, or the
+// Items: three lists of the open items (started, handled automatically, not started), or the Backlog, or the
 // closed items. Filters and search live in the URL. People who may send commands tick items to fill the command box with the
 // list form (`merge:` then one item per line) and run it for all of them at once.
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -33,9 +33,8 @@ export function withItems(text: string, refs: string[]): string {
   return refs.length ? `${head}:\n${refs.join("\n")}` : head;
 }
 
-function groupTitle(g: MaintainItemGroup, viewer: boolean): string {
+function groupTitle(g: MaintainItemGroup): string {
   switch (g) {
-    case "needs": return viewer ? t("Waiting for a maintainer") : t("Needs an answer");
     case "started": return t("Started");
     case "automatic": return t("Handled automatically");
     case "rest": return t("Not started");
@@ -63,7 +62,7 @@ function RowLine({ r }: { r: MaintainItemRow }) {
       )}
       {r.blocked && <span className="text-bad">{t("Blocker")} · </span>}
       {r.line !== null ? (
-        <span className={r.group === "needs" ? "font-medium text-accent-ink" : "text-ink/80"}>{r.line}</span>
+        <span className={r.asked ? "font-medium text-accent-ink" : "text-ink/80"}>{r.line}</span>
       ) : r.status ? (
         <span className="text-ink/80">
           <span className="font-medium">{r.status.phase === "Held" && !r.stoppedBy ? t("Parked") : r.status.phase}</span>
@@ -119,12 +118,12 @@ function ItemRow({ r, picking, picked, onPick }: { r: MaintainItemRow; picking: 
   );
 }
 
-function Group({ group, rows, total, viewer, picking, picked, onPick, onMore }: {
-  group: MaintainItemGroup; rows: MaintainItemRow[]; total: number; viewer: boolean; picking: boolean;
+function Group({ group, rows, total, picking, picked, onPick, onMore }: {
+  group: MaintainItemGroup; rows: MaintainItemRow[]; total: number; picking: boolean;
   picked: Set<string>; onPick: (refs: string[], on: boolean) => void; onMore: () => void;
 }) {
   if (!rows.length) return null;
-  const title = groupTitle(group, viewer);
+  const title = groupTitle(group);
   const mine = rows.filter((r) => r.may).map(refOf);
   const all = mine.length > 0 && mine.every((r) => picked.has(r));
   return (
@@ -271,7 +270,7 @@ export function ItemsView(_: ViewProps) {
   const { data, error } = useQuery(`maintain-items:${JSON.stringify(query)}:${semantic ?? ""}`, async (a) => {
     if (!semantic) return a.maintain.items(query);
     const hits = await a.semanticSearch(semantic);
-    if (!hits.length) return { rows: [], counts: { needs: 0, started: 0, automatic: 0, rest: 0, backlog: 0, done: 0 } };
+    if (!hits.length) return { rows: [], counts: { started: 0, automatic: 0, rest: 0, backlog: 0, done: 0 } };
     return a.maintain.items({ ...query, refs: hits.map(refOf) });
   });
   const { data: areaList } = useQuery(`areas:${project ?? ""}`, (a) => a.areas.get(project!), { enabled: !!project });
@@ -300,7 +299,7 @@ export function ItemsView(_: ViewProps) {
     url.setAll({ filter: null, area: null, q: null, show: null });
   };
 
-  const groups: MaintainItemGroup[] = url.show === "closed" ? ["done"] : url.show === "backlog" ? ["backlog"] : ["needs", "started", "automatic", "rest"];
+  const groups: MaintainItemGroup[] = url.show === "closed" ? ["done"] : url.show === "backlog" ? ["backlog"] : ["started", "automatic", "rest"];
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-[768px] flex-col gap-3 px-4 pb-10 pt-5 md:px-6">
@@ -367,7 +366,6 @@ export function ItemsView(_: ViewProps) {
               group={g}
               rows={data.rows.filter((r) => r.group === g)}
               total={data.counts[g]}
-              viewer={viewer}
               picking={writes && cmdOpen}
               picked={picked}
               onPick={pick}

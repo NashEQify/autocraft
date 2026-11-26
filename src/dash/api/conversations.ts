@@ -1,19 +1,18 @@
 // Opus conversations on items. Everyone who may see the repo reads them. Operators write to Opus, and so do maintainers with
-// write access to the repo, whose messages run on their own Task Runners; cards are run, edited and dismissed by those who settle.
+// write access to the repo, whose messages run on their own Task Runners.
 import type { Conversation, ConversationCard, ConversationTurn } from "../../../web/src/api/types.ts";
 import { actionRefusal, buttonLabel, cardEffect, cardLines, cardRepos, commandText, followupsOf, headline, isRegistry, readParams, type CardParams } from "../../conversations/cards.ts";
 import { queueReason } from "../../conversations/queue.ts";
-import { cardDigest, cardOf, dismissCard, doCard, editCard, isStaleRunning, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
+import { cardDigest, isStaleRunning, sweepRunningCards, type CardRow } from "../../conversations/act.ts";
 import { addMessage, loadStale, withdrawTurn, type Stale, type StoreDeps } from "../../conversations/store.ts";
 import { ConversationError, loadQueue, loadThreads, type Queue, type Thread } from "../../data/conversations/index.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { listWorkflows } from "../../data/workflow/index.ts";
-import { canSeeInternals } from "./staff.ts";
 import { needVisible } from "./visible.ts";
 import { PERM_READ_TTL } from "../server/sessions.ts";
-import { actRefusal, githubIdentity } from "../../github/identity.ts";
+import { githubIdentity } from "../../github/identity.ts";
 import { canActMany, permKey } from "../../data/access/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import type { Db } from "../../db/index.ts";
@@ -64,7 +63,7 @@ type CardsView = {
 
 /**
  * The repos of `cards` the viewer may act on by the act rule. A permission too old to count is read from GitHub first, so the buttons
- * do not go when the stored one ages; an operator keeps them when GitHub does not answer. Each press checks live (needCard).
+ * do not go when the stored one ages; an operator keeps them when GitHub does not answer. Each press checks live.
  */
 async function mayActOn(db: Db, cards: CardRow[], who: Viewer | undefined): Promise<Set<string>> {
   const repos = [...new Set(cards.flatMap((c) => { const p = readParams(c.kind, c.params); return p ? cardRepos(c.repo, p) : []; }))];
@@ -184,19 +183,6 @@ async function viewFor(db: Db, req: Req, repo: string, n: number): Promise<Conve
   return { ...view, canTalk: may, canWithdraw };
 }
 
-export async function getConversation(db: Db, req: Req): Promise<ConversationView> {
-  const { repo, n } = itemOf(req);
-  await needVisible(db, req, repo);
-  const [view, quiet] = await Promise.all([viewFor(db, req, repo, n), canSeeInternals(req) ? new Set<string>() : loadQuiet(db, [`${repo}#${n}`])]);
-  return quiet.size > 0 ? veilConversation(view) : view;
-}
-
-/** A viewer's copy of a quiet pull request's conversation: who spoke and when stays; the text, and cards go. */
-function veilConversation(v: ConversationView): ConversationView {
-  const { progress: _p, ...rest } = v;
-  return { ...rest, turns: v.turns.map((t) => ({ id: t.id, kind: t.kind, login: t.login, at: t.at, body: "", actions: [], notes: [], ...(t.status && { status: t.status }) })) };
-}
-
 /** Why a maintainer's message to Opus would not be answered now, or null: the pipeline is off or draining, its step is paused, or none of their Task Runners is ready. */
 async function ownAskRefusal(db: Db, login: string, repo: string): Promise<string | null> {
   if (!await isEnabled(db)) return "The pipeline is off, so Opus cannot answer now. You can still post without Opus.";
@@ -223,47 +209,4 @@ export async function postWithdraw(db: Db, req: Req): Promise<ConversationView> 
   await needVisible(db, req, repo);
   await guard(async () => await withdrawTurn(db, repo, n, { login: req.user.login, operator: isOperator(req) }));
   return await viewFor(db, req, repo, n);
-}
-
-/** The card, for someone who settles it on every repo it writes to (the act rule: an AutoCraft login with write access). */
-async function needCard(db: Db, req: Req): Promise<CardRow> {
-  const id = Number(req.params.id);
-  const c = Number.isInteger(id) ? await cardOf(db, id) : undefined;
-  if (!c) throw new HttpError(404, `no card ${req.params.id}`);
-  await needVisible(db, req, c.repo);
-  for (const repo of cardRepos(c.repo, readParams(c.kind, c.params))) {
-    if (await actRefusal(db, req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access where the app acts for them, runs cards");
-  }
-  return c;
-}
-
-export async function editCardText(db: Db, req: Req): Promise<ConversationCard> {
-  const c = await needCard(db, req);
-  const edit = text(req);
-  return await cardView(db, await guard(async () => await editCard(db, c.id, req.user.login, { text: edit })), req.user);
-}
-
-/** A queued press is the presser's: only they and operators dismiss it. */
-function ownsPress(req: Req, c: CardRow): boolean {
-  return isOperator(req) || c.acted_by?.toLowerCase() === req.user.login.toLowerCase();
-}
-
-export async function dismiss(db: Db, req: Req): Promise<ConversationCard> {
-  const c = await needCard(db, req);
-  if (c.state === "queued" && !ownsPress(req, c)) throw new HttpError(403, "only the person who pressed it, or an operator, dismisses a queued press");
-  return await cardView(db, await guard(async () => await dismissCard(db, c.id, req.user.login, { role: req.user.role })), req.user);
-}
-
-/**
- * Runs the card once; a second press returns the card as it is. The press carries the digest of the card it was made on,
- * so an edit by someone else in between is refused instead of running under this press.
- */
-export async function doIt(db: Db, req: Req, deps?: ActDeps): Promise<ConversationCard> {
-  const c = await needCard(db, req);
-  const b = req.json as { skip?: unknown; note?: unknown; digest?: unknown } | null;
-  if (typeof b?.digest !== "string") throw new HttpError(400, "digest must be the digest of the card as shown");
-  if (c.state === "proposed" && b.digest !== cardDigest(c)) throw new HttpError(409, c.edited_by ? `the card changed since it was shown (edited by ${c.edited_by}); look at it again` : "the card changed since it was shown; look at it again");
-  if (b?.note !== undefined && typeof b.note !== "string") throw new HttpError(400, "note must be a string");
-  if (b?.skip !== undefined && !(Array.isArray(b.skip) && b.skip.length === 0)) throw new HttpError(400, "a card does one thing: it has no steps to skip");
-  return await cardView(db, (await guard(() => doCard(db, c.id, req.user.login, { ...deps, via: "dashboard", note: b?.note as string | undefined, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }))).card, req.user);
 }

@@ -18,7 +18,7 @@ import type {
   Blocker, EndedWorkflow, Entry, ItemKind, ItemWorkflow, NewWorkflow, OperatorWork, PlanPart, Preapproval, PrWorkflows, QueuePosition, Recommendation, RefKey, StartedFilter,
   GoneOn, SaidEvent, StartedWork, StoredEvent, Surface, WorkflowEvent, WorkflowEventKind, WorkflowFact, WorkflowFilter, WorkflowPassFacts, WorkflowPatch, WorkflowRead, WorkflowState,
 } from "./types.ts";
-import { ASKING_STATES, RULE_STARTER, type Parsed } from "../../workflow/types.ts";
+import { RULE_STARTER, type Parsed } from "../../workflow/types.ts";
 
 const ACTIVE_LEGS = ["fixup", "review", "ci", "queued"];
 
@@ -180,15 +180,6 @@ export async function listWorkflows(db: Db, f: WorkflowFilter = {}): Promise<Ite
     .$if(f.recAfter !== undefined, (b: any) => b.where("w.rec_at", ">", f.recAfter!))
     .orderBy("w.id")) as WorkflowRow[];
   return rows.map(workflowOf);
-}
-
-/** The items with an open recommendation, per repo of `repos`. One statement; a repo without one is absent. */
-export async function countWaiting(db: Db, repos: string[]): Promise<Map<string, number>> {
-  if (repos.length === 0) return new Map();
-  const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("main.item_workflows as w").select((eb) => ["w.repo", eb.fn.countAll<number>().as("n")])
-    .where("w.state", "in", ASKING_STATES).where("w.rec", "is not", null).where(kx.inList(db, "w.repo", repos)).groupBy("w.repo"));
-  return new Map(rows.map((r) => [r.repo, Number(r.n)]));
 }
 
 /** The live workflow that works on each PR: its own, else the implement workflow of an issue that does (linkRows). `others`: without the PR's own. One statement. */

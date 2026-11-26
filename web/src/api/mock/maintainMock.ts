@@ -42,7 +42,7 @@ const involves = (r: { startedBy?: string | null; approvedBy?: string | null; st
 type ItemSeed = Partial<MaintainItemRow> & Pick<MaintainItemRow, "repo" | "number" | "title" | "group"> & { phase?: ItemPhase; waiting?: string | null; next?: string | null; rank?: number; sec?: boolean; asks?: string[] };
 const item = (s: ItemSeed): ItemSeed => s;
 const ITEMS: ItemSeed[] = [
-  ...ROWS.map(({ lastBy: _l, lastText: _t, done: _d, ...r }, i) => item({ ...r, group: r.waits ? "needs" : "started", rank: 40 - i })),
+  ...ROWS.map(({ lastBy: _l, lastText: _t, done: _d, ...r }, i) => item({ ...r, group: "started", asked: r.waits ? r.updatedAt : null, rank: 40 - i })),
   item({ repo: "photocraft", number: 812, title: "Crop handles snap past the canvas edge", author: "larkspur-dev", group: "done", state: "merged", phase: "Merged", rank: 0, startedBy: "ochre-fox", approvedBy: "ochre-fox", updatedAt: ago(211), merged: { at: ago(219), how: "approval" } }),
   item({ repo: "photocraft", number: 851, title: "Brush size slider jumps on high-DPI screens", author: "larkspur-dev", group: "automatic", phase: "In queue", waiting: "CI on the PR (4 of 5 checks done)", next: "merge when CI is green", area: "Canvas", rank: 30 }),
   item({ repo: "designcraft", number: 461, title: "Guides menu shows twice after reload", author: "sable-ui", group: "automatic", phase: "Review", waiting: null, next: "review the PR", area: "Canvas", rank: 22 }),
@@ -60,8 +60,8 @@ const ITEMS: ItemSeed[] = [
   item({ repo: "deckcraft", number: 61, title: "Slide numbers restart in each section", author: "brushstroke42", group: "done", state: "closed", phase: "Closed", rank: 0 }),
 ];
 
-const ZERO: Record<MaintainItemGroup, number> = { needs: 0, started: 0, automatic: 0, rest: 0, backlog: 0, done: 0 };
-const ORDER: MaintainItemGroup[] = ["needs", "started", "automatic", "rest", "backlog", "done"];
+const ZERO: Record<MaintainItemGroup, number> = { started: 0, automatic: 0, rest: 0, backlog: 0, done: 0 };
+const ORDER: MaintainItemGroup[] = ["started", "automatic", "rest", "backlog", "done"];
 const WEIGHTS: Record<string, number> = { urgent: 10, high: 8, low: 2 };
 
 function itemsFor(me: User, query: MaintainItemsQuery): MaintainItems {
@@ -93,7 +93,7 @@ function itemsFor(me: User, query: MaintainItemsQuery): MaintainItems {
   for (const s of shown) counts[s.group]++;
   const limit = query.limit ?? 50;
   const rows = ORDER.flatMap((g) => shown.filter((s) => s.group === g).sort(order).slice(0, limit)).map((s): MaintainItemRow => {
-    const started = s.group === "needs" || s.group === "started";
+    const started = s.group === "started";
     const { phase, waiting, next, rank: _r, sec: _s, asks: _a, merged, ...rest } = s;
     return {
       kind: "pr", state: "open", author: null, line: null, status: null, blocked: false, asked: null, weight: null, startedBy: null, approvedBy: null, stoppedBy: null,

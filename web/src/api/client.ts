@@ -33,7 +33,6 @@ import type {
   LiveBoard,
   SecurityList,
   FindingPageData,
-  CardEdit,
   NextPage,
   AccessOverview,
   McpTokenCreated,
@@ -116,8 +115,6 @@ import type {
   AreaDef,
   AreaEditBody,
   AreaStep,
-  Conversation,
-  ConversationCard,
 } from "./types";
 
 /** The dashboard API as the frontend sees it. The mock and the HTTP client both implement it. */
@@ -133,19 +130,6 @@ export interface Api {
   repos(): Promise<RepoName[]>;
   /** Owners of the visible repos that are not storytold's, by repo name. */
   repoOwners(): Promise<Record<string, string>>;
-  /** Opus conversations, one per item. Writes are for operators; a message is refused while Opus has not answered the last one. */
-  conversations: {
-    get(repo: RepoName, number: number): Promise<Conversation>;
-    /** `ask: false` posts the message without asking Opus (no reply is expected). */
-    say(repo: RepoName, number: number, text: string, ask?: boolean): Promise<Conversation>;
-    /** Withdraws the maintainer's message that waits for Opus (Conversation.canWithdraw). */
-    withdraw(repo: RepoName, number: number): Promise<Conversation>;
-    /** Changes a proposed comment card's `text`. */
-    editCard(id: number, edit: CardEdit): Promise<ConversationCard>;
-    /** Runs the card as shown: `digest` is the shown card's. */
-    doCard(id: number, digest: string): Promise<ConversationCard>;
-    dismissCard(id: number): Promise<ConversationCard>;
-  };
   /** A repo's area list. Reading is for everyone who sees the repo; every write is for whoever runs the repo (operator, or maintainer with write). */
   areas: {
     get(repo: RepoName): Promise<RepoAreas>;
@@ -181,7 +165,7 @@ export interface Api {
     queue(): Promise<MaintainQueueMeta>;
     /** Stats: headline numbers and merges per day for 7 or 30 days. */
     stats(period: "7d" | "30d"): Promise<MaintainStats>;
-    /** Items: four lists of the open items (or the Backlog, or the closed items) with filters, search and the priority order; the page's project narrows it. */
+    /** Items: three lists of the open items (or the Backlog, or the closed items) with filters, search and the priority order; the page's project narrows it. */
     items(query: MaintainItemsQuery): Promise<MaintainItems>;
     /** Sends a command written in the dashboard's box; the list form (`merge:` then items) names the items. */
     /** `asked`: the `asked` of the rows shown, by repo#number. */

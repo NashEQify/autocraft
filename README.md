@@ -63,7 +63,7 @@ See [Trust boundary](docs/pipeline.md#trust-boundary).
 
 ### Dashboard browsing
 
-Items is one filterable list; a row's details open inline under it. Home lists what waits for the reader. The item page shows the AutoCraft side and the GitHub side. [The UI design](docs/ui-design.md) describes the layouts and filters.
+Items is one filterable list; a row's details open inline under it. Home lists the reader's own items and marks those with a question for them. The item page is a chat with AutoCraft, with the GitHub and Events tabs beside it. [The UI design](docs/ui-design.md) describes the layouts and filters.
 
 ## Setup
 

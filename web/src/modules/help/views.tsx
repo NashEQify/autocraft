@@ -114,7 +114,7 @@ function Start() {
             {t("Discord:")} <Code>{`/autocraft do text:${COMMANDS[1]!.example}: ${ITEM}`}</Code>
           </li>
           <li>{t("Your agent: the AutoCraft tools take the same words.")}</li>
-          <li>{t("This app: the command box on an item, or Command on Items.")}</li>
+          <li>{t("This app: the chat on an item's page, or Command on Items.")}</li>
         </ul>
       </Part>
     </Page>
@@ -137,7 +137,7 @@ function Surfaces({ c }: { c: CommandDef }) {
       <dt className={dt}>{t("Agent")}</dt>
       <dd className="min-w-0 break-words">“{`${c.example}: ${ITEM}`}”</dd>
       <dt className={dt}>{t("App")}</dt>
-      <dd className="min-w-0 break-words">{t("{word} in the item's command box", { word: c.example })}</dd>
+      <dd className="min-w-0 break-words">{t("{word} in the item's chat", { word: c.example })}</dd>
     </dl>
   );
 }
@@ -260,13 +260,15 @@ function After() {
         <p className="rounded border border-line bg-sunken px-3 py-2 text-sm">{t("Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply hold to halt.")}</p>
       </Part>
       <Part title={t("On GitHub")}>
-        <p>{t("One status comment per started item, edited in place: the steps, the state, the open recommendation and who approved.")}</p>
+        <p>{t("One status comment per started item, edited in place: the steps, the state, the open recommendation, who it asks and who approved.")}</p>
       </Part>
       <Part title={t("Following progress")}>
-        <p>{t("The item page shows the steps and history beside the GitHub activity. The Work queue shows what runs, what waits and why.")}</p>
+        <p>{t("Each item page is a chat with AutoCraft: what people said on every surface, AutoCraft's replies and the work it did. GitHub and Discord activity shows as short lines between them. The status and next step are at the top, and the GitHub and Events tabs open beside the chat.")}</p>
+        <p>{t("Home lists your items: the ones you started, approved, held, answered or wrote about, with the last message. An item with a question for you is marked, and the Home entry in the sidebar counts those questions.")}</p>
+        <p>{t("The Work queue shows what runs, what waits and why.")}</p>
       </Part>
       <Part title={t("When AutoCraft asks you")}>
-        <p>{t("AutoCraft asks one question with one recommendation. The findings are numbered in the item's status.")}</p>
+        <p>{t("AutoCraft asks one question with one recommendation, in the item's chat, with the findings numbered. It asks whoever started the item and whoever approved its merge; anyone with write access may answer.")}</p>
         <MessageSample tone="asks">{t("Recommendation: Fix 1 and 2, then merge. Reply yes to fix 1 and 2, then merge (after the pre-merge check and green CI).")}</MessageSample>
         <ul className="flex list-disc flex-col gap-1 pl-5">
           <li>
@@ -354,7 +356,7 @@ function flows(): { title: string; note?: string; rows: FlowRow[] }[] {
         { text: t("Classify: kind, size, duplicates, priority") },
         { text: t("Review, and fix if needed") },
         { text: t("Pre-merge check and green CI") },
-        [{ when: t("All clear"), text: t("Merge"), kind: "done" }, { when: t("Needs a person"), text: t("one recommendation; whoever answers takes the item over"), kind: "asks" }],
+        [{ when: t("All clear"), text: t("Merge"), kind: "done" }, { when: t("Needs a person"), text: t("stops and asks nobody; a maintainer's command takes the item over"), kind: "asks" }],
       ],
     },
   ];
@@ -378,7 +380,7 @@ function Workflows() {
 }
 
 /** A worked example: numbered steps, each a sentence with an optional message under it. */
-function Story({ title, steps }: { title: string; steps: { text: ReactNode; said?: string; tone?: "ok" | "asks" }[] }) {
+function Story({ title, steps }: { title: string; steps: { text: ReactNode; said?: string; tone?: "ok" | "asks" | "neutral" }[] }) {
   return (
     <Part title={title}>
       <ol className="flex list-decimal flex-col gap-3 pl-6">
@@ -408,8 +410,8 @@ function Examples() {
           { text: t("A contributor with a good merge history opens a 40-line bug fix. Nobody types anything.") },
           { text: t("AutoCraft reviews it, finds two small problems and fixes them.") },
           { text: t("The pre-merge check is clean and CI is green. AutoCraft merges it, then reviews the merged change.") },
-          { text: t("Another time the review is unsure, and AutoCraft asks:"), said: t("The automatic merge rule stops here: the review is unsure. Review it again, then come back with the result."), tone: "asks" },
-          { text: <>{by("mira", `@${mention} fix-up and merge`)} {t("Mira now owns the item. Had the author pushed before anyone answered, the question would have closed and the automatic rule would have taken the pull request back.")}</> },
+          { text: t("Another time the review is unsure. AutoCraft stops and asks nobody. The item's status says why and what it would do:"), said: t("Stopped: the review is unsure. AutoCraft would: review it again, then come back with the result."), tone: "neutral" },
+          { text: <>{by("mira", `@${mention} fix-up and merge`)} {t("Mira now owns the item. Had the author pushed before anyone wrote, the automatic rule would have taken the pull request back.")}</> },
         ]}
       />
       <Story
