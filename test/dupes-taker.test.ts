@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { VectorIndex } from "../src/embed/vectors.ts";
 import { checkPairs, type PairKey } from "../src/dupes/check.ts";
-import type { DupeAsk } from "../src/dupes/pair.ts";
+import { askKey, groupPairs, pairRef, type DupeAsk, type DupePair, type PairItem } from "../src/dupes/pair.ts";
 import { runDupes } from "../src/dupes/index.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
@@ -104,4 +104,16 @@ test("an item with three candidates makes one Jev request, and a pair Jev is uns
   assert.equal(asks[0]!.candidates.length, 3);
   assert.deepEqual(haiku, ["app#1~2"]);
   assert.deepEqual([c.checked, c.verdicts.duplicate, c.verdicts.distinct], [3, 1, 2]);
+});
+
+test("pairs of two repos with the same numbers go in separate requests, each answer named for its own pair", () => {
+  const item = (number: number): PairItem => ({ number, kind: "issue", state: "OPEN", title: `crash ${number}`, body: "" });
+  const pairs: DupePair[] = [];
+  for (const repo of ["app", "lib"]) for (const b of [2, 3]) pairs.push({ ref: pairRef(repo, 1, b), repo, a: item(1), b: item(b) });
+  const asks = groupPairs(pairs);
+  assert.deepEqual(asks.flatMap((a) => a.candidates.map((c) => c.ref)).sort(), pairs.map((p) => p.ref).sort(), "every pair is asked once");
+  for (const a of asks) {
+    assert.ok(a.candidates.every((c) => c.ref.startsWith(`${a.repo}#`)), `${a.ref} asks only about its own repo`);
+    assert.equal(new Set(a.candidates.map(askKey)).size, a.candidates.length, "the answer names in a request are distinct");
+  }
 });

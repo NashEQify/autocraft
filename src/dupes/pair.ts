@@ -36,20 +36,23 @@ export const askView = (a: DupeAsk): Record<string, unknown> => ({ ...itemView(a
 
 /**
  * Groups pairs into requests, one item each: the item in the most unasked pairs takes up to MAX_ASK_CANDIDATES of them, and so on
- * until every pair is in one request. The pairs keep their order within a request.
+ * until every pair is in one request. Items are told apart by repo and number, so a request's candidates all share its repo and
+ * their numbers name them. The pairs keep their order within a request.
  */
 export function groupPairs(pairs: readonly DupePair[]): DupeAsk[] {
   const left = new Set(pairs);
   const out: DupeAsk[] = [];
+  const key = (repo: string, i: PairItem) => `${repo}#${i.number}`;
   while (left.size) {
-    const count = new Map<number, number>();
-    for (const p of left) for (const n of [p.a.number, p.b.number]) count.set(n, (count.get(n) ?? 0) + 1);
-    const [number] = [...count].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0]!;
-    const take = [...left].filter((p) => p.a.number === number || p.b.number === number).slice(0, MAX_ASK_CANDIDATES);
+    const count = new Map<string, number>();
+    for (const p of left) for (const k of [key(p.repo, p.a), key(p.repo, p.b)]) count.set(k, (count.get(k) ?? 0) + 1);
+    const [top] = [...count].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))[0]!;
+    const take = [...left].filter((p) => key(p.repo, p.a) === top || key(p.repo, p.b) === top).slice(0, MAX_ASK_CANDIDATES);
     for (const p of take) left.delete(p);
     const first = take[0]!;
-    out.push({ ref: `${first.repo}#${number}`, repo: first.repo, item: first.a.number === number ? first.a : first.b,
-      candidates: take.map((p) => ({ ref: p.ref, other: p.a.number === number ? p.b : p.a })) });
+    const isTop = (p: DupePair) => key(p.repo, p.a) === top;
+    out.push({ ref: top, repo: first.repo, item: isTop(first) ? first.a : first.b,
+      candidates: take.map((p) => ({ ref: p.ref, other: isTop(p) ? p.b : p.a })) });
   }
   return out;
 }
