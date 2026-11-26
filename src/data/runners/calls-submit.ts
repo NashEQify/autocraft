@@ -90,7 +90,7 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
   return ok;
 }
 
-/** Unleases with `released_by`, tombstone and run finish. False when the lease was not the one named. */
-export async function releaseLease(db: Db, lease: LiveLease, reason: string, now: number): Promise<boolean> {
-  return await unlease(db, { id: lease.id, runId: lease.runId, hash: lease.secretHash }, reason, now, lease.login);
+/** Unleases with `released_by` and the skip `wait` (src/remote/calls.ts releaseWait), tombstone and run finish. False when the lease was not the one named. */
+export async function releaseLease(db: Db, lease: LiveLease, reason: string, now: number, wait: { ms: number | null; setupRetry: boolean } = { ms: null, setupRetry: false }): Promise<boolean> {
+  return await unlease(db, { id: lease.id, runId: lease.runId, hash: lease.secretHash }, reason, now, { login: lease.login, waitMs: wait.ms, setupRetry: wait.setupRetry });
 }

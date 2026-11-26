@@ -69,6 +69,11 @@ type BoundCalls = "only" | "with" | "without";
 /** A call this login released is not offered to it again for this long (its helper could not run it). */
 export const RELEASE_SKIP_MS = scaled(10 * 60_000);
 /**
+ * The skip after a give-back for a local setup failure (Release.setup: a fetch, git or disk error on the helper): such a failure is
+ * usually transient, and the releasing runner may be the only one allowed on the repo. At most the call's attempts give-backs get it.
+ */
+export const SETUP_RETRY_MS = scaled(60_000);
+/**
  * The most queue time the runner leaves out of a job's deadline and no-progress stop. Helpers run on people's own machines
  * across time zones, so a call may wait out a night with nobody online; past 12 hours the call is unlikely to be taken at all
  * (no eligible helper: the only maintainers authored the item), and the job is stopped so it no longer holds its item.
@@ -286,7 +291,7 @@ function claimOrderAll(q: ReturnType<typeof orderedOf>, reads: OrderReads, calle
   const { manual, skip, items, started, pickers } = reads;
   const login = caller.login.toLowerCase();
   const live = (r: Cand): boolean => r.seen_at >= nowMs - CALLER_STALE_MS;
-  const released = (r: Cand): boolean => r.refusedToken === caller.tokenId || (r.releasedBy === login && r.releasedAt !== null && r.releasedAt >= nowMs - RELEASE_SKIP_MS);
+  const released = (r: Cand): boolean => r.refusedToken === caller.tokenId || (r.releasedBy === login && r.releasedAt !== null && r.releasedAt >= nowMs - (r.releaseWaitMs ?? RELEASE_SKIP_MS));
   const fits = (r: Cand): boolean => live(r) && !released(r) && tiers.has(r.tier) && (!repos || r.repos.every((x) => repos.has(x)));
   const fast = (r: Cand): boolean => !fastLane || fastLaneFits(r);
   const sessions = new Set(sessionIds);
@@ -773,12 +778,18 @@ function refusalRetry(v: RemoteView, l: LiveLease): RefusalRetry {
   return { tier: lower, model: v.accepted[lower][0] ?? lower };
 }
 
-/** The helper gives the lease back (it could not prepare or start the run): the call returns to the queue without using an attempt and is not offered to that login for a while. False when the lease is gone. */
+/**
+ * The helper gives the lease back (it could not prepare or start the run): the call returns to the queue without using an attempt and is
+ * not offered to that login for RELEASE_SKIP_MS, or for SETUP_RETRY_MS after a setup failure while the call has had fewer such short waits
+ * than attempts. False when the lease is gone.
+ */
 export async function releaseCall(db: Db, secret: string | undefined, raw: unknown, nowMs: number = Date.now()): Promise<boolean> {
   const l = await liveLease(db, secret, nowMs);
   if (!l) return false;
-  const reason = progressLine((raw as Release | undefined)?.reason) ?? "released by the helper";
-  return await runners.releaseLease(db, l, `released by the helper: ${reason}`, nowMs);
+  const body = raw as Release | undefined;
+  const reason = progressLine(body?.reason) ?? "released by the helper";
+  const setupRetry = body?.setup === true && l.setupRetries < l.maxAttempts;
+  return await runners.releaseLease(db, l, `released by the helper: ${reason}`, nowMs, { ms: setupRetry ? SETUP_RETRY_MS : null, setupRetry });
 }
 
 // ---- the caller's side -------------------------------------------------------------

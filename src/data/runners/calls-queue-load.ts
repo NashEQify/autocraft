@@ -28,7 +28,7 @@ export async function loadQueueFor(db: Db, now: number, signature?: string): Pro
   // Every column comes from one statement: a wave past the fuse limit is several statements, and a call queued between two would be in one only.
   const [queued, running] = await db.together(async () => await Promise.all([
     q.all(q.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_waiting", "c")).select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "prompt_version", "tier", "parent_id", "sticky_login",
-      "released_by", "released_at", "picked_by", "picked_at", "pick_until", "asked_model", "queued_ms", "queued_since", "error", "job_id", "for_login", "bound_slot", "timeout_ms", "refused_token"])
+      "released_by", "released_at", "release_wait_ms", "picked_by", "picked_at", "pick_until", "asked_model", "queued_ms", "queued_since", "error", "job_id", "for_login", "bound_slot", "timeout_ms", "refused_token"])
       // The texts that never change, only for calls not parsed before.
       .select((eb) => [eb.case().when(inList(db, "id", seenIds, "bigint", true)).then(eb.ref("items")).end().as("items"), eb.case().when(inList(db, "id", seenIds, "bigint", true)).then(eb.ref("authors")).end().as("authors")])
       .where("state", "=", literal("queued"))),
@@ -49,7 +49,7 @@ export async function loadQueueFor(db: Db, now: number, signature?: string): Pro
     seen.set(id, p);
     return {
       id, promptId: r.prompt_id, promptVersion: r.prompt_version, tier: r.tier as Tier, step: r.step, parentId: r.parent_id, stickyLogin: r.sticky_login, seenAt: Number(r.seen_at),
-      timeoutMs: Number(r.timeout_ms), refs: p.refs, repos: p.repos, authors: p.authors, releasedBy: r.released_by?.toLowerCase() ?? null, releasedAt: r.released_at,
+      timeoutMs: Number(r.timeout_ms), refs: p.refs, repos: p.repos, authors: p.authors, releasedBy: r.released_by?.toLowerCase() ?? null, releasedAt: r.released_at, releaseWaitMs: r.release_wait_ms == null ? null : Number(r.release_wait_ms),
       forLogin: r.for_login?.toLowerCase() ?? null, boundSlot: Number(r.bound_slot) === 1, refusedToken: r.refused_token == null ? null : Number(r.refused_token), pickedBy: r.picked_by?.toLowerCase() ?? null, pickedAt: r.picked_at, pickUntil: r.pick_until,
       askedModel: r.asked_model, queuedMs: Number(r.queued_ms), queuedSince: r.queued_since, error: r.error, level: Number(r.level), jobId: r.job_id, since: Number(r.since),
       cls: Number(r.cls), repo: r.repo,

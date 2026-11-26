@@ -13,14 +13,17 @@ export async function bury(db: Db, rows: { id: number; hash: string | null }[], 
   await q.run(q.k.insertInto("main.remote_lease_tombstones").values(v).onConflict((oc) => oc.doNothing()));
 }
 
+/** Who gave a lease back: their runners skip the call for `waitMs` (null: RELEASE_SKIP_MS); `setupRetry` counts a setup failure's short wait. */
+export type ReleasedBy = { login: string; waitMs: number | null; setupRetry?: boolean };
+
 /** Puts a leased call back in the queue without using an attempt; true when this call changed (the lease was still the one named). */
-export async function unlease(db: Db, r: { id: number; runId: number | null; hash: string | null }, why: string, now: number, releasedBy: string | null = null): Promise<boolean> {
+export async function unlease(db: Db, r: { id: number; runId: number | null; hash: string | null }, why: string, now: number, releasedBy: ReleasedBy | null = null): Promise<boolean> {
   return await db.write(async () => {
     const q = queryDb(db);
-    const up = await q.run(q.k.updateTable("main.remote_calls").set({
+    const up = await q.run(q.k.updateTable("main.remote_calls").set((eb) => ({
       state: "queued", lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: now, error: why, progress: null, picked_by: null, picked_at: null, pick_until: null,
-      ...(releasedBy !== null && { released_by: releasedBy, released_at: now }),
-    }).where("id", "=", r.id).where("state", "=", "leased").where((eb) => (r.hash === null ? eb("lease_secret_hash", "is", null) : eb("lease_secret_hash", "=", r.hash))));
+      ...(releasedBy !== null && { released_by: releasedBy.login, released_at: now, release_wait_ms: releasedBy.waitMs, ...(releasedBy.setupRetry && { setup_retries: eb("setup_retries", "+", 1) }) }),
+    })).where("id", "=", r.id).where("state", "=", "leased").where((eb) => (r.hash === null ? eb("lease_secret_hash", "is", null) : eb("lease_secret_hash", "=", r.hash))));
     if (Number(up.changes) !== 1) return false;
     await bury(db, [{ id: r.id, hash: r.hash }], now);
     if (r.runId !== null) await finishRuns(db, [{ id: r.runId, state: "failed", error: why, summary: "returned to the queue" }]);
@@ -39,7 +42,7 @@ export async function requeue(db: Db, l: { id: number; runId: number | null; att
   const q = queryDb(db);
   const up = await q.run(q.k.updateTable("main.remote_calls").set((eb) => ({
     state: fail ? "failed" : "queued", attempt: eb("attempt", "+", fail ? 0 : 1), lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: fail ? null : now,
-    ended_at: fail ? now : null, error: reason, progress: null, picked_by: null, picked_at: null, pick_until: null, ...(opts.skipLogin !== undefined && { released_by: opts.skipLogin, released_at: now }),
+    ended_at: fail ? now : null, error: reason, progress: null, picked_by: null, picked_at: null, pick_until: null, ...(opts.skipLogin !== undefined && { released_by: opts.skipLogin, released_at: now, release_wait_ms: null }),
   })).where("id", "=", l.id).where("state", "=", "leased").where("attempt", "=", l.attempt).where("lease_secret_hash", "=", l.hash));
   if (Number(up.changes) !== 1) return null;
   await bury(db, [{ id: l.id, hash: l.hash }], now);

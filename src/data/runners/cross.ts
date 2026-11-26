@@ -41,7 +41,7 @@ export async function loadRunnerRole(db: Db, tokenId: number, now: number): Prom
   return r ? { role: r.role, idleClaimAt: r.idle_claim_at } : null;
 }
 
-const LEASE_COLS = ["c.id", "c.job_id", "c.run_id", "c.user_login", "c.prompt_id", "c.items", "c.repo", "c.root", "c.lease_secret_hash", "c.token_id", "c.tier", "c.model", "c.asked_model", "c.step", "c.attempt", "c.max_attempts", "c.leased_at", "c.parent_id", "c.for_login", "c.refusals"] as const;
+const LEASE_COLS = ["c.id", "c.job_id", "c.run_id", "c.user_login", "c.prompt_id", "c.items", "c.repo", "c.root", "c.lease_secret_hash", "c.token_id", "c.tier", "c.model", "c.asked_model", "c.step", "c.attempt", "c.max_attempts", "c.leased_at", "c.parent_id", "c.for_login", "c.refusals", "c.setup_retries"] as const;
 
 type Found = { lease: LiveLease; bundle: string | null; harness: string | null; harnessVersion: string | null; referenceRepo: string | null };
 
@@ -72,7 +72,7 @@ async function findLease(db: Db, secret: string, now: number, o: { bundle?: bool
   const lease: LiveLease = {
     id: Number(r.id), jobId: r.job_id, runId: r.run_id, login: r.user_login, promptId: r.prompt_id, items: JSON.parse(r.items) as ItemRef[], repo: r.repo, root: r.root,
     secretHash: hash, tokenId: r.token_id === null ? null : Number(r.token_id), tier: r.tier as Tier, model: r.model, askedModel: r.asked_model, step: r.step,
-    attempt: Number(r.attempt), maxAttempts: Number(r.max_attempts), leasedAt: r.leased_at === null ? null : Number(r.leased_at), parentId: r.parent_id, forLogin: r.for_login, refusals: Number(r.refusals),
+    attempt: Number(r.attempt), maxAttempts: Number(r.max_attempts), leasedAt: r.leased_at === null ? null : Number(r.leased_at), parentId: r.parent_id, forLogin: r.for_login, refusals: Number(r.refusals), setupRetries: Number(r.setup_retries),
   };
   return { lease, bundle: r.bundle ?? null, harness: r.harness ?? null, harnessVersion: r.harness_version ?? null, referenceRepo: r.reference_repo ?? null };
 }

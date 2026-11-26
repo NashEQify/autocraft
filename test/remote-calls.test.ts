@@ -13,7 +13,7 @@ import { createToken } from "../src/dash/mcp/tokens.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
 import type { User } from "../src/dash/types.ts";
 import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
-import { awaitCall, bundleOf, claimableCalls, claimCall, CLAIM_RETRY_S, enqueueCall, expireLeases, heartbeat, leaseState, withdrawCall, submitCall, type Caller } from "../src/remote/calls.ts";
+import { awaitCall, bundleOf, claimableCalls, claimCall, CLAIM_RETRY_S, enqueueCall, expireLeases, heartbeat, leaseState, RELEASE_SKIP_MS, releaseCall, SETUP_RETRY_MS, withdrawCall, submitCall, type Caller } from "../src/remote/calls.ts";
 import { stampAlive } from "../src/remote/liveness.ts";
 import { clearCooloff } from "../src/remote/cooloff.ts";
 import * as userSettings from "../src/dash/api/user-settings.ts";
@@ -455,6 +455,37 @@ describe("user-local remote calls", async () => {
     assert.equal(second.id, first.id);
     await done(second.secret, "second try");
     assert.equal((await ask)?.text, "second try");
+  });
+
+  test("after a give-back for a local setup failure the same user's runner takes the call again within minutes, up to its attempts; other give-backs keep it away longer", async () => {
+    const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
+    let lease = (await leaseFor("bob"))!;
+    const id = lease.id;
+    const ago = async (ms: number) => {
+      await db.run(db.k.updateTable("remote_calls").set((eb) => ({ released_at: eb("released_at", "-", ms) })).where("id", "=", id));
+      dropQueueCache(db);
+    };
+    const bobGets = async () => (await claimCall(db, callers.bob!, claim(), canWrite)).lease;
+    assert.equal(await releaseCall(db, lease.secret, { reason: "the provider refused the run for its usage limit" }), true);
+    await ago(SETUP_RETRY_MS + 1000);
+    assert.equal(await bobGets(), null, "a give-back for another reason keeps the long skip");
+    await ago(RELEASE_SKIP_MS);
+    lease = (await leaseFor("bob"))!;
+    const { max_attempts } = (await db.get(db.k.selectFrom("remote_calls").select("max_attempts").where("id", "=", id)))!;
+    for (let i = 0; i < Number(max_attempts); i++) {
+      assert.equal(await releaseCall(db, lease.secret, { reason: "setting up the files failed: could not fetch", setup: true }), true);
+      assert.equal(await bobGets(), null, "not at once");
+      await ago(SETUP_RETRY_MS + 1000);
+      lease = (await leaseFor("bob"))!;
+      assert.equal(lease.id, id);
+    }
+    assert.equal(await releaseCall(db, lease.secret, { reason: "setting up the files failed: could not fetch", setup: true }), true);
+    await ago(SETUP_RETRY_MS + 1000);
+    assert.equal(await bobGets(), null, "past the call's attempts a setup failure keeps the long skip");
+    await ago(RELEASE_SKIP_MS);
+    lease = (await leaseFor("bob"))!;
+    await done(lease.secret, "after the retries");
+    assert.equal((await ask)?.text, "after the retries");
   });
 
   test("an Opus review gets its task budget when a Task Runner whose Claude Code takes the flag leases it, and not from the queued call or for an older one", async () => {
