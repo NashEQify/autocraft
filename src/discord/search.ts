@@ -51,6 +51,21 @@ export async function namedRepo(db: Db, question: string): Promise<{ repo: strin
   return { repo, rest: rest || question };
 }
 
+/** Matches for items a message links to or names, in that order: items of public repos the public layer shows, in any state. */
+export async function linkedMatches(db: Db, refs: readonly { repo: string; number: number }[]): Promise<Match[]> {
+  const isPublic = new Set(await publicRepoNames(db));
+  const keep = refs.filter((r) => isPublic.has(r.repo));
+  if (!keep.length) return [];
+  const [items, visible] = await db.together(() => Promise.all([loadItems(db, keep, "full"), loadPublicItems(db, keep)]));
+  return keep.flatMap((r) => {
+    const key = `${r.repo}#${r.number}`;
+    const x = items.get(key);
+    if (!x || !x.url || !visible.has(key) || (x.kind !== "issue" && x.kind !== "pr")) return [];
+    const pr = x.kind === "pr", merged = pr && x.merged_at !== null;
+    return [{ repo: r.repo, number: r.number, title: x.title ?? "", url: x.url, closed: x.state !== "OPEN", ...(pr && { pr: true }), ...(merged && { merged: true }) }];
+  });
+}
+
 export class Search {
   #d: SearchDeps;
   #hits = new Map<string, number[]>();

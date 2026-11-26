@@ -8,6 +8,10 @@
 // store.ts recorded for it), else those of the bot's reply or thread it answers. Named items replace the context; they need not be
 // among it. `review all` reads as `review`.
 //
+// `status` (alone, or followed by items) is a lookup, not a workflow command: anyone may send it, at most READ_LIMIT a minute. It
+// answers with a plain reply like `/autocraft status`: the items named, else the replied-to message's items (its mention rows, the
+// bot's reply's items, and the item links and references in its text), else the thread's items; with none, the same "No item found".
+//
 // Who: a sender with no linked login, or without write access on a repo of the command's items, gets one short public reply (at most
 // one per REFUSAL_GAP_MS) and nothing runs.
 //
@@ -31,6 +35,9 @@ import { commandOf } from "../workflow/vocab.ts";
 import { prepareDo, runDo, targetsOf, type DoText } from "./do.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { discordDetail } from "./visibility.ts";
+import { statusReply } from "./commands.ts";
+import { parseRefs, withoutRefs, type ItemKey, type TextMessage } from "./refs.ts";
+import { messageItems, trackedRepos } from "./store.ts";
 import { loginOf } from "./links.ts";
 import { CREATE_PUBLIC_THREADS, READ_MESSAGE_HISTORY, SEND_MESSAGES_IN_THREADS, guildPerms } from "./perms.ts";
 import type { DiscordRest } from "./rest.ts";
@@ -41,6 +48,8 @@ import { WindowLimits } from "./window-limit.ts";
 export const REFUSAL_GAP_MS = 10 * 60_000;
 const THREAD_PERMS = CREATE_PUBLIC_THREADS | SEND_MESSAGES_IN_THREADS | READ_MESSAGE_HISTORY;
 const SEEN_MAX = 2000;
+/** Status lookups per sender. */
+const READ_LIMIT = { n: 10, ms: 60_000 };
 const MENTION = /<@[!&]?\d+>/g;
 
 /** The text of a message without mentions, on one line. */
@@ -49,6 +58,13 @@ export const withoutMentions = (s: string): string => s.replace(MENTION, " ").re
 /** Whether text written to the bot may be a command: it starts with a command word or alias, or reads whole as one. `take` then drops text that parses as ambiguous and has no items to act on. */
 export function isCommand(text: string): boolean {
   return startsWithCommandWord(text) || (text.trim().length > 0 && parse(text).kind !== "ambiguous");
+}
+
+/** For a status request (`status`, then nothing but item references and separators), the text after the word; else null. */
+export function statusRest(text: string): string | null {
+  const m = /^status\b[\s,.:;!?]*(.*)$/i.exec(text);
+  if (!m) return null;
+  return withoutRefs(m[1]!).replace(/\b(?:of|for|and|on)\b|[\s,.:;!?&]/gi, "") ? null : m[1]!;
 }
 
 function startsWithCommandWord(text: string): boolean {
@@ -62,7 +78,7 @@ export type AtMessage = {
   id: string; channel_id: string; guild_id?: string; content?: string;
   author?: { id: string };
   message_reference?: { message_id?: string; type?: number };
-  referenced_message?: { author?: { id?: string } } | null;
+  referenced_message?: ({ author?: { id?: string } } & TextMessage) | null;
 };
 
 export type AtRest = Pick<DiscordRest, "createMessage"> & { startThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> };
@@ -117,6 +133,7 @@ export async function publicLines(db: Db, result: CommandResult): Promise<string
 export class AtCommands {
   #d: AtDeps;
   #refusals = new WindowLimits();
+  #reads = new WindowLimits();
   #logged = new Set<string>();
   /** Ids of messages already taken as commands: a replayed MESSAGE_CREATE (gateway resume) must not run one twice. */
   #seen = new Set<string>();
@@ -132,13 +149,18 @@ export class AtCommands {
   async take(m: AtMessage, o: { botId: string; mentioned: boolean }): Promise<(() => Promise<void>) | null> {
     const { db, keys } = this.#d;
     const text = withoutMentions(m.content ?? "");
-    if (!isCommand(text)) return null;
+    const status = statusRest(text);
+    if (status === null && !isCommand(text)) return null;
     const here = await followOf(db, keys, threadTarget(keys, m.channel_id));
     // A forward (type 1) is not a reply.
     const repliedId = m.message_reference?.type ? undefined : m.message_reference?.message_id;
     const toBot = !!repliedId && m.referenced_message?.author?.id === o.botId;
     const ourReply = toBot ? await followOf(db, keys, replyTarget(keys, repliedId)) : null;
     if (!o.mentioned && !(toBot && (here || ourReply))) return null;
+    if (status !== null) {
+      if (!this.#once(m.id)) return async () => {};
+      return () => this.#status(m, status, repliedId, ourReply?.items ?? [], here?.items ?? []);
+    }
     let context: ItemRef[] = ourReply?.items ?? [];
     if (repliedId && !toBot) {
       const h = keys.hash("message", repliedId);
@@ -148,10 +170,32 @@ export class AtCommands {
     // Text that starts with a command word but reads as ambiguous is a command only with items to act on; otherwise it is a search.
     const d = prepareDo(text, context);
     if (d.parsed.kind === "ambiguous" && !(startsWithCommandWord(text) && (d.named.length || context.length))) return null;
-    if (this.#seen.has(m.id)) return async () => {};
-    this.#seen.add(m.id);
-    if (this.#seen.size > SEEN_MAX) this.#seen.delete(this.#seen.values().next().value!);
+    if (!this.#once(m.id)) return async () => {};
     return () => this.#run(m, d, here);
+  }
+
+  /** False when message `id` was already taken. */
+  #once(id: string): boolean {
+    if (this.#seen.has(id)) return false;
+    this.#seen.add(id);
+    if (this.#seen.size > SEEN_MAX) this.#seen.delete(this.#seen.values().next().value!);
+    return true;
+  }
+
+  /** Answers a status request (`rest`: the text after `status`). `ours`: the items of the bot's reply it answers; `thread`: those of the thread it is in. */
+  async #status(m: AtMessage, rest: string, repliedId: string | undefined, ours: readonly ItemKey[], thread: readonly ItemKey[]): Promise<void> {
+    const { db, keys, rest: discord } = this.#d;
+    if (!this.#reads.allow((this.#d.now ?? Date.now)(), [{ key: keys.hash("author", m.author!.id), ...READ_LIMIT }])) return;
+    let items: ItemKey[];
+    if (withoutRefs(rest) !== rest) items = parseRefs(rest, await trackedRepos(db));
+    else {
+      const seen = new Set<string>();
+      items = [...ours.map((i) => ({ repo: i.repo.split("/").pop()!, number: i.number })), ...(repliedId ? await messageItems(db, keys, repliedId, m.referenced_message) : [])]
+        .filter((i) => !seen.has(`${i.repo}#${i.number}`) && !!seen.add(`${i.repo}#${i.number}`));
+      if (!items.length) items = thread.map((i) => ({ repo: i.repo.split("/").pop()!, number: i.number }));
+    }
+    const { content, components } = await statusReply(db, items);
+    await discord.createMessage(m.channel_id, { content, components, allowed_mentions: { parse: [] }, message_reference: { message_id: m.id, fail_if_not_exists: false } });
   }
 
   async #run(m: AtMessage, d: DoText, here: Follow | null): Promise<void> {

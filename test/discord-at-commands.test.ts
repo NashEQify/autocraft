@@ -158,3 +158,26 @@ test("a write permission cached over a minute ago is read again through the GitH
   assert.ok(!(await started()).includes("texturecraft#2"));
   assert.match(rest.sent.slice(sent).map((s) => s.body.content ?? "").join("\n"), /no write access to texturecraft/);
 });
+
+test("`status` in reply to a message that links a pull request answers with that pull request only, not search results", async () => {
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "texturecraft" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values([{ name: "texturecraft", owner: "storytold", visibility: "public" }]).onConflict((oc) => oc.doNothing()));
+  for (const n of [763, 764, 765, 775]) {
+    await db.run(db.k.insertInto("items").values({ repo: "texturecraft", number: n, kind: "pr", state: n === 775 ? "OPEN" : "MERGED", title: `Change ${n}`, body: "", url: `https://github.com/storytold/texturecraft/pull/${n}` }));
+  }
+  const merged = [763, 764, 765].map((n) => ({ repo: "texturecraft", number: n, title: `Change ${n}`, url: `https://github.com/storytold/texturecraft/pull/${n}`, closed: true, pr: true, merged: true }));
+  const own = new Pings({ db, keys, rest, search: { allow: () => true, find: async () => ({ matches: merged }) } as unknown as Search, log: (l) => assert.fail(l), commands: new AtCommands({ db, keys, rest, log: (l) => assert.fail(l) }) });
+  await own.dispatch("READY", { user: { id: "100" } });
+  const quoted = { id: "tx-q", channel_id: "c1", guild_id: "g1", type: 0, author: { id: "u2" }, content: "…I pushed the coderabbit response, needs your final merge. https://github.com/storytold/texturecraft/pull/775" };
+  await handleDispatch(db, keys, "MESSAGE_CREATE", quoted);
+  const m = { id: "tx-s", channel_id: "c1", guild_id: "g1", type: 19, author: { id: "u5" }, content: "<@100> status", message_reference: { message_id: quoted.id }, referenced_message: { author: quoted.author, content: quoted.content } };
+  await handleDispatch(db, keys, "MESSAGE_CREATE", m);
+  const sent = rest.sent.length;
+  await own.dispatch("MESSAGE_CREATE", m);
+  await own.idle();
+  const answers = rest.sent.slice(sent);
+  assert.equal(answers.length, 1);
+  const shown = JSON.stringify(answers[0]!.body);
+  assert.ok(shown.includes("texturecraft#775"), shown);
+  assert.ok(![763, 764, 765].some((n) => shown.includes(`#${n}`)), shown);
+});

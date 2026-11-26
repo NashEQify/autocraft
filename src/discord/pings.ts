@@ -1,4 +1,5 @@
-// Answers @-mentions of the bot in watched channels with one public reply: the issues closest to the question. The
+// Answers @-mentions of the bot in watched channels with one public reply: the items the quoted message links to or names, then the
+// issues closest to the question. The
 // question is the quoted message, or the ping's own text without mentions. The question is searched and dropped; the
 // only record of a reply is a keyed hash of the ping and of the quoted message with the sealed id of our reply, kept so
 // the reply can be deleted when either message is deleted. A message addressed to the bot whose text is a command goes to the
@@ -8,8 +9,8 @@ import type { DiscordKeys } from "./keys.ts";
 import { deleteRepliesOf } from "./replies.ts";
 import { deliver, renderMatches } from "./reply.ts";
 import type { DiscordRest } from "./rest.ts";
-import { QUESTION_CHARS, type Search } from "./search.ts";
-import { isWatched } from "./store.ts";
+import { QUESTION_CHARS, linkedMatches, type Search } from "./search.ts";
+import { isWatched, messageItems } from "./store.ts";
 import type { Db } from "../db/index.ts";
 import { loadReplyPings, saveReplies } from "../data/discord/index.ts";
 
@@ -19,7 +20,7 @@ export type PingMessage = {
   author?: { id: string; bot?: boolean };
   mentions?: Mentionable[]; mention_roles?: string[];
   message_reference?: { message_id?: string; type?: number };
-  referenced_message?: { content?: string | null; author?: { id?: string } } | null;
+  referenced_message?: { content?: string | null; message_snapshots?: { message?: { content?: string | null } }[]; author?: { id?: string } } | null;
 };
 type Role = { id: string; tags?: { bot_id?: string } };
 
@@ -114,8 +115,12 @@ export class Pings {
     this.#inflight.add(pingHash);
     try {
       const found = await search.find(question.slice(0, QUESTION_CHARS));
+      // The items the quoted message links to or names come first, then the closest matches.
+      const linked = quotedId ? await linkedMatches(db, await messageItems(db, keys, quotedId, m.referenced_message)) : [];
+      const isLinked = new Set(linked.map((x) => `${x.repo}#${x.number}`));
+      const matches = [...linked, ...found.matches.filter((x) => !isLinked.has(`${x.repo}#${x.number}`))];
       // A ping reply is public in the channel: the best few only.
-      const r = await renderMatches(db, found.matches.slice(0, PING_MATCHES), question, m.channel_id);
+      const r = await renderMatches(db, matches.slice(0, PING_MATCHES), question, m.channel_id);
       const quoted = quotedId ? keys.hash("message", quotedId) : null;
       // Deleted while the search ran: nothing to reply to.
       if (this.#deletedMeanwhile.has(pingHash) || (quoted && this.#deletedMeanwhile.has(quoted))) return;
