@@ -80,6 +80,12 @@ export type ClaudePrompt = Common & {
   runner: "claude"; template: string;
   /** Passed as --effort so the level never depends on the account's own settings. */
   effort: Effort;
+  /**
+   * Passed as --task-budget: the call's token budget (the API's `output_config.task_budget`), counting what the model writes, thinking
+   * included, and the tool results it reads. The API shows the model the budget counting down, so it paces itself and finishes within
+   * it; nothing is cut off at the budget. At least 20,000.
+   */
+  taskBudget?: number;
 };
 export type JevPrompt = Common & { runner: "jev"; request: JevRequest };
 
@@ -209,6 +215,9 @@ Maintainer workflow: a maintainer reads your plan as numbered parts and answers 
 - "recommendation": for a reply that is not ready, one plain sentence (at most ${PLAN_RECOMMENDATION_CHARS} characters) recommending an option of the first maintainer question by its number (1 being its first option) and a few words of its label, saying that AutoCraft then plans and implements it, for example "Go with 2, a folder per document, then implement it." It must name the same option as that question's recommended label. For a ready reply, recommendation is null. Parts and recommendation are shown to the maintainers and in a status comment on the issue: plain and factual, no mention of models, automation or the reference documentation.
 `;
 
+/** The task budget of the Opus reviews: well above a normal review's output (up to about 15,000 tokens), so only a review that keeps thinking without end reaches it. */
+const OPUS_REVIEW_TASK_BUDGET = 80_000;
+
 const OPUS_REVIEW: ClaudePrompt = {
   id: "review.opus",
   stage: "Review",
@@ -216,6 +225,7 @@ const OPUS_REVIEW: ClaudePrompt = {
   purpose: "Code review of one pull request we want: its verdict is the one every later stage reads. After a new push it reads only the changes since the head commit it reviewed before.",
   models: ["opus"],
   effort: "high",
+  taskBudget: OPUS_REVIEW_TASK_BUDGET,
   placeholders: {
     pr: `The pull request as a JSON object indented by one space: ${OPUS_FIELDS}.`,
     discussion: DISCUSSION_DOC,
@@ -304,6 +314,7 @@ const POSTMERGE: ClaudePrompt = {
   purpose: "Second review of a pull request the pipeline merged: reads what landed on the default branch, with the history of our own commits and reviews, and lists the defects and minor findings that got through. Each defect becomes one follow-up issue.",
   models: ["opus"],
   effort: "high",
+  taskBudget: OPUS_REVIEW_TASK_BUDGET,
   placeholders: {
     pr: `The merged pull request as a JSON object indented by one space: ${POSTMERGE_FIELDS}.`,
     repo_access: REPO_ACCESS_DOC,
@@ -360,6 +371,7 @@ const PREMERGE: ClaudePrompt = {
   purpose: "Independent adversarial review of a pull request the merge rule would merge without a person, at the head commit that would merge. A defect becomes a fix-up or a question to a maintainer; minor findings are recorded on the item page.",
   models: ["opus"],
   effort: "high",
+  taskBudget: OPUS_REVIEW_TASK_BUDGET,
   placeholders: {
     pr: `The pull request as a JSON object indented by one space: ${PREMERGE_FIELDS}.`,
     owner_statements: STATEMENTS_DOC,
@@ -1877,14 +1889,20 @@ export function claudeArgs(id: ClaudePromptId, model: string, sandboxed = false,
     const dirs = [...(ws ? [REPO_PATH, REPOS_ROOT] : [REPO_PATH]), ...(reference && p.sandbox.reference ? [REFERENCE_PATH] : []), ...(docs && p.sandbox.docs ? [REPO_DOCS_PATH] : [])];
     const tools = [...p.sandbox.tools, ...(ws ? [AGENT_TOOL] : [])];
     const allowed = [...dirs.map((d) => `Read(/${d}/**)`), ...(ws ? [AGENT_TOOL] : []), ...(mcp ? mcpTools(mcp.servers) : [])];
-    return ["-p", "--model", model, "--effort", p.effort, "--output-format", "stream-json", "--verbose", "--tools", tools.join(","), "--allowedTools", allowed.join(","), "--disallowedTools", DENIED_READS.join(","),
+    return ["-p", "--model", model, "--effort", p.effort, ...budgetArgs(p), "--output-format", "stream-json", "--verbose", "--tools", tools.join(","), "--allowedTools", allowed.join(","), "--disallowedTools", DENIED_READS.join(","),
       "--permission-mode", "dontAsk", "--permission-prompts", "none", "--restricted", ...dirs.flatMap((d) => ["--add-dir", d]),
       ...(ws ? ["--agents", AGENTS_PATH] : []), ...(mcp ? ["--mcp-config", mcp.config] : []), "--strict-mcp-config", "--disable-slash-commands",
       // `persist`: the session is kept in the call's own session store so one follow-up message can resume it (src/classify/run.ts).
       ...(persist ? [] : ["--no-session-persistence"]), "--max-turns", String(p.sandbox.maxTurns)];
   }
-  return ["-p", "--model", model, "--effort", p.effort, "--output-format", "json", "--tools", "", ...(system ? ["--system-prompt", system] : []), "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"];
+  return ["-p", "--model", model, "--effort", p.effort, ...budgetArgs(p), "--output-format", "json", "--tools", "", ...(system ? ["--system-prompt", system] : []), "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"];
 }
+
+/** The oldest Claude Code known to take --task-budget; an older one would refuse the call as an unknown option. */
+export const TASK_BUDGET_CLAUDE = "2.1.309";
+/** The CLI flag of a prompt's task budget (`ClaudePrompt.taskBudget`). */
+export const TASK_BUDGET_FLAG = "--task-budget";
+const budgetArgs = (p: ClaudePrompt): string[] => (p.taskBudget !== undefined ? [TASK_BUDGET_FLAG, String(p.taskBudget)] : []);
 
 export const JEV_ARGS = ["--compact", "ask"];
 
@@ -1902,6 +1920,7 @@ function settings(p: ClaudePrompt | JevPrompt): PromptInfo["settings"] {
   const l = p.limits;
   const s: PromptInfo["settings"] = [
     ...(p.runner === "claude" ? [{ label: "Effort", value: p.effort }] : []),
+    ...(p.runner === "claude" && p.taskBudget !== undefined ? [{ label: "Task budget", value: `${p.taskBudget.toLocaleString("en-US")} tokens per call (--task-budget; the model sees it count down and paces itself, nothing is cut off; left out for a Task Runner whose Claude Code is older than ${TASK_BUDGET_CLAUDE})` }] : []),
     { label: "Items per call", value: String(l.perCall) },
     { label: "Calls at once", value: p.runner === "claude" ? "As many as the enabled accounts have free slots for" : `The Jev setting (default ${JEV_PARALLEL_DEFAULT})` },
     { label: "Attempts", value: `${l.attempts} (a retry asks only for the items still missing)` },

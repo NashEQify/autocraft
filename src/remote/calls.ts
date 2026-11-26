@@ -10,7 +10,7 @@ import { HttpError } from "../dash/server/util.ts";
 import type { Role } from "../dash/types.ts";
 import { fillHarness, rootArgs, validRoot } from "../prompts/harness.ts";
 import { rootAgents } from "../sandbox/agents.ts";
-import { joinParts } from "../prompts/index.ts";
+import { joinParts, TASK_BUDGET_CLAUDE, TASK_BUDGET_FLAG } from "../prompts/index.ts";
 import { scrub } from "../runner/scrub.ts";
 import { remoteToolRows } from "../agents/tools.ts";
 import { loadFreshWrites, permKey } from "../data/access/index.ts";
@@ -565,7 +565,7 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { p
   const stdin = workspace ? await resumePrompt(db, r.id, base) : bundle.stdin;
   const rewritten = stdin !== bundle.stdin;
   bundle.stdin = stdin;
-  const prompt = packPrompt(joinParts(forHarness(bundle, claim.harness, claim.root ?? "")));
+  const prompt = packPrompt(joinParts(forHarness(bundle, claim.harness, claim.root ?? "", claim.harnessVersion)));
   const l = await runners.leaseCall(db, {
     id: r.id, caller: { tokenId: caller.tokenId, login: caller.login, role: caller.role, claimId: claim.requestId },
     claim: { harness: claim.harness, harnessVersion: claim.harnessVersion, root: claim.root ?? null, requestId: claim.requestId, ownLane: claim.ownLane === true },
@@ -581,15 +581,24 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { p
  * A queued bundle as one harness reads it: the marked harness phrases of its text, and of the `claude` hints that carry the
  * system prompt, filled in. With the claim's path root (a macOS helper) the marked sandbox paths, the path arguments of the
  * hints and the explorer's prompt name the same paths below it; the mounts keep the fixed paths, which the helper places
- * below its root itself.
+ * below its root itself. The `claude` hints lose the task budget when the claim's `harnessVersion` is older than the first
+ * Claude Code that takes it (unknown counts as older), so an older Claude Code still runs the call.
  */
-export function forHarness<B extends Omit<TaskBundle, "callId">>(b: B, harness: HarnessId, root = ""): B {
+export function forHarness<B extends Omit<TaskBundle, "callId">>(b: B, harness: HarnessId, root = "", harnessVersion?: string | null): B {
   const claude = b.hints.claude;
+  const budget = harness === "claude" && harnessVersion && !olderVersion(harnessVersion, TASK_BUDGET_CLAUDE);
+  const args = claude && (budget ? claude.args : withoutFlag(claude.args, TASK_BUDGET_FLAG));
   return {
     ...b, stdin: fillHarness(b.stdin, harness, root), system: b.system === null ? null : fillHarness(b.system, harness, root),
-    hints: { ...b.hints, ...(claude && { claude: { ...claude, args: rootArgs(claude.args.map((a) => fillHarness(a, "claude", root)), root), ...(claude.agents !== undefined && { agents: rootAgents(claude.agents, root) }) } }) },
+    hints: { ...b.hints, ...(claude && args && { claude: { ...claude, args: rootArgs(args.map((a) => fillHarness(a, "claude", root)), root), ...(claude.agents !== undefined && { agents: rootAgents(claude.agents, root) }) } }) },
   };
 }
+
+/** `args` without `flag` and its value. */
+const withoutFlag = (args: string[], flag: string): string[] => {
+  const i = args.indexOf(flag);
+  return i < 0 ? args : [...args.slice(0, i), ...args.slice(i + 2)];
+};
 
 /** Reply or progress text with the claim's path root taken off, so paths read as the fixed sandbox paths the rest of the server expects (`/repo/src/a.rs`). */
 const unrooted = (text: string, root: string | null): string => (root ? text.split(root).join("") : text);
@@ -601,7 +610,7 @@ export async function bundleOf(db: Db, secret: string | undefined): Promise<Task
   const l = secret ? await runners.loadLeaseBundle(db, secret, Date.now()) : null;
   // A claim always records its harness.
   if (!l || l.harness === null) return null;
-  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? ""), callId: l.lease.id };
+  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id };
 }
 
 /** A plain one-line progress text from the helper: control characters removed, scrubbed, cut. */

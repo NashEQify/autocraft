@@ -49,11 +49,11 @@ describe("user-local remote calls", async () => {
   const claim = (): Claim => ({ requestId: `test-claim-${String(++claims).padStart(4, "0")}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" } });
   const canWrite = async () => true;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const leaseFor = async (login: string) => {
+  const leaseFor = async (login: string, extra: Partial<Claim> = {}) => {
     for (let i = 0; i < 200; i++) {
       // A call queued before the claim and not leased by it: nothing for this login. One queued while the claim ran is tried again.
       const queued = !!await db.get(db.k.selectFrom("remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "queued"));
-      const r = await claimCall(db, callers[login]!, claim(), canWrite);
+      const r = await claimCall(db, callers[login]!, { ...claim(), ...extra }, canWrite);
       if (r.lease) return r.lease;
       if (queued) return null;
       await sleep(5);
@@ -435,6 +435,19 @@ describe("user-local remote calls", async () => {
     assert.equal(second.id, first.id);
     await done(second.secret, "second try");
     assert.equal((await ask)?.text, "second try");
+  });
+
+  test("an Opus review carries its task budget to a Task Runner whose Claude Code takes the flag, and not to an older one", async () => {
+    const REVIEW = JSON.stringify({ verdict: "take", summary: "s", why: "w", public: { summary: "ok", points: [] } });
+    for (const [version, budget] of [["2.1.323", true], ["2.1", false]] as const) {
+      const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
+      const lease = (await leaseFor("bob", { harnessVersion: version }))!;
+      const args = (await bundleOf(db, lease.secret))!.hints.claude!.args;
+      const i = args.indexOf("--task-budget");
+      assert.equal(i >= 0 ? args[i + 1] : null, budget ? "80000" : null, `Claude Code ${version}`);
+      await done(lease.secret, REVIEW);
+      await ask;
+    }
   });
 
   test("gating calls go first, the fast lane takes only gating and small calls, and Max calls at once stops new leases but lets a session finish", async () => {

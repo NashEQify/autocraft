@@ -265,7 +265,7 @@ export type TaskBundle = {
   resume?: { parentCallId: number };
   /** Exact arguments for adapters that can use them; an adapter without hints builds its own from the fields above. */
   hints: {
-    /** `claude` arguments as the server would run them (src/prompts `claudeArgs`), for the fixed sandbox paths or below the claim's `root`. The model name is replaced by the claim's model for the tier. */
+    /** `claude` arguments as the server would run them (src/prompts `claudeArgs`), for the fixed sandbox paths or below the claim's `root`, without `--task-budget` when the claim's Claude Code is older than the first that takes it. The model name is replaced by the claim's model for the tier. */
     claude?: { args: string[]; /** The `--agents` file content when the call has the explorer. */ agents?: string };
   };
 };
