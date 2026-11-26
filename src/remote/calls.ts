@@ -756,14 +756,28 @@ type Held = { checks: boolean; workspaceId: number | null };
 type Polled = runners.CallPoll & { checks: boolean; tools: boolean };
 
 /**
- * The poll of every call this process waits on, one read wave per poll interval whatever their number (runners.loadCallPolls),
- * with the check requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every
- * SEEN_EVERY_MS. A lost lease or a gone call among them is ended (runners.expireLeases) and read again in the same poll; a
- * queued call's poll carries the waits' fields. A failed read of the wave fails every call waiting on it (no reply is taken by
- * then); a write that fails after it fails only the calls it was for, and a stamp that fails none: the next poll stamps again.
+ * The change topics whose writes change a waiting call's poll (src/data/runners/triggers.ts, src/data/build/triggers.ts): its
+ * state and progress, a check requested for it, its lease starting or ending, the queue and Task Runners a queued call waits on,
+ * and its workspace's tool calls.
+ */
+const POLL_TOPICS = ["remote-calls", "remote-queue", "remote-helpers", "workspaces"];
+
+/**
+ * The poll of every call this process waits on, one read wave whatever their number (runners.loadCallPolls), with the check
+ * requests and tool calls that wait for them, and the caller's `seen_at` stamp for all of them every SEEN_EVERY_MS. The wave
+ * runs for a call not polled yet, when a counter of POLL_TOPICS moved, and at least every SEEN_EVERY_MS, for what moves with
+ * time alone (a lease running out, a session's helper going idle). At the other poll intervals only the counters are read, and
+ * the waiters get the last poll again without its checks and tool calls. A lost lease or a gone call among them is ended
+ * (runners.expireLeases) and read again in the same poll; a queued call's poll carries the waits' fields. A failed read of the
+ * wave fails every call waiting on it (no reply is taken by then); a write that fails after it fails only the calls it was for,
+ * and a stamp that fails none: the next poll stamps again.
  */
 class CallPoller {
   readonly #db: Db;
+  /** The last full poll of each held call, and the POLL_TOPICS counters read with it. */
+  #polls = new Map<number, runners.CallPoll>();
+  #stamp = "";
+  #readAt = 0;
   #waiting = new Map<number, { resolve: (p: Polled) => void; reject: (e: unknown) => void }[]>();
   /** Calls awaited now, with how many awaits hold each and what else they wait for. */
   #held = new Map<number, Held & { n: number }>();
@@ -779,7 +793,15 @@ class CallPoller {
   }
   release(id: number): void {
     const h = this.#held.get(id);
-    if (h && --h.n <= 0) this.#held.delete(id);
+    if (h && --h.n <= 0) {
+      this.#held.delete(id);
+      this.#polls.delete(id);
+    }
+  }
+
+  async #stampOf(): Promise<string> {
+    const s = await this.#db.seqs(POLL_TOPICS);
+    return POLL_TOPICS.map((t) => s[t] ?? 0).join(",");
   }
 
   /** The next poll of call `id`: the first at once, later ones a poll interval after the one before. */
@@ -815,11 +837,19 @@ class CallPoller {
           console.error(`the liveness of this process's model calls is not stored: ${(e as Error).message}`);
         }
       }
+      if (now - this.#readAt < SEEN_EVERY_MS && ids.every((id) => this.#polls.has(id)) && await this.#stampOf() === this.#stamp) {
+        for (const id of ids) for (const w of batch.get(id)!) w.resolve({ ...this.#polls.get(id)!, checks: false, tools: false });
+        return;
+      }
       const held = ids.map((id) => ({ callId: id, ...this.#held.get(id) }));
       const workspaces = held.flatMap((h) => (h.workspaceId != null ? [{ callId: h.callId, workspaceId: h.workspaceId }] : []));
-      const [polls, checks, tools] = await db.together(() => Promise.all([
-        runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
+      // The counters are read in the same statement as the polls, so a write after them moves the counters.
+      const [stamp, polls, checks, tools] = await db.together(() => Promise.all([
+        this.#stampOf(), runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
       ]));
+      this.#stamp = stamp;
+      this.#readAt = now;
+      for (const id of ids) if (this.#held.has(id)) this.#polls.set(id, polls.get(id)!);
       const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
       const resolve = (id: number, p: runners.CallPoll): void => { for (const w of batch.get(id)!) w.resolve({ ...p, checks: checks.has(id), tools: asked.has(id) }); };
       const ended = ids.filter((id) => polls.get(id)!.lost || polls.get(id)!.gone);

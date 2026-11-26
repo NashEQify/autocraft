@@ -31,6 +31,7 @@ import { inClusterApi } from "../build/kube-api.ts";
 import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
 import { keepSnapshot } from "../itemtools/keeper.ts";
 import { writeSync } from "node:fs";
+import { watchStalls } from "./stalls.ts";
 
 const USAGE = `usage: autocraft-server runner serve
        autocraft-server runner steps
@@ -97,10 +98,13 @@ async function serve(): Promise<void> {
   }
   if (lease.epoch) setFence({ role: "runner", epoch: lease.epoch });
   leading = true;
+  const stalls = watchStalls((l) => console.error(`runner: ${l}`));
 
   // The switch may take a while: the probes answer meanwhile. What fails here stops the runner, and the next start completes it.
   standbyProbes ??= startHealthServer(workerListen, async () => false, state).catch((e: Error) => (console.error(`runner: startup probes not started: ${e.message}`), null));
+  stalls.step("the workflow switch-over");
   await switchOver(db, { perDay: DEFAULT_PER_DAY, log: (l) => console.log(`runner: ${l}`) });
+  stalls.step("the startup clean-ups");
   const gone = await dropRetired(db);
   if (gone.length) console.log(`runner: dropped ${gone.join(", ")}`);
   const held = await holdsToItems(db);
@@ -109,12 +113,14 @@ async function serve(): Promise<void> {
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
   const fixes = await autoFixConfirmed(db);
   if (fixes) console.log(`runner: started the private fix of ${fixes} confirmed security findings`);
+  stalls.step("the worker API start");
   const runner = new Runner({ db, lockFile: lock, maxJobs: Number(envVar("RUNNER_JOBS")) || DEFAULT_MAX_JOBS });
   // Fencing: a leader that lost its lease starts nothing more, kills its jobs and exits at once, so its container restarts
   // as a standby. Its writes already fail (src/db/fence.ts); the new leader resumes the jobs as after a crash. GitHub and
   // Kubernetes calls already in flight finish; the pod launcher checks the fence before each Kubernetes change.
   const fenced = () => {
     runner.abandon();
+    stalls.check();
     writeSync(2, `runner: lost the leader lease (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); jobs killed, exiting\n`);
     process.exit(LOST_LEADER_EXIT);
   };
@@ -158,6 +164,7 @@ async function serve(): Promise<void> {
     endpoint = new WorkerEndpointPublisher(db, api, ep, fenceGuard, (l) => console.log(l));
     void endpoint.sync().catch((e: unknown) => { if (!isFenced(e)) console.error(`runner: worker API EndpointSlice: ${(e as Error).message}`); });
   }
+  stalls.step("the snapshot, pod launcher and Discord start");
   keepSnapshot(db, ac.signal, (l) => console.log(`runner: ${l}`));
   // Starts and follows the build pods of kubernetes environments; outside a cluster they report that they cannot.
   startPodLauncher(db, ac.signal, (l) => console.log(l), fenceGuard);
@@ -167,10 +174,12 @@ async function serve(): Promise<void> {
   } catch (e) {
     console.error(`runner: Discord not started: ${(e as Error).message}`);
   }
+  stalls.step("the pipeline");
   try {
     await runner.serve(ac.signal, Number(envVar("RUNNER_POLL_MS")) || 2000);
   } finally {
     lease.lost.removeEventListener("abort", fenced);
+    stalls.stop();
     await health?.close();
     await workers?.close();
     await lease.release();

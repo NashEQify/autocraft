@@ -93,7 +93,7 @@ export async function forgetAuthor(db: Db, keys: DiscordKeys, userId: string): P
   return await dc.removeMentionRows(db, mine);
 }
 
-/** `/autocraft optout`: the user's messages stop being recorded and their mention rows go. Returns whether the user was opted in, and the rows removed. */
+/** `/autocraft account action:optout`: the user's messages stop being recorded and their mention rows go. Returns whether the user was opted in, and the rows removed. */
 export async function optOut(db: Db, keys: DiscordKeys, userId: string): Promise<{ changed: boolean; rows: number }> {
   const changed = await dc.setOptedOut(db, keys.hash("author", userId), true, new Date().toISOString());
   return { changed, rows: await forgetAuthor(db, keys, userId) };

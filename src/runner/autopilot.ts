@@ -251,7 +251,7 @@ const cursorOf = async (db: Db, ctx: PlanCtx, name: "review" | "verify"): Promis
  * item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. `plan-inputs` covers what
  * the plan facts read in tables of the other topics or of none; a table of theirs without a topic says why (noTopic in src/db/plan-inputs.ts).
  */
-export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "remote-room", "rank-inputs", "workflow-events", "job-ends", "task-ends", "auto-stops", "statement-sources"].includes(t));
+export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "workspaces", "access", "github", "plans", "trace", "limits", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "remote-room", "remote-calls", "rank-inputs", "workflow-events", "job-ends", "task-ends", "auto-stops", "statement-sources"].includes(t));
 
 /**
  * Topics that make the planner due. Ended jobs and returned leases let held-back work start, but are no new input to a lane whose job
@@ -436,7 +436,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
   },
   {
     name: "embed",
-    detect: async (db, ctx) => (await embedDue(db, embedderId(modelName()), await plansOf(db, ctx)) ? [{ step: "embed", params: {} }] : []),
+    // The diff probe reads every tracked item; it is asked again only when the pass's counters of what it reads moved.
+    detect: async (db, ctx) => (await embedDue(db, embedderId(modelName()), await plansOf(db, ctx), ctx.seqs) ? [{ step: "embed", params: {} }] : []),
   },
   {
     // Scans (local vectors) need no model; a pair check needs a Task Runner, also for its Jev half.

@@ -23,7 +23,7 @@ import { closeDb, dbLockName, openDb, setDbRole } from "./db/open.ts";
 import { loadTrackedRepos, readSettingsSnapshot, withSettingsSnapshot } from "./data/control/index.ts";
 import { effect } from "./db/effects.ts";
 import {
-  advanceOrgHighWater, advanceRepoHighWater, applyLocal, clearRepoFailures, closeGoneItems, countItemsByRepo, finishSyncRun, listItems, loadRepos, loadSyncPlan,
+  advanceOrgHighWater, advanceRepoHighWater, applyLocal, clearRepoFailures, closeGoneItems, countItemsByRepo, finishSyncRun, listItems, loadItemReads, loadRepos, loadSyncPlan,
   markReposReconciled, markReposRead, markReposSyncedByError, saveItems, saveRepoList, saveSyncState, startSyncRun,
   type CommentInsert, type ItemEntry, type ItemRowInput, type SyncPlan, type SyncState,
 } from "./data/mirror/index.ts";
@@ -396,6 +396,7 @@ async function readRepoSince(db: Db, client: Querier, name: string, cutoff: stri
     const passes: [Detail, string[]][] = [["full", ["OPEN"]], ["light", kind === "issue" ? ["CLOSED"] : ["CLOSED", "MERGED"]]];
     for (const [detail, states] of passes) {
       for await (const nodes of untilCutoff(fetchPages(client, kind, detail, name, states), cutoff)) {
+        await noteMissed(db, nodes.map((n: Node) => ({ repo: name, n })));
         await writePage(db, name, kind, detail, nodes, false, startedAt);
         count += nodes.length;
         for (const n of nodes) if (n.updatedAt > newest) newest = n.updatedAt;
@@ -446,6 +447,53 @@ const SEARCH_CAP = 1000;
 const FULL_KEEP = 2500;
 const META_REFRESH_MS = 15 * 60 * 1000;
 const LOCK_STALE_MS = 6 * 3600 * 1000;
+
+// Webhooks first: GitHub App webhooks queue a re-read of each item they name (src/github/webhooks.ts), so the org-wide poll is
+// a backstop. A sync run polls when pollReason gives a reason, and otherwise runs only its chores.
+/** Longest time between two polls while the webhooks bring the changes. */
+export const BACKSTOP_MS = 15 * 60_000;
+/** After a poll found changes that no webhook brought, every run polls for this long. */
+const MISS_HOLD_MS = 30 * 60_000;
+/** A change younger than this when the poll starts may still be on its way through the webhook and its re-read. */
+const MISS_GRACE_MS = 2 * 60_000;
+
+/** What the webhooks look like to a sync run. `deliveries` is GitHub's delivery list check (src/github/deliveries.ts), "error" when it failed. */
+export type PollInputs = { webhooks: boolean; unread: boolean; deliveries: { failed: number; covered: boolean } | "error" | null };
+
+/** Why this run polls GitHub, or null when the webhooks bring the changes and the backstop is not due. */
+export function pollReason(state: Pick<SyncState, "webhook_at" | "webhook_started_at" | "polled_at" | "poll_missed_at" | "poll_missed">, now: number, o: PollInputs): string | null {
+  if (!o.webhooks) return "webhooks are not set up";
+  if (o.unread) return "a tracked repo was never read in full";
+  if (!state.webhook_at) return "no webhook delivery yet";
+  if (!state.polled_at) return "first poll";
+  if (now - Date.parse(state.polled_at) >= BACKSTOP_MS - 5_000) return "backstop";
+  // Deliveries sent while the receiver was down are lost unless GitHub's list shows them failed.
+  if (state.webhook_started_at && state.webhook_started_at > state.polled_at) return "the webhook receiver restarted";
+  if (state.poll_missed_at && now - Date.parse(state.poll_missed_at) < MISS_HOLD_MS) return `a poll found changes no webhook brought (${(state.poll_missed ?? "").slice(0, 120)})`;
+  if (o.deliveries === "error") return "GitHub's list of webhook deliveries could not be read";
+  if (o.deliveries?.failed) return `${o.deliveries.failed} webhook deliveries failed`;
+  if (o.deliveries && !o.deliveries.covered) return "more webhook deliveries than one check reads";
+  return null;
+}
+
+/** The poll in progress counts the changes its reads find that no read since them had brought (noteMissed). */
+let pollSeen: { before: string; count: number; refs: string[] } | null = null;
+
+/** Counts the items of a page that changed before the grace time and were last read before that change. */
+async function noteMissed(db: Db, nodes: { repo: string; n: Node }[]): Promise<void> {
+  const seen = pollSeen;
+  if (!seen) return;
+  const old = nodes.filter((w) => typeof w.n?.updatedAt === "string" && w.n.updatedAt < seen.before);
+  if (!old.length) return;
+  const reads = await loadItemReads(db, old.map((w) => ({ repo: w.repo, number: w.n.number })));
+  for (const w of old) {
+    const key = `${w.repo}#${w.n.number}`;
+    const at = reads.get(key);
+    if (at && at >= w.n.updatedAt) continue;
+    seen.count++;
+    if (seen.refs.length < 10) seen.refs.push(key);
+  }
+}
 
 /** Indexes of search results GitHub refused for lack of access, when every error of the answer is one; else null. */
 export function refusedSearchNodes(errors: Node[]): Set<number> | null {
@@ -583,6 +631,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
     if (!items.length) return;
     out.mark = null;
     const inside = settled && progress ? () => progress(settled) : undefined;
+    await noteMissed(db, items);
     await writeEach(db, items, { readAt: startedAt, inside });
     out.count += items.length;
     for (const w of items) if (w.n.updatedAt > (repoNewest.get(w.repo) ?? "")) repoNewest.set(w.repo, w.n.updatedAt);
@@ -965,6 +1014,9 @@ async function syncWith(db: Db, client: Querier, opts: SyncOpts, now: Date, trac
       await saveSyncState(db, state);
     });
   };
+  // Only a poll of every tracked repo tells the webhooks' coverage.
+  const polls = !opts.only.length && !opts.full;
+  if (polls && wantsSearch) pollSeen = { before: iso(new Date(now.getTime() - MISS_GRACE_MS)), count: 0, refs: [] };
   try {
     if (wantsSearch) {
       // Runs inside each page's transaction; a compare-and-set, so a rolled-back page leaves nothing to remember.
@@ -987,6 +1039,14 @@ async function syncWith(db: Db, client: Querier, opts: SyncOpts, now: Date, trac
       // Not the repos that were never read in full (no high water) or that cannot be read.
       closing.push(() => markReposSyncedByError(db, tracked, started));
       console.log(`search: ${r.slices} slice${r.slices === 1 ? "" : "s"}${r.fallbacks ? `, ${r.fallbacks} listed per repo` : ""}`);
+      if (polls && pollSeen) {
+        state.polled_at = started;
+        if (pollSeen.count) {
+          state.poll_missed_at = started;
+          state.poll_missed = `${pollSeen.count} ${pollSeen.refs.join(" ")}`;
+          console.log(`poll: ${pollSeen.count} change${pollSeen.count === 1 ? "" : "s"} no webhook brought: ${pollSeen.refs.join(" ")}`);
+        }
+      }
       const at = plan.state.repos_refreshed_at;
       if (!at || now.getTime() - new Date(at).getTime() >= META_REFRESH_MS) {
         // First: a repo the listing finds gone was synced until now.
@@ -997,8 +1057,10 @@ async function syncWith(db: Db, client: Querier, opts: SyncOpts, now: Date, trac
       syncFailures = 0;
       items = await syncPerRepo(db, client, opts, tracked, plan);
       if (!opts.only.length && !syncFailures && (orgHigh === null || !opts.full)) state.org_high_water = started;
+      if (polls && !syncFailures) state.polled_at = started;
     }
   } finally {
+    pollSeen = null;
     // The dashboard can show the rate budget from these.
     state[opts.full ? "full_points_last_run" : "points_last_run"] = client.spent - spent0;
     if (client.remaining !== null) state.rate_remaining = client.remaining;
@@ -1021,6 +1083,28 @@ async function syncWith(db: Db, client: Querier, opts: SyncOpts, now: Date, trac
   return { mode, items };
 }
 
+/**
+ * Why this run polls GitHub (pollReason), or null. Reads GitHub's list of the app's webhook deliveries first, which also asks
+ * for the failed ones again.
+ */
+async function whyPoll(db: Db, now = Date.now()): Promise<string | null> {
+  const { readAppSecrets } = await import("./github/install-token.ts");
+  const app = readAppSecrets();
+  const webhooks = !!app?.webhookSecret;
+  let deliveries: PollInputs["deliveries"] = null;
+  if (app && webhooks) {
+    try {
+      deliveries = await (await import("./github/deliveries.ts")).checkDeliveries(db, app, now);
+    } catch (e) {
+      console.log(`webhook deliveries: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      deliveries = "error";
+    }
+  }
+  const [tracked, plan] = await db.together(() => Promise.all([trackedNames(db), loadSyncPlan(db)]));
+  const unread = plan.state.org_high_water === null || tracked.some((n) => !plan.synced.has(n) && !plan.broken.has(n));
+  return pollReason(plan.state, now, { webhooks, unread, deliveries });
+}
+
 /** How often a mirror run checks whether the default-branch poll is due (src/mainci POLL_EVERY_MS). */
 const MAIN_CI_CHECK_MS = 30_000;
 
@@ -1032,15 +1116,17 @@ async function sync(args: string[]): Promise<void> {
   let reserve = SYNC_RESERVE;
   let keep = FULL_KEEP;
   let restart = false;
+  let poll = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--repo") opts.only.push(args[++i]);
+    else if (args[i] === "--poll") poll = true;
     else if (args[i] === "--full") opts.full = true;
     else if (args[i] === "--all") opts.all = true;
     else if (args[i] === "--per-repo") opts.perRepo = true;
     else if (args[i] === "--reserve") reserve = Number(args[++i]);
     else if (args[i] === "--restart") restart = true;
     else if (args[i] === "--keep") keep = Number(args[++i]);
-    else throw new Error(`unknown argument ${args[i]}\nusage: sync [--repo NAME ...] [--all] [--full] [--per-repo] [--reserve N] [--keep N] [--restart]`);
+    else throw new Error(`unknown argument ${args[i]}\nusage: sync [--repo NAME ...] [--all] [--full] [--per-repo] [--poll] [--reserve N] [--keep N] [--restart]`);
   }
   const release = acquireLock(opts.full ? fullLockPath() : lockPath());
   if (!release) return;
@@ -1069,9 +1155,17 @@ async function sync(args: string[]): Promise<void> {
     const mainCiTimer = pollsMainCi ? setInterval(() => void mainCi.skip(), MAIN_CI_CHECK_MS) : undefined;
     mainCiTimer?.unref();
     try {
-      const { mode, items } = await runSync(db, querier, opts).finally(() => clearInterval(mainCiTimer));
-      await finishSyncRun(db, row, { endedAt: iso(new Date()), mode, items });
-      console.log(`sync: mode=${mode} items=${items} points=${client.spent} left=${client.remaining}`);
+      const asked = poll || opts.full || opts.all || opts.perRepo || opts.only.length > 0;
+      const reason = asked ? "asked" : await whyPoll(db);
+      if (reason) {
+        const { mode, items } = await runSync(db, querier, opts).finally(() => clearInterval(mainCiTimer));
+        await finishSyncRun(db, row, { endedAt: iso(new Date()), mode, items });
+        console.log(`sync: mode=${mode} items=${items} points=${client.spent} left=${client.remaining} (${reason})`);
+      } else {
+        // The webhooks' re-reads keep the mirror current; the chores below still run on their own schedules.
+        await finishSyncRun(db, row, { endedAt: iso(new Date()), mode: "webhooks", items: 0 });
+        console.log("sync: mode=webhooks, no poll due");
+      }
       const chores = !opts.full && !opts.only.length;
       // Files, commits and label events of the items that changed; a failed read leaves them for the next run.
       if (chores) {
@@ -1153,7 +1247,7 @@ async function syncStatus(): Promise<void> {
 }
 
 export const commands = {
-  sync: { summary: "mirror issues and PRs of the tracked owners: [--repo NAME ...] [--all] [--full] [--per-repo] [--reserve N] [--keep N] [--restart] (default: org-wide search for changes; --full runs beside it and resumes after the last finished repo)", run: sync },
+  sync: { summary: "mirror issues and PRs of the tracked owners: [--repo NAME ...] [--all] [--full] [--per-repo] [--poll] [--reserve N] [--keep N] [--restart] (default: org-wide search for changes when a poll is due, a backstop to the GitHub App webhooks; --poll polls now; --full runs beside it and resumes after the last finished repo)", run: sync },
   "sync-status": { summary: "per repo: open PRs, open issues, mirrored rows, synced_at", run: syncStatus },
 };
 

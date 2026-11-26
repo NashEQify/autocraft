@@ -23,3 +23,10 @@ registerTriggerSource("remote-room",
   { table: "user_settings" },
   { table: "remote_cooloffs" },
 );
+
+// What a caller awaiting a model call reacts to (src/remote/calls.ts CallPoller): the call changing state or reporting progress,
+// and a check requested for it. Not planner input, and no page reads it.
+registerTriggerSource("remote-calls",
+  { table: "remote_calls", ops: ["UPDATE"], when: "old.state IS NOT new.state OR old.progress IS NOT new.progress" },
+  { table: "remote_checks", ops: ["INSERT"] },
+);

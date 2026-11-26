@@ -49,7 +49,7 @@ const say = async (id: string, user: string, content: string) => {
 };
 const slash = async (id: string, sub: string, user: string): Promise<string> => {
   const seen = rest.edits.length;
-  await dispatch("INTERACTION_CREATE", { id, token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: user } }, data: { name: "autocraft", type: 1, options: [{ name: sub, type: 1 }] } });
+  await dispatch("INTERACTION_CREATE", { id, token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: user } }, data: { name: "autocraft", type: 1, options: [{ name: "account", type: 1, options: [{ name: "action", type: 3, value: sub }] }] } });
   for (let k = 0; k < 1000 && rest.edits.length === seen; k++) await new Promise((r) => setTimeout(r, 5));
   return rest.edits.at(-1)!.content ?? "";
 };

@@ -47,7 +47,7 @@ test("a workflow waiting for an answer reaches operators and maintainers with wr
   installAlertCommands(ix, alerts);
   const alertsOn = async (userId: string): Promise<string> => {
     const before = rest.responses.length;
-    ix.dispatch("INTERACTION_CREATE", { id: "i", token: "t", type: 2, application_id: "a1", user: { id: userId }, data: { name: "autocraft", options: [{ type: 1, name: "alerts", options: [{ type: 3, name: "state", value: "on" }] }] } });
+    ix.dispatch("INTERACTION_CREATE", { id: "i", token: "t", type: 2, application_id: "a1", user: { id: userId }, data: { name: "autocraft", options: [{ type: 1, name: "account", options: [{ type: 3, name: "action", value: "alerts" }, { type: 3, name: "state", value: "on" }] }] } });
     for (let i = 0; i < 200 && rest.responses.length === before; i++) await new Promise((r) => setTimeout(r, 5));
     return rest.responses.at(-1) ?? "";
   };
