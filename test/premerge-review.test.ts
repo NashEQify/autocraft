@@ -5,7 +5,7 @@ import { lintPremerge, parsePremerge } from "../src/premerge/parse.ts";
 import { OPUS_MAX_FIXES } from "../src/review/opus-parse.ts";
 
 const REF = "app#1";
-const finding = (extra: Record<string, unknown> = {}) => ({ severity: "defect", file: "src/a.rs", line: 7, title: "off by one", scenario: "an empty list panics", ...extra });
+const finding = (extra: Record<string, unknown> = {}) => ({ severity: "defect", file: "src/a.rs", line: 7, title: "off by one", scenario: "an empty list panics", blocking: { class: "regression", why: "an empty list worked on the base branch" }, ...extra });
 const reply = (findings: unknown[], ref = REF) => JSON.stringify({ ref, findings, searched: "callers of the changed function" });
 
 describe("premerge claims", () => {
