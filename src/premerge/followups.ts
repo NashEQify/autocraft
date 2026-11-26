@@ -24,7 +24,7 @@ export const ACTOR = "premerge-followup";
 const SHORT_TITLE = 80;
 
 export type FollowupsParams = { repo: string; limit?: number; onHandled?: (n: number) => void; by?: By };
-export type FollowupsDeps = { exec: Exec; now: () => Date };
+export type FollowupsDeps = { exec: Exec; now: () => Date; /** The app lane's token source; default: the secrets file's app. */ lane?: Pick<Writer, "mint" | "appClient"> };
 export type FollowupsSummary = { repo: string; filed: string[]; commented: string[]; failed: { ref: string; reason: string }[]; skipped: { ref: string; reason: string }[] };
 
 export const defaultFollowupsDeps = (): FollowupsDeps => ({ exec, now: () => new Date() });
@@ -33,8 +33,9 @@ const oneLine = (e: unknown): string => String((e as Error).message ?? e).replac
 
 /** "Follow-ups from #12: <the PR's title, cut short>". */
 export function followupTitle(pr: number, title: string): string {
-  const t = title.replace(/\s+/g, " ").trim();
-  return issueTitle(`Follow-ups from #${pr}: ${t.length > SHORT_TITLE ? `${t.slice(0, SHORT_TITLE - 1).trimEnd()}…` : t}`);
+  // Only the PR's own title is cleaned: the prefix keeps its #number, which links the PR.
+  const t = issueTitle(title);
+  return `Follow-ups from #${pr}: ${t.length > SHORT_TITLE ? `${t.slice(0, SHORT_TITLE - 1).trimEnd()}…` : t}`;
 }
 
 /** The findings of one head, numbered: where, what goes wrong, and why it does not stop the merge. */
@@ -56,7 +57,7 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
   const s: FollowupsSummary = { repo, filed: [], commented: [], failed: [], skipped: [] };
   const due = await planned(db, "followups", { repo, by });
   const login = await pipelineLogin(db);
-  const w: Writer = { db, login: ACTOR };
+  const w: Writer = { db, login: ACTOR, ...deps.lane };
   let handled = 0;
   for (const { facts: f, action } of due) {
     if (params.limit !== undefined && handled >= params.limit) break;

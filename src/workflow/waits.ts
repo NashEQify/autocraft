@@ -131,8 +131,8 @@ const NOT_POSTED: Partial<Record<RefusalCode, string>> = {
 };
 
 /**
- * Per workflow id, the line saying the Opus review of the item's PR (an implement workflow's: its PR's) is not on GitHub, and why: the
- * stored plan holds the review post refused. The others are absent. The item page, the Discord thread, the agent and the CLI show it
+ * Per workflow id, the line saying the Opus review of the item's PR (an implement workflow's: its PR's) or its follow-up issue is not on
+ * GitHub, and why: the stored plan holds the review post or the filing refused, or GitHub refused the filing. The others are absent. The item page, the Discord thread, the agent and the CLI show it
  * beside the state line.
  */
 export async function notPostedLines(db: Db, wfs: readonly Waiter[]): Promise<Map<number, string>> {
@@ -141,12 +141,15 @@ export async function notPostedLines(db: Db, wfs: readonly Waiter[]): Promise<Ma
   const issues = wfs.filter((w) => w.kind !== "pr").map((w) => w.id);
   const linked = new Map((await loadLinks(db, { workflowIds: issues })).map((l) => [l.workflowId, l.pr]));
   const prs = wfs.flatMap((w) => { const pr = w.kind === "pr" ? w.number : linked.get(w.id); return pr == null ? [] : [{ w, repo: w.repo, number: pr }]; });
-  const plans = await loadPlans(db, prs.map(({ repo, number }) => ({ repo, number })));
+  const [plans, filed] = await db.together(() => Promise.all([loadPlans(db, prs.map(({ repo, number }) => ({ repo, number }))), loadPremergeFollowups(db, prs)]));
   for (const { w, repo, number } of prs) {
-    const code = plans.get(`${repo}#${number}`)?.actions.find((a) => a.kind === "post-review")?.refused;
-    if (!code) continue;
-    const why = NOT_POSTED[code] ? t(NOT_POSTED[code], { repo }) : t("the review post may not run ({code})", { code });
-    out.set(w.id, t("Not posted on GitHub: {why}", { why }));
+    const actions = plans.get(`${repo}#${number}`)?.actions ?? [];
+    const code = actions.find((a) => a.kind === "post-review")?.refused, fu = actions.find((a) => a.kind === "followups")?.refused;
+    const last = filed.get(`${repo}#${number}`)?.at(-1), failed = last?.state === "failed" ? last.note : null;
+    const why = code ? (NOT_POSTED[code] ? t(NOT_POSTED[code], { repo }) : t("the review post may not run ({code})", { code }))
+      : fu ? (NOT_POSTED[fu] ? t(NOT_POSTED[fu], { repo }) : t("the follow-up issue may not be filed ({code})", { code: fu }))
+      : failed ? t("the follow-up issue: {reason}", { reason: failed }) : null;
+    if (why) out.set(w.id, t("Not posted on GitHub: {why}", { why }));
   }
   return out;
 }

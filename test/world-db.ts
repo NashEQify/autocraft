@@ -275,9 +275,9 @@ export async function world() {
       await db.prepare("INSERT INTO verifications (repo, number, head_sha, kind, reason, state, created_at) VALUES ('app', ?, ?, 'tests', 'r', ?, ?)").run(n, await headOf(n), state, T0);
       return w;
     },
-    /** The pre-merge review at the head: clean, or with one defect (a fix when `fixable`). */
-    async premerge(n: number, kind: "clean" | "defect", fixable = true, title = "off by one") {
-      const findings: PremergeFinding[] = kind === "clean" ? [] : [{ severity: "defect", file: "src/lib.rs", line: 3, title, scenario: "an empty list panics", ...(fixable ? { fix: { file: "src/lib.rs", change: "check the bound" } } : {}) }];
+    /** The pre-merge review at the head: clean, or with one defect (a fix when `fixable`; without `blocking` it is unclassed, as rows stored before the class). */
+    async premerge(n: number, kind: "clean" | "defect", fixable = true, title = "off by one", blocking?: PremergeFinding["blocking"]) {
+      const findings: PremergeFinding[] = kind === "clean" ? [] : [{ severity: "defect", file: "src/lib.rs", line: 3, title, scenario: "an empty list panics", ...(fixable ? { fix: { file: "src/lib.rs", change: "check the bound" } } : {}), ...(blocking ? { blocking } : {}) }];
       await savePremerge(db, { repo: "app", number: n, head: await headOf(n), at: T0, runId: "pm", model: "test", findings, searched: "" });
       // The real pre-merge review caches the diff it read; the merge rule reads it from there.
       mkdirSync(join(diffCacheDir(), "app"), { recursive: true });
