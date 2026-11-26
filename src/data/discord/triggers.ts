@@ -11,3 +11,7 @@ registerTriggerSource("discord",
   { table: "discord_filing_repos" },
   { table: "discord_hidden_repos" },
 );
+// A contributor role request from the /verify pages wakes the runner, which gives the role; not planner input.
+registerTriggerSource("discord-verify",
+  { table: "discord_role_grants", ops: ["INSERT"] },
+);

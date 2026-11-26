@@ -458,6 +458,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     post("/api/account/discord/code", discord.linkCode),
     { method: "PUT", pattern: "/api/admin/discord/contact", operator: true, handler: ok(discord.putContact) },
     { method: "PUT", pattern: "/api/admin/discord/react", operator: true, handler: ok(discord.putReact) },
+    { method: "PUT", pattern: "/api/admin/discord/role-panel", operator: true, handler: ok(discord.putRolePanel) },
     { method: "PUT", pattern: "/api/sandbox/workspace", operator: true, handler: ok(adm.setWorkspaceInfo) },
     get("/api/merge/single", adm.singleMerge),
     { method: "PUT", pattern: "/api/merge/single", operator: true, handler: ok(adm.setSingleMerge) },

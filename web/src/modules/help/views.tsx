@@ -104,6 +104,7 @@ function Start() {
         <p>
           {t("Link your Discord account on the Runner page, so")} <Code>@AutoCraft</Code> {t("and")} <Code>/autocraft do</Code> {t("act as you.")}
         </p>
+        <p>{t("Once linked, the Verify button in the server's contributor role channel gives you the contributor role when you have a merged pull request.")}</p>
       </Part>
       <Part title={t("Where to type commands")}>
         <ul className="flex list-disc flex-col gap-1 pl-5">

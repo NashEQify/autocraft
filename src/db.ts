@@ -429,6 +429,8 @@ const STATE_COLUMNS: [table: string, column: string, type: string][] = [
   ["sync_state", "poll_missed_at", "TEXT"],
   ["sync_state", "poll_missed", "TEXT"],
   ["sync_state", "deliveries_checked_at", "TEXT"],
+  // How a Discord link was made: code (dashboard link code) or verify (the public /verify pages).
+  ["discord_links", "source", "TEXT NOT NULL DEFAULT 'code'"],
   // Statements, round trips and database time of a job, and the effects (GitHub writes, model calls, builds) it made.
   ["jobs", "db_statements", "INTEGER"],
   ["jobs", "db_round_trips", "INTEGER"],

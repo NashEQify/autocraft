@@ -17,6 +17,7 @@ import { mentionLinks, trackedRepos } from "../../discord/store.ts";
 import { addFilingRepo, FilingRepoError, modesOf, offerOf, removeFilingRepo, setOffered } from "../../discord/filing-repos.ts";
 import { DEFAULT_REACT_EMOJI, setReactEmoji, validReactEmoji } from "../../discord/react.ts";
 import { createLinkCode, linkedSince, unlinkLogin, unlinkRow } from "../../discord/links.ts";
+import { ROLE_CHANNEL_KEY, ROLE_ID_KEY, RoleConfigError, rolePanelState, setRoleConfig } from "../../discord/role-panel.ts";
 import type { Req } from "../types.ts";
 import type { Db } from "../../db/index.ts";
 import { interactiveTakers } from "../../health-checks.ts";
@@ -76,9 +77,10 @@ function usageFrom(o: { data: SetupFacts; prompts: Awaited<ReturnType<typeof loa
 const PLACEHOLDER_NAME = /^_+hidden_+$/i;
 
 async function setupOf(db: Db, now: number = Date.now()): Promise<DiscordSetup> {
-  const [data, publicNames, tracked, stored, links, prompts, capacity, app] = await db.together(() => Promise.all([
-    loadDiscordSetup(db, { nowMs: now }), publicRepoNames(db), trackedRepos(db), settings(db, ["discord_contact", "discord_react", "discord_react_emoji"]),
+  const [data, publicNames, tracked, stored, links, prompts, capacity, app, posted] = await db.together(() => Promise.all([
+    loadDiscordSetup(db, { nowMs: now }), publicRepoNames(db), trackedRepos(db), settings(db, ["discord_contact", "discord_react", "discord_react_emoji", ROLE_CHANNEL_KEY, ROLE_ID_KEY]),
     loadLinks(db), loadPromptSpend(db, "discord.", new Date(now - DAY_MS).toISOString(), new Date(now - 7 * DAY_MS).toISOString()), interactiveTakers(db, now), readsUseApp(db),
+    rolePanelState(db),
   ]));
   const [labels, filingRepos] = await Promise.all([loadReleaseAppNames(db, publicNames), modesOf(data.filing, app)]);
   const filingOwner = new Map(offeredRepos({ tracked, publicNames, hidden: data.hidden, filing: data.filing }).filter((r) => r.filingOnly).map((r) => [r.name, r.owner]));
@@ -93,6 +95,17 @@ async function setupOf(db: Db, now: number = Date.now()): Promise<DiscordSetup> 
     contact: stored.get("discord_contact") ?? "", reactOn: stored.get("discord_react") !== "off", reactEmoji: emoji && validReactEmoji(emoji) ? emoji : DEFAULT_REACT_EMOJI,
     privacyPath: PRIVACY_PATH, links: links.map((l) => ({ id: l.user_hash, login: l.login, linkedAt: l.linked_at })),
     usage: usageFrom({ data, prompts, capacity, filingOwner }),
+    rolePanel: rolePanelOf(data.channels, stored.get(ROLE_CHANNEL_KEY) ?? null, stored.get(ROLE_ID_KEY) ?? null, posted),
+  };
+}
+
+/** The settings with the channel's guild; `posted` only when it is about the configured channel. */
+function rolePanelOf(channels: { channelId: string; guildId: string }[], channelId: string | null, roleId: string | null, st: Awaited<ReturnType<typeof rolePanelState>>): DiscordSetup["rolePanel"] {
+  const on = channelId !== null && roleId !== null;
+  return {
+    channelId: on ? channelId : null, roleId: on ? roleId : null,
+    guildId: on ? channels.find((c) => c.channelId === channelId)?.guildId ?? null : null,
+    posted: on && st?.channelId === channelId ? { messageId: st.messageId, error: st.error, at: st.at } : null,
   };
 }
 
@@ -216,5 +229,19 @@ export async function removeLink(db: Db, req: Req): Promise<DiscordSetup> {
   const login = await unlinkRow(db, id);
   if (login === null) throw new HttpError(404, "no such link");
   await audit(db, req.user.login, "discord-unlink", login, { by: "operator" });
+  return await setupOf(db);
+}
+
+/** Sets the contributor role panel (`channelId` and `roleId`) or turns it off (`off: true`); the runner posts or removes the panel. */
+export async function putRolePanel(db: Db, req: Req): Promise<DiscordSetup> {
+  operator(req);
+  const { channelId, roleId, off } = body(req);
+  if (off !== true && (typeof channelId !== "string" || typeof roleId !== "string")) throw new HttpError(400, "channelId and roleId, or off: true, are required");
+  try {
+    await setRoleConfig(db, req.user.login, off === true ? null : { channelId: channelId as string, roleId: roleId as string });
+  } catch (e) {
+    if (e instanceof RoleConfigError) throw new HttpError(400, e.message);
+    throw e;
+  }
   return await setupOf(db);
 }

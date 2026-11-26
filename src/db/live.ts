@@ -32,7 +32,7 @@ export const BOOKKEEPING_SETTINGS = [
   "runner_heartbeat", "schema_stamp", "schema_generation", "fts_built", "hashes_built", "text_refs_built", "diff_facts_built", "mentions_built", "item_stage_built", "tracking_started_at",
   "pipeline_planned_at", "pipeline_seqs_seen", "pipeline_wake_at", "pipeline_status", "pipeline_sync_seen", "pipeline_sync_at", "pipeline_review_cursor", "pipeline_verify_cursor",
   "full_sync_cursor", "org_high_water", "main_ci_polled_at", "releases_polled_at", "releases_offset", "search_catchup_at", "repos_refreshed_at", "sync_rate_remaining", "sync_rate_reset_at",
-  "flow_summary_marks", "warm_gc_at", "warm_report", "liveness_at", "liveness_open", "classify_run", "worker_update_pending", "worker_update_failures",
+  "flow_summary_marks", "warm_gc_at", "warm_report", "liveness_at", "liveness_open", "classify_run", "discord_role_panel", "worker_update_pending", "worker_update_failures",
 ];
 const BOOKKEEPING_SETTING_LIKE = ["leader:%", "warm\\_bytes:%", "%\\_points\\_last\\_run", "pipeline\\_fp:%", "build\\_feature:%", "pr\\_builds\\_%"];
 
@@ -57,7 +57,7 @@ export type Source = {
 export const TOPICS: string[] = [
   "repos", "sync", "items", "ranks", "stages", "checks", "mainci", "classify", "dupes", "reviews", "queue", "workflows", "workflow-events",
   "outside", "plans", "jobs", "limits", "usage", "agents", "envs", "build-features", "pr-builds", "nightly", "workspaces", "tasks", "actions",
-  "conversations", "fixes", "verify", "preapprovals", "discord", "discord-links", "downloads", "security", "postmerge", "access", "settings",
+  "conversations", "fixes", "verify", "preapprovals", "discord", "discord-links", "discord-verify", "downloads", "security", "postmerge", "access", "settings",
   "steps", "rank-inputs", "trace", "remote-helpers", "remote-queue", "remote-room", "remote-calls", "plan-inputs", "job-ends", "task-ends", "github", "auto-stops",
   "statement-sources",
 ];

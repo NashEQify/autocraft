@@ -331,6 +331,8 @@ export interface Api {
     setContact(contact: string): Promise<DiscordSetup>;
     setReact(on: boolean): Promise<DiscordSetup>;
     setReactEmoji(emoji: string): Promise<DiscordSetup>;
+    /** Sets the contributor role panel's channel and role, or turns it off (null). */
+    setRolePanel(panel: { channelId: string; roleId: string } | null): Promise<DiscordSetup>;
     removeLink(id: string): Promise<DiscordSetup>;
     /** `added` says whether the repo is link-only, and why. */
     addFilingRepo(repo: string): Promise<DiscordFilingAdded>;

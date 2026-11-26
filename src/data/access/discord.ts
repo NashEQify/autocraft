@@ -23,10 +23,26 @@ export async function redeemLinkCode(db: Db, codeHash: string, userHash: string,
     const code = await q.get(q.k.deleteFrom("main.discord_link_codes").where("code_hash", "=", codeHash).returning(["login", "expires_at"]));
     if (!code || Date.parse(code.expires_at) <= Date.parse(now)) return null;
     // A Discord account has one login, so an earlier link of it is replaced.
-    await q.run(q.k.insertInto("main.discord_links").values({ user_hash: userHash, login: code.login, linked_at: now })
-      .onConflict((oc) => oc.column("user_hash").doUpdateSet(kx.excluded(["login", "linked_at"]))));
+    await q.run(q.k.insertInto("main.discord_links").values({ user_hash: userHash, login: code.login, linked_at: now, source: "code" })
+      .onConflict((oc) => oc.column("user_hash").doUpdateSet(kx.excluded(["login", "linked_at", "source"]))));
     return code.login;
   });
+}
+
+/**
+ * Links a Discord user hash to a login proven by GitHub sign-in (the /verify pages), source verify. An earlier verify link of the
+ * account is replaced; a link made with a dashboard code is kept as it is.
+ */
+export async function linkProven(db: Db, userHash: string, login: Login, now: string): Promise<void> {
+  const q = queryDb(db);
+  await q.run(q.k.insertInto("main.discord_links").values({ user_hash: userHash, login, linked_at: now, source: "verify" })
+    .onConflict((oc) => oc.column("user_hash").doUpdateSet(kx.excluded(["login", "linked_at"])).where("main.discord_links.source", "=", "verify")));
+}
+
+/** True when the Discord user hash has a link made with a dashboard code (the only links that run commands). */
+export async function hasCodeLink(db: Db, userHash: string): Promise<boolean> {
+  const q = queryDb(db);
+  return !!(await q.get(q.k.selectFrom("main.discord_links").select("user_hash").where("user_hash", "=", userHash).where("source", "=", "code")));
 }
 
 /** Login per Discord user hash. */

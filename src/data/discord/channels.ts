@@ -71,6 +71,17 @@ export async function loadChannelDefaults(db: Db, channelIds: string[]): Promise
   return out;
 }
 
+/** The guild and name of each channel the bot has reported. */
+export async function loadChannelGuilds(db: Db, channelIds: string[]): Promise<Map<string, { guildId: string; name: string | null }>> {
+  const q = queryDb(db);
+  const out = new Map<string, { guildId: string; name: string | null }>();
+  for (const ids of kx.chunks([...new Set(channelIds)])) {
+    const rows = await q.all(q.k.selectFrom("main.discord_channels").select(["channel_id", "guild_id", "name"]).where(kx.inList(db, "channel_id", ids)), { label: "discord.loadChannelGuilds" });
+    for (const r of rows) out.set(r.channel_id, { guildId: r.guild_id, name: r.name });
+  }
+  return out;
+}
+
 /** The panel message id per channel. */
 export async function loadPanelMessages(db: Db, channelIds: string[]): Promise<Map<string, { panelMessage: string | null }>> {
   const q = queryDb(db);

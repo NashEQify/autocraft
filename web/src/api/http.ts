@@ -235,6 +235,7 @@ export function createHttpApi(): Api {
       setContact: (contact) => put("/api/admin/discord/contact", { contact }),
       setReact: (on) => put("/api/admin/discord/react", { on }),
       setReactEmoji: (emoji) => put("/api/admin/discord/react", { emoji }),
+      setRolePanel: (panel) => put("/api/admin/discord/role-panel", panel ?? { off: true }),
       removeLink: (id) => post("/api/admin/discord/unlink", { id }),
       addFilingRepo: (repo) => post("/api/admin/discord/filing-repos/add", { repo }),
       removeFilingRepo: (repo) => post("/api/admin/discord/filing-repos/remove", { repo }),

@@ -17,7 +17,7 @@ export type DiscordUser = { id: string; username?: string; global_name?: string 
 
 export type Interaction = {
   id: string; token: string; type: number; application_id?: string; guild_id?: string; channel_id?: string;
-  member?: { nick?: string | null; user?: DiscordUser }; user?: DiscordUser;
+  member?: { nick?: string | null; user?: DiscordUser; roles?: string[] }; user?: DiscordUser;
   data?: {
     name?: string; type?: number; custom_id?: string; target_id?: string;
     values?: string[];

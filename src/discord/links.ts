@@ -31,6 +31,15 @@ export const redeemLinkCode = async (db: Db, keys: DiscordKeys, code: string, di
 export const loginOf = async (db: Db, keys: DiscordKeys, discordUserId: string): Promise<string | null> =>
   (await access.loginsOfLinks(db, [userHash(keys, discordUserId)])).get(userHash(keys, discordUserId)) ?? null;
 
+/**
+ * GitHub actors need an AutoCraft login as well as write access to run commands: the Discord account's link must have been made
+ * with a dashboard code (a link from the /verify pages proves only the GitHub account), and the login must have an access row.
+ */
+export async function mayCommand(db: Db, keys: DiscordKeys, discordUserId: string, login: string): Promise<boolean> {
+  const [code, rows] = await Promise.all([access.hasCodeLink(db, userHash(keys, discordUserId)), access.loadAccess(db, [login])]);
+  return code && rows.has(login.toLowerCase());
+}
+
 /** Removes every link of a login; returns how many. */
 export const unlinkLogin = async (db: Db, login: string): Promise<number> => await access.unlinkLogins(db, [login]);
 

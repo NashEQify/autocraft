@@ -25,7 +25,9 @@ import { discordPrivacyPage, DISCORD_PRIVACY_PATH } from "./discord-privacy.ts";
 import { reporterSignIn, REPORTER_CALLBACK_PATH, REPORTER_START_PATH } from "./reporter-signin.ts";
 import { FILING_IN_DISCORD } from "../../discord/file-issue.ts";
 import { discordTermsPage, DISCORD_TERMS_PATH } from "./discord-terms.ts";
-import { contactOf } from "../api/discord.ts";
+import { contactOf, discordKeys } from "../api/discord.ts";
+import { mergedCheck } from "../../discord/role-panel.ts";
+import { discordOAuthFromEnv, isVerifyPath, verifyRoute, VERIFY_START_PATH, VERIFY_STATUS_PATH, type VerifyDeps } from "./verify.ts";
 import { LiveHub, type LiveOptions } from "./live.ts";
 import { finishRegistration, githubAppRoutes, startRegistration } from "./github-app.ts";
 import { OrgSetup } from "./github-setup.ts";
@@ -258,6 +260,12 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   const appDeps = { apiBase: opts.githubApi };
   const routes = compile([...opts.routes, ...githubAppRoutes(config, appDeps)]);
   const signinLimit = new RateLimiter(share(60), 10 * 60_000);
+  // The public contributor verification: its own budgets, so its traffic never uses up the dashboard's sign-ins. A flow is a few
+  // page requests and up to seven status polls.
+  const verifyLimit = new RateLimiter(share(60), 10 * 60_000);
+  const verifyStatusLimit = new RateLimiter(share(120), 10 * 60_000);
+  const verifyStarts = new TokenBucket(share(30), shareRate(0.5));
+  const verifyDeps: VerifyDeps = { db, baseUrl: config.baseUrl, discord: () => discordOAuthFromEnv(), github: appProviderNow, keys: discordKeys, check: mergedCheck() };
   const writeLimitSession = new RateLimiter(share(60), 60_000);
   const writeLimitIp = new RateLimiter(share(300), 60_000);
   const imageIndex = new ImageIndex(db);
@@ -677,6 +685,16 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       if (url.pathname === ROUTES.helper || url.pathname === ROUTES.legacyHelper) return await sendHelper(req, res);
       if (url.pathname === WEBHOOK_PATH) return await handleWebhook(req, res);
       const method = req.method;
+      // Public: contributor verification for Discord members who are not dashboard users; every path under /verify answers here.
+      if (isVerifyPath(url.pathname)) {
+        const status = url.pathname === VERIFY_STATUS_PATH;
+        const busy = (): void => send(res, nonce, { status: 429, html: plainPage(nonce, "Too many attempts", "<p>Wait a few minutes and try again.</p>", "", false) });
+        if (!(status ? verifyStatusLimit : verifyLimit).allow(clientIp(req))) return status ? send(res, nonce, { status: 429, json: { error: "too many requests" } }) : busy();
+        // Every start writes a flow row: a cap for all addresses together.
+        if (method === "POST" && url.pathname === VERIFY_START_PATH && verifyStarts.take("all") > 0) return busy();
+        const out = await verifyRoute(verifyDeps, { method: method ?? "GET", url, cookies, nonce, sameOrigin: sameOrigin(req), contact: async () => await contactOf(db) });
+        return send(res, nonce, out.r, out.cookies);
+      }
       // Public: the Discord bot's privacy notice must be readable by people who are not dashboard users.
       if (method === "GET" && url.pathname === DISCORD_PRIVACY_PATH) return send(res, nonce, { html: discordPrivacyPage(nonce, await contactOf(db)) });
       // Public: a Discord reporter's GitHub sign-in for filing issues (no dashboard session).

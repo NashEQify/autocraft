@@ -702,6 +702,15 @@ export interface DiscordSetup {
   /** Linked Discord accounts: the opaque row id, the dashboard login and when. */
   links: { id: string; login: string; linkedAt: string }[];
   usage: DiscordUsage;
+  rolePanel: DiscordRolePanel;
+}
+
+/** The contributor role panel: the channel its Verify button is posted in and the role it gives (null when off). `posted` is what the runner last did there. */
+export interface DiscordRolePanel {
+  channelId: string | null;
+  roleId: string | null;
+  guildId: string | null;
+  posted: { messageId: string | null; error: string | null; at: string } | null;
 }
 
 /** What the public issue bot did, for the Discord page. */

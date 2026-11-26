@@ -2599,7 +2599,8 @@ CREATE TABLE IF NOT EXISTS discord_follow_posts (
 ) WITHOUT ROWID;
 
 -- Discord accounts linked to dashboard logins (src/discord/links.ts). `user_hash` is a keyed hash of the Discord user id; the id
--- itself is never stored. `discord_link_codes` holds the keyed hash of each unused link code (one per login) until it is used or expires.
+-- itself is never stored. `source` says how the link was made: code (a dashboard user's `/autocraft account action:link` code; only these run
+-- commands) or verify (the public /verify pages, which prove the GitHub account but give no AutoCraft login). `discord_link_codes` holds the keyed hash of each unused link code (one per login) until it is used or expires.
 CREATE TABLE IF NOT EXISTS discord_links (
   user_hash TEXT PRIMARY KEY,
   login TEXT NOT NULL,
@@ -2635,6 +2636,36 @@ CREATE TABLE IF NOT EXISTS discord_alert_msgs (
   PRIMARY KEY (decision_id, user_hash)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discord_alert_msgs_user ON discord_alert_msgs (user_hash, sent_at);
+
+-- The public contributor verification at /verify (src/dash/server/verify.ts). A row of `discord_verify_flows` is one browser's
+-- sign-in, keyed by the hash of the random flow id in its cookie; `state_hash` is the hash of the current step's OAuth state, spent
+-- when its callback arrives. `step` is discord (waiting for Discord), github (waiting for GitHub), then the outcome: requested (a role
+-- request was made), no-merge or unchecked (GitHub could not be asked). `user_sealed` holds the Discord user id proven by the Discord
+-- step, sealed with the Discord key, and `user_hash` its keyed hash (to delete the rows on unlink); `login` is the GitHub login
+-- proven by the GitHub step. Unfinished flows go at their expiry. A row of `discord_role_grants` asks the runner to give
+-- the contributor role to a Discord user whose GitHub login has a merged pull request; the runner writes `result` (granted, already,
+-- not-member, forbidden, failed, off). The flow row names its grant so the result page can show it. Rows go after a day.
+CREATE TABLE IF NOT EXISTS discord_verify_flows (
+  flow_hash TEXT PRIMARY KEY,
+  step TEXT NOT NULL,
+  state_hash TEXT,
+  verifier TEXT,
+  user_sealed TEXT,
+  user_hash TEXT,
+  login TEXT,
+  grant_id TEXT,
+  expires_at TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS discord_role_grants (
+  id TEXT PRIMARY KEY,
+  user_sealed TEXT NOT NULL,
+  user_hash TEXT NOT NULL,
+  login TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  result TEXT,
+  done_at TEXT
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS discord_role_grants_open ON discord_role_grants (requested_at) WHERE result IS NULL;
 CREATE TRIGGER IF NOT EXISTS discord_links_alerts AFTER DELETE ON discord_links BEGIN
   DELETE FROM discord_alerts WHERE user_hash = old.user_hash;
   DELETE FROM discord_alert_msgs WHERE user_hash = old.user_hash;
