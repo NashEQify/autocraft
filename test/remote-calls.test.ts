@@ -437,11 +437,13 @@ describe("user-local remote calls", async () => {
     assert.equal((await ask)?.text, "second try");
   });
 
-  test("an Opus review carries its task budget to a Task Runner whose Claude Code takes the flag, and not to an older one", async () => {
+  test("an Opus review gets its task budget when a Task Runner whose Claude Code takes the flag leases it, and not from the queued call or for an older one", async () => {
     const REVIEW = JSON.stringify({ verdict: "take", summary: "s", why: "w", public: { summary: "ok", points: [] } });
     for (const [version, budget] of [["2.1.323", true], ["2.1", false]] as const) {
       const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
       const lease = (await leaseFor("bob", { harnessVersion: version }))!;
+      const queued = (await db.get(db.k.selectFrom("remote_calls").select("bundle").orderBy("id", "desc").limit(1)))!;
+      assert.equal(queued.bundle.includes("--task-budget"), false, "a server of an earlier version leasing the queued call hands on no flag");
       const args = (await bundleOf(db, lease.secret))!.hints.claude!.args;
       const i = args.indexOf("--task-budget");
       assert.equal(i >= 0 ? args[i + 1] : null, budget ? "80000" : null, `Claude Code ${version}`);

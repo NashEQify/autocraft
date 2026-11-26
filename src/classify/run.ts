@@ -27,7 +27,7 @@ import { defaultWorkspace } from "../sandbox/workspace.ts";
 import { runModelStep } from "../agents/step.ts";
 import { CLASSIFY_HAIKU, CLASSIFY_JEV, type ClassifyAnswer, type JevImpact } from "../agents/steps.ts";
 import type { AreaAnswer } from "../areas/parse.ts";
-import { CLAUDE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeArgs, claudeParts, claudePromptOf, jevPromptOf, renderAreaJev, renderJev, type ClassifyExtras, type ClaudeInput, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
+import { CLAUDE_PROMPTS, JEV_ARGS, JEV_USD_PER_INPUT_TOKEN, JEV_PROMPTS, claudeArgs, claudeParts, claudePromptOf, jevPromptOf, renderAreaJev, renderJev, withoutTaskBudget, type ClassifyExtras, type ClaudeInput, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
 import { stripMarks } from "../prompts/harness.ts";
 import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import { flagsOf, parseRef, refOf, type Item, type Verdict } from "./parse.ts";
@@ -473,7 +473,8 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
         bundle: {
           promptId: id, promptVersion: promptVersion(id), tier, effort: p.effort, timeoutSeconds, maxTurns: sandboxed ? (lean ? FIX_TURN_MAX_TURNS : p.sandbox!.maxTurns) : null,
           stdin: stdin === parts.stdin ? stdin : stripMarks(stdin), system: parts.system, mounts, mcpServers: servers, keepSession: persist, ...(after !== null && { resume: { parentCallId: after } }),
-          hints: { claude: { args: lean ? noToolArgs(args) : args, ...(agents && { agents }) } },
+          // The task budget is added when a Task Runner takes the call, for a Claude Code that takes the flag (forHarness).
+          hints: { claude: { args: withoutTaskBudget(lean ? noToolArgs(args) : args), ...(agents && { agents }) } },
         },
       });
       const o = await awaitCall(db, callId, { ...(opts.onProgress && { onProgress: opts.onProgress }), ...(maxWaitMs !== undefined && { maxWaitMs }), ...(checkTool && { check: checkTool }) });

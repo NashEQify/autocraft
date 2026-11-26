@@ -63,7 +63,7 @@ type Common = {
   validation: string;
   limits: Limits;
   /** Present when a call may read a checkout of the repository with these tools inside the sandbox (src/sandbox); absent means the call runs without tools. */
-  sandbox?: { tools: string[]; /** The call may get the maintainers' AGENTS.md and ROADMAP.md of the default branch at /repo-docs when the repo has them. */ docs?: boolean; maxTurns: number; /** The call also gets the workspace: every tracked repository at /repos/<name> and the explorer subagent. */ workspace?: boolean; /** The call may get the repo's reference documentation at /reference when it exists. */ reference?: boolean; /** The call may get the `check` build tool (src/checktool) when its stage provides one. */ check?: boolean };
+  sandbox?: { tools: string[]; /** The call may get the maintainers' AGENTS.md and ROADMAP.md of the default branch at /repo-docs when the repo has them. */ docs?: boolean; maxTurns: number; /** The call also gets the workspace: every tracked repository at /repos/<name> and the explorer subagent. */ workspace?: boolean; /** The call may get the repo's reference documentation at /reference when it exists. */ reference?: boolean; /** The call may get the `check` build tool (src/checktool) when its stage provides one. */ check?: boolean; /** The task budget of the call with tools (`ClaudePrompt.taskBudget`), which also counts the tool results it reads; without it the call with tools has none. */ taskBudget?: number };
   /** The reply is linted after parsing (src/replylint.ts); a sandboxed call keeps its session so problems can be sent back as one follow-up message. */
   lint?: boolean;
   /** The reply carries code (a patch, conflict resolutions, a test): its parser reads it as written, and a reply holding a credential of a fixed shape (`hasFixedCredential`) is refused as unreadable. */
@@ -217,6 +217,12 @@ Maintainer workflow: a maintainer reads your plan as numbered parts and answers 
 
 /** The task budget of the Opus reviews: well above a normal review's output (up to about 15,000 tokens), so only a review that keeps thinking without end reaches it. */
 const OPUS_REVIEW_TASK_BUDGET = 80_000;
+/**
+ * The task budget of the Opus reviews with tools, which also counts the tool results they read: about twice what 99 in 100
+ * reviews with tools used (their output plus the tool results read, about 50,000 tokens), so a review reading many files is
+ * not told to wrap up early.
+ */
+const OPUS_REVIEW_TOOL_TASK_BUDGET = 120_000;
 
 const OPUS_REVIEW: ClaudePrompt = {
   id: "review.opus",
@@ -233,7 +239,7 @@ const OPUS_REVIEW: ClaudePrompt = {
     repo_access: REPO_ACCESS_DOC,
     workflow: `Empty, except for a pull request on the maintainer workflow (a person started it, or it is a small or medium bug fix the workflow runs by itself): then the rules for titled parts, major findings, outside_purpose and recommendation.`,
   },
-  sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 40, workspace: true, reference: true },
+  sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 40, workspace: true, reference: true, taskBudget: OPUS_REVIEW_TOOL_TASK_BUDGET },
   lint: true,
   template: `You review a pull request on one of the storytold craft apps, open-source reimplementations of a reference application. Your verdict decides what happens next: only a PR you rate take or take-fix is merged or fixed up. A wrong take costs more than a wrong hold.
 
@@ -319,7 +325,7 @@ const POSTMERGE: ClaudePrompt = {
     pr: `The merged pull request as a JSON object indented by one space: ${POSTMERGE_FIELDS}.`,
     repo_access: REPO_ACCESS_DOC,
   },
-  sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 20, workspace: true, reference: true },
+  sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 20, workspace: true, reference: true, taskBudget: OPUS_REVIEW_TOOL_TASK_BUDGET },
   lint: true,
   template: `You review a pull request on one of the storytold craft apps, open-source reimplementations of a reference application, after it was merged. Our pipeline reviewed it before the merge; you look for what that review and the merge let through. Typical misses: a fix that was requested and then lost when the base branch was merged into the PR, a change that no longer matches the PR's own description, an error path nobody read, a conflict resolution that dropped or doubled code.
 
@@ -377,7 +383,7 @@ const PREMERGE: ClaudePrompt = {
     owner_statements: STATEMENTS_DOC,
     repo_access: REPO_ACCESS_DOC,
   },
-  sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 40, workspace: true, reference: true },
+  sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 40, workspace: true, reference: true, taskBudget: OPUS_REVIEW_TOOL_TASK_BUDGET },
   lint: true,
   template: `You are the second reviewer of a pull request on one of the storytold craft apps, open-source reimplementations of a reference application. The first review rated it take and sure, so it will be merged without a person looking. Assume it contains at least one defect the first review missed, and find it.
 
@@ -1896,20 +1902,40 @@ export function claudeArgs(id: ClaudePromptId, model: string, sandboxed = false,
     const dirs = [...(ws ? [REPO_PATH, REPOS_ROOT] : [REPO_PATH]), ...(reference && p.sandbox.reference ? [REFERENCE_PATH] : []), ...(docs && p.sandbox.docs ? [REPO_DOCS_PATH] : [])];
     const tools = [...p.sandbox.tools, ...(ws ? [AGENT_TOOL] : [])];
     const allowed = [...dirs.map((d) => `Read(/${d}/**)`), ...(ws ? [AGENT_TOOL] : []), ...(mcp ? mcpTools(mcp.servers) : [])];
-    return ["-p", "--model", model, "--effort", p.effort, ...budgetArgs(p), "--output-format", "stream-json", "--verbose", "--tools", tools.join(","), "--allowedTools", allowed.join(","), "--disallowedTools", DENIED_READS.join(","),
+    return ["-p", "--model", model, "--effort", p.effort, ...budgetArgs(p, true), "--output-format", "stream-json", "--verbose", "--tools", tools.join(","), "--allowedTools", allowed.join(","), "--disallowedTools", DENIED_READS.join(","),
       "--permission-mode", "dontAsk", "--permission-prompts", "none", "--restricted", ...dirs.flatMap((d) => ["--add-dir", d]),
       ...(ws ? ["--agents", AGENTS_PATH] : []), ...(mcp ? ["--mcp-config", mcp.config] : []), "--strict-mcp-config", "--disable-slash-commands",
       // `persist`: the session is kept in the call's own session store so one follow-up message can resume it (src/classify/run.ts).
       ...(persist ? [] : ["--no-session-persistence"]), "--max-turns", String(p.sandbox.maxTurns)];
   }
-  return ["-p", "--model", model, "--effort", p.effort, ...budgetArgs(p), "--output-format", "json", "--tools", "", ...(system ? ["--system-prompt", system] : []), "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"];
+  return ["-p", "--model", model, "--effort", p.effort, ...budgetArgs(p, false), "--output-format", "json", "--tools", "", ...(system ? ["--system-prompt", system] : []), "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"];
 }
 
 /** The oldest Claude Code known to take --task-budget; an older one would refuse the call as an unknown option. */
 export const TASK_BUDGET_CLAUDE = "2.1.309";
 /** The CLI flag of a prompt's task budget (`ClaudePrompt.taskBudget`). */
 export const TASK_BUDGET_FLAG = "--task-budget";
-const budgetArgs = (p: ClaudePrompt): string[] => (p.taskBudget !== undefined ? [TASK_BUDGET_FLAG, String(p.taskBudget)] : []);
+const budgetOf = (p: ClaudePrompt, sandboxed: boolean): number | undefined => (sandboxed ? p.sandbox?.taskBudget : p.taskBudget);
+const budgetArgs = (p: ClaudePrompt, sandboxed: boolean): string[] => { const b = budgetOf(p, sandboxed); return b !== undefined ? [TASK_BUDGET_FLAG, String(b)] : []; };
+
+/** The task budget of a call of `promptId`, with or without tools; undefined for a prompt without one or not in the catalogue. */
+export function taskBudgetOf(promptId: string, sandboxed: boolean): number | undefined {
+  const p = (CLAUDE_PROMPTS as Partial<Record<string, ClaudePrompt>>)[promptId];
+  return p ? budgetOf(p, sandboxed) : undefined;
+}
+
+/** `claude` arguments without the task budget flag and its value. */
+export function withoutTaskBudget(args: string[]): string[] {
+  const i = args.indexOf(TASK_BUDGET_FLAG);
+  return i < 0 ? args : [...args.slice(0, i), ...args.slice(i + 2)];
+}
+
+/** `claude` arguments (without a task budget) with `budget` where `claudeArgs` puts it: after the effort. */
+export function withTaskBudget(args: string[], budget: number): string[] {
+  const i = args.indexOf("--effort");
+  const at = i < 0 ? args.length : i + 2;
+  return [...args.slice(0, at), TASK_BUDGET_FLAG, String(budget), ...args.slice(at)];
+}
 
 export const JEV_ARGS = ["--compact", "ask"];
 
@@ -1927,7 +1953,7 @@ function settings(p: ClaudePrompt | JevPrompt): PromptInfo["settings"] {
   const l = p.limits;
   const s: PromptInfo["settings"] = [
     ...(p.runner === "claude" ? [{ label: "Effort", value: p.effort }] : []),
-    ...(p.runner === "claude" && p.taskBudget !== undefined ? [{ label: "Task budget", value: `${p.taskBudget.toLocaleString("en-US")} tokens per call (--task-budget; the model sees it count down and paces itself, nothing is cut off; left out for a Task Runner whose Claude Code is older than ${TASK_BUDGET_CLAUDE})` }] : []),
+    ...(p.runner === "claude" && (p.taskBudget !== undefined || p.sandbox?.taskBudget !== undefined) ? [{ label: "Task budget", value: `${[p.taskBudget !== undefined && `${p.taskBudget.toLocaleString("en-US")} tokens per call without tools`, p.sandbox?.taskBudget !== undefined && `${p.sandbox.taskBudget.toLocaleString("en-US")} with tools, which counts the tool results read`].filter(Boolean).join(", ")} (--task-budget; the model sees it count down and paces itself, nothing is cut off; added when a Task Runner takes the call, left out when its Claude Code is older than ${TASK_BUDGET_CLAUDE})` }] : []),
     { label: "Items per call", value: String(l.perCall) },
     { label: "Calls at once", value: p.runner === "claude" ? "As many as the enabled accounts have free slots for" : `The Jev setting (default ${JEV_PARALLEL_DEFAULT})` },
     { label: "Attempts", value: `${l.attempts} (a retry asks only for the items still missing)` },

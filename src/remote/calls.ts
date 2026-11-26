@@ -10,7 +10,7 @@ import { HttpError } from "../dash/server/util.ts";
 import type { Role } from "../dash/types.ts";
 import { fillHarness, rootArgs, validRoot } from "../prompts/harness.ts";
 import { rootAgents } from "../sandbox/agents.ts";
-import { joinParts, TASK_BUDGET_CLAUDE, TASK_BUDGET_FLAG } from "../prompts/index.ts";
+import { joinParts, TASK_BUDGET_CLAUDE, taskBudgetOf, withoutTaskBudget, withTaskBudget } from "../prompts/index.ts";
 import { scrub } from "../runner/scrub.ts";
 import { remoteToolRows } from "../agents/tools.ts";
 import { loadFreshWrites, permKey } from "../data/access/index.ts";
@@ -581,24 +581,20 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { p
  * A queued bundle as one harness reads it: the marked harness phrases of its text, and of the `claude` hints that carry the
  * system prompt, filled in. With the claim's path root (a macOS helper) the marked sandbox paths, the path arguments of the
  * hints and the explorer's prompt name the same paths below it; the mounts keep the fixed paths, which the helper places
- * below its root itself. The `claude` hints lose the task budget when the claim's `harnessVersion` is older than the first
- * Claude Code that takes it (unknown counts as older), so an older Claude Code still runs the call.
+ * below its root itself. The `claude` hints get the prompt's task budget here, not in the queued bundle, and only when the
+ * claim's `harnessVersion` is at least the first Claude Code that takes it (unknown counts as older): an older Claude Code
+ * still runs the call, and a server of an earlier version leasing a queued bundle never hands the flag on.
  */
 export function forHarness<B extends Omit<TaskBundle, "callId">>(b: B, harness: HarnessId, root = "", harnessVersion?: string | null): B {
   const claude = b.hints.claude;
-  const budget = harness === "claude" && harnessVersion && !olderVersion(harnessVersion, TASK_BUDGET_CLAUDE);
-  const args = claude && (budget ? claude.args : withoutFlag(claude.args, TASK_BUDGET_FLAG));
+  const takes = harness === "claude" && harnessVersion && !olderVersion(harnessVersion, TASK_BUDGET_CLAUDE);
+  const budget = takes ? taskBudgetOf(b.promptId, b.maxTurns !== null) : undefined;
+  const args = claude && (budget !== undefined ? withTaskBudget(withoutTaskBudget(claude.args), budget) : withoutTaskBudget(claude.args));
   return {
     ...b, stdin: fillHarness(b.stdin, harness, root), system: b.system === null ? null : fillHarness(b.system, harness, root),
     hints: { ...b.hints, ...(claude && args && { claude: { ...claude, args: rootArgs(args.map((a) => fillHarness(a, "claude", root)), root), ...(claude.agents !== undefined && { agents: rootAgents(claude.agents, root) }) } }) },
   };
 }
-
-/** `args` without `flag` and its value. */
-const withoutFlag = (args: string[], flag: string): string[] => {
-  const i = args.indexOf(flag);
-  return i < 0 ? args : [...args.slice(0, i), ...args.slice(i + 2)];
-};
 
 /** Reply or progress text with the claim's path root taken off, so paths read as the fixed sandbox paths the rest of the server expects (`/repo/src/a.rs`). */
 const unrooted = (text: string, root: string | null): string => (root ? text.split(root).join("") : text);
