@@ -2862,6 +2862,8 @@ export interface MaintainItemStatus {
   unclear: { by: string; at: string; line: string } | null;
   /** The confirmation line of the last accepted command. */
   confirm: string | null;
+  /** "Not posted on GitHub: <why>": the review of the item's PR may not be posted; null when nothing is held back. */
+  notPosted: string | null;
 }
 
 /** A security finding fixed by this pull request: operators and maintainers only. */

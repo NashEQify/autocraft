@@ -13,21 +13,21 @@ import type { StatusExtras, StatusInputs } from "./types.ts";
 
 /**
  * Per repo of `repos`: the stored comments that are not final, the open PRs in scope past triage (a stage row) that are not integration
- * PRs, and each started item's latest workflow with whether the item is open. One `together` wave.
+ * PRs (of the repos `scoped` only), and each started item's latest workflow with whether the item is open. One `together` wave.
  */
-export async function loadStatusInputs(db: Db, repos: readonly string[]): Promise<Map<string, StatusInputs>> {
+export async function loadStatusInputs(db: Db, repos: readonly string[], scoped: readonly string[] = repos): Promise<Map<string, StatusInputs>> {
   const out = new Map<string, StatusInputs>(repos.map((r) => [r, { stored: [], inScope: new Set(), started: new Map() }]));
   if (!repos.length) return out;
   const q = queryDb(db);
   const k = q.k as any;
   const scopeQ = k.selectFrom("main.items as i").select(["i.repo", "i.number"])
-    .where(kx.inList(db, "i.repo", [...repos])).where("i.kind", "=", "pr").where("i.state", "=", "OPEN")
+    .where(kx.inList(db, "i.repo", [...scoped])).where("i.kind", "=", "pr").where("i.state", "=", "OPEN")
     .where((eb: any) => eb.exists(eb.selectFrom("main.item_stage as s").select(eb.lit(1).as("one")).whereRef("s.repo", "=", "i.repo").whereRef("s.number", "=", "i.number")))
     .where((eb: any) => eb.not(eb.exists(eb.selectFrom("main.merge_batches as b").select(eb.lit(1).as("one")).whereRef("b.repo", "=", "i.repo").whereRef("b.pr_number", "=", "i.number"))))
     .where((eb: any) => inScopeExpr(db, eb, "i.repo", "i.number"));
   const [stored, scope, started] = await db.together(() => Promise.all([
     loadStatusComments(db, repos),
-    q.all(scopeQ) as Promise<{ repo: string; number: number }[]>,
+    scoped.length ? q.all(scopeQ) as Promise<{ repo: string; number: number }[]> : Promise.resolve([]),
     loadLatestWorkflows(db, repos),
   ]));
   for (const r of stored) out.get(r.repo)!.stored.push(r);

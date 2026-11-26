@@ -4,6 +4,7 @@ import { loadTrackedRepos, readConfig, SETTINGS } from "../data/control/index.ts
 import { listWorkflows } from "../data/workflow/index.ts";
 import { openDb } from "../db/open.ts";
 import { findAutoStops } from "./auto-stop.ts";
+import { notPostedLines } from "./waits.ts";
 
 const USAGE = "usage: workflow status [repo] | workflow auto-stops [repo]";
 
@@ -17,10 +18,13 @@ async function status(repo: string | undefined): Promise<void> {
     if (!repo && !mine.length) continue;
     console.log(`${r}: ${mine.length} live workflow${mine.length === 1 ? "" : "s"}`);
     if (!repo) continue;
+    const unposted = await notPostedLines(db, mine);
     for (const w of mine) {
       const approved = w.approvedBy ? `approved by ${w.approvedBy}` : "not approved";
       const blocker = w.blocker ? `, blocker ${w.blocker}` : "";
       console.log(`  #${w.number} ${w.kind} entry ${w.entry} ${w.state} weight ${w.weight}, started by ${w.startedBy}, ${approved}${blocker}`);
+      const notPosted = unposted.get(w.id);
+      if (notPosted) console.log(`    ${notPosted}`);
     }
   }
   if (!repo && !live.length) console.log("no live workflows");
