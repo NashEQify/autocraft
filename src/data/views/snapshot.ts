@@ -444,9 +444,11 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number, hooks: Refr
           const keys = t.key.join(", ");
           if (n) {
             // A transaction of any database that was still open at the last mark holds the horizon back, so rows written
-            // before it may be read again: those the file already has at the same hash are left out.
+            // before it may be read again: those the file already has at the same hash are left out, and so are those
+            // neither the file nor the public rows have (a draft review left out before).
             const on = t.key.map((k) => `l.${k} = w.${k}`).join(" AND ");
             out.exec(`DELETE FROM temp.chg_${t.name} WHERE (${keys}) IN (SELECT w.${t.key.join(", w.")} FROM temp.new_${t.name} w JOIN (${t.local}) l ON ${on} WHERE l.h = w.h)`);
+            out.exec(`DELETE FROM temp.chg_${t.name} WHERE (${keys}) NOT IN (SELECT ${keys} FROM temp.new_${t.name}) AND (${keys}) NOT IN (SELECT ${keys} FROM main.${t.name})`);
             out.exec(`DELETE FROM temp.new_${t.name} WHERE (${keys}) NOT IN (SELECT ${keys} FROM temp.chg_${t.name})`);
           }
           const kept = countOf(out, `main.${t.name}`) - Number((out.prepare(`SELECT COUNT(*) AS n FROM main.${t.name} WHERE (${keys}) IN (SELECT ${keys} FROM temp.chg_${t.name})`).get() as { n: number }).n);
