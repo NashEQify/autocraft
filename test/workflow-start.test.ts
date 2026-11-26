@@ -244,6 +244,7 @@ test("merge at a stop on defects the pre-merge review gave no fix for is refused
   await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
   await run(w, "merge");
   await w.premerge(1, "defect", false);
+  await w.premergeRoundsSpent(1);
   await settle(w);
   const stopped = (await liveWorkflow(w.db, "app", 1))!;
   assert.deepEqual([stopped.state, stopped.rec!.parts.fix, stopped.rec!.again], ["blocked", [1], undefined], stopped.rec?.text ?? "");

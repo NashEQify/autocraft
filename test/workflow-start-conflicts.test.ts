@@ -162,8 +162,8 @@ test("a yes to the pre-merge review's findings on a conflicting PR keeps them: t
   await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "MERGEABLE" }));
   await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
   await w.premerge(1, "defect");
-  // The one fix-up round of the pre-merge review is spent.
-  await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: "sha0", state: "failed", attempt: 1, created_at: T0, source: "premerge" }));
+  // The fix-up rounds of the pre-merge review are spent.
+  await w.premergeRoundsSpent(1);
   await run(w, "merge");
   await settle(w);
   const blocked = (await liveWorkflow(w.db, "app", 1))!;

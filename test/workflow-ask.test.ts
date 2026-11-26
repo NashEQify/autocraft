@@ -251,6 +251,7 @@ test("a yes does not bring the question of a pre-merge stop back: where no fix i
   const w = current = await (await (await world()).repo()).acting(MAINT, ANN);
   await w.pr(1, { label: "feature" });
   await (await w.verified(1)).premerge(1, "defect", false);
+  await w.premergeRoundsSpent(1);
   await say(w, "review and merge");
   await w.review(1);
   await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
@@ -274,6 +275,7 @@ test("a merge entry whose verification failed is asked once, after its pre-merge
     await settle(w);
     assert.deepEqual([await actions(w), (await wf(w)).state], [["premerge"], "running"]);
     await w.premerge(1, found, fixable);
+    if (found === "defect" && !fixable) await w.premergeRoundsSpent(1);
     await settle(w);
     const x = await wf(w);
     assert.deepEqual([x.state, x.blocker, x.rec?.merges], ["blocked", "major-finding", true]);

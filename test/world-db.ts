@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acting } from "./acting.ts";
 import { fakeTaskRunner } from "./fake-runner.ts";
+import { PREMERGE_FIX_ROUNDS } from "../src/core/rules.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
 import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
 import { savePermissions } from "../src/data/access/index.ts";
@@ -282,6 +283,11 @@ export async function world() {
       mkdirSync(join(diffCacheDir(), "app"), { recursive: true });
       writeFileSync(join(diffCacheDir(), "app", `${n}-${await headOf(n)}.diff`), "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+y\n");
       await recordDiffFacts(db, "app", n, await headOf(n));
+      return w;
+    },
+    /** The PR's automatic pre-merge fix-up rounds are used up (PREMERGE_FIX_ROUNDS failed rows). */
+    async premergeRoundsSpent(n: number) {
+      for (let i = 0; i < PREMERGE_FIX_ROUNDS; i++) await db.run(db.k.insertInto("main.fixups").values({ repo: "app", number: n, from_head: `spent${i}`, state: "failed", attempt: 1, created_at: T0, source: "premerge" }));
       return w;
     },
     // ---- models ----

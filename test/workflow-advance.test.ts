@@ -239,6 +239,7 @@ test("an approved merge goes on past an unsure pre-merge review with no defect; 
       assert.equal(await line(), null);
     }
     await w.premerge(1, kind, false);
+    if (kind === "defect") await w.premergeRoundsSpent(1);
     await db.run(db.k.updateTable("main.premerge_reviews").set({ unsure: 1 }).where("number", "=", 1));
     await untilQuiet(db, [() => advanceWorkflows(db), () => advancePreapprovals(db)], 3);
     await advanceWorkflows(db);
