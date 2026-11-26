@@ -54,7 +54,8 @@ export const attemptOf = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBoo
 
 /**
  * The attempt `i` opened the PR that the implement workflow `w` of its issue works on: the newest with a PR of those the workflow works on
- * (attemptOf). An attempt made after a later implement workflow of the issue started is that one's.
+ * (attemptOf). An attempt made after a later implement workflow of the issue started is that one's. Written as "`i` is the newest that
+ * qualifies", so the statement carries the qualifying rule once instead of once for `i` and again for a newer attempt.
  */
 export const linkingAttempt = (eb: kx.AnyEb, i: string, w: string): Expression<SqlBool> => {
   const t = kx.schemaEb(eb);
@@ -64,9 +65,9 @@ export const linkingAttempt = (eb: kx.AnyEb, i: string, w: string): Expression<S
     x.not(x.exists(t.selectFrom("main.item_workflows as nw").select(one(x)).where("nw.repo", "=", kx.ref<string>(`${w}.repo`)).where("nw.number", "=", kx.ref<number>(`${w}.number`))
       .where("nw.id", ">", kx.ref<number>(`${w}.id`)).where("nw.entry", "=", "implement").where("nw.started_at", "<=", kx.ref<string>(`${a}.created_at`)))),
   ]);
-  const newer = t.selectFrom("main.implementations as nj").select(one(eb)).where("nj.repo", "=", kx.ref<string>(`${i}.repo`)).where("nj.number", "=", kx.ref<number>(`${i}.number`))
-    .where("nj.id", ">", kx.ref<number>(`${i}.id`)).where((x) => of(x as unknown as kx.AnyEb, "nj"));
-  return eb.and([of(eb, i), eb.not(eb.exists(newer))]);
+  const newest = t.selectFrom("main.implementations as nj").select((x) => x.fn.max("nj.id").as("id")).where("nj.repo", "=", kx.ref<string>(`${i}.repo`)).where("nj.number", "=", kx.ref<number>(`${i}.number`))
+    .where((x) => of(x as unknown as kx.AnyEb, "nj"));
+  return eb(`${i}.id`, "=", newest as never);
 };
 
 /** The PR `pr` was merged or closed before the workflow `w` started (src/workflow/work.ts overBefore): it is none of its work. */
@@ -107,6 +108,28 @@ export function linkRows(db: Db, states: readonly string[] | null, by: { ids?: r
     .where("lw.pr_number", "is", null).where((eb: any) => linkingAttempt(eb, "li", "lw")), "li.pr_number");
   return stored.unionAll(unlinked);
 }
+
+/** The CTE `withLiveLinks` adds. */
+export const LIVE_LINKS = "live_links";
+
+/**
+ * `k` with the CTE `live_links`: linkRows of the live workflows, materialized. Each read declares it first in its WITH, so the reads of a
+ * fused wave that declare it share one copy (src/db/postgres.ts hoistShared) and Postgres plans the link rule once for all of them.
+ */
+export const withLiveLinks = (db: Db, k: any): any => k.with((cte: any) => cte(LIVE_LINKS).materialized(), () => linkRows(db, LIVE_STATES));
+
+/** A live implement workflow works on the PR `pr`, read from the CTE of `withLiveLinks`. */
+const implementsLiveIn = (eb: kx.AnyEb, repo: kx.Ex, pr: kx.Ex): AliasableExpression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom(`${LIVE_LINKS} as ll` as never).select(one(eb)).where("ll.repo" as never, "=", kx.exprOf(eb, repo)).where("ll.pr" as never, "=", kx.exprOf(eb, pr)));
+
+/** `liveWorkflowExpr` for a statement made with `withLiveLinks`. */
+export const liveWorkflowIn = (eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> => {
+  const r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
+  return eb.or([
+    eb.exists(kx.schemaEb(eb).selectFrom("main.item_workflows as pw").select(one(eb)).where("pw.repo", "=", r).where("pw.number", "=", n).where("pw.state", "in", LIVE_STATES)),
+    implementsLiveIn(eb, r, n),
+  ]);
+};
 
 /** A live implement workflow works on the PR: one probe per arm of `worksOnPr`, each on its index. */
 export function implementsLive(eb: kx.AnyEb, repo: kx.Ex, pr: kx.Ex): AliasableExpression<SqlBool> {
@@ -194,13 +217,15 @@ export function workScores(db: Db): SelectQueryBuilder<any, any, { repo: string;
  * and no person ended it or the issue it implements.
  */
 export function inScopeExpr(_db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
-  return eb.or([
-    liveWorkflowExpr(eb, repo, number),
-    eb.and([
-      control.pipelineOn(eb, repo),
-      eb.not(intake.heldExpr(eb, repo, number)),
-      eb.not(endedByPerson(eb, repo, number)),
-    ]),
+  return eb.or([liveWorkflowExpr(eb, repo, number), autoEligibleExpr(eb, repo, number)]);
+}
+
+/** The auto-eligible half of `inScopeExpr`, for a statement that has `liveWorkflowExpr` as a column already. */
+export function autoEligibleExpr(eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
+  return eb.and([
+    control.pipelineOn(eb, repo),
+    eb.not(intake.heldExpr(eb, repo, number)),
+    eb.not(endedByPerson(eb, repo, number)),
   ]);
 }
 
