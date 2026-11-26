@@ -121,7 +121,7 @@ test("the chat tells an item as bubbles, replies, work and folded GitHub and Dis
   for (const e of v.entries) {
     if (e.t === "said") assert.ok(e.login && e.at && e.body === "", "who and when stay, the words go");
     if (e.t === "reply") assert.ok(e.body === "" && e.findings.length === 0 && (e.ask === null || e.ask.question === ""));
-    if (e.t === "work") assert.ok(e.outcome === null && e.costUsd === null && e.detail.length === 0);
+    if (e.t === "work") assert.ok(e.outcome === null && e.costUsd === null && e.detail.length === 0 && e.model === null && e.title === "AutoCraft work", "no model and no title from the prompt or a finding");
   }
   assert.ok(v.entries.some((e) => e.t === "work"), "the work rows stay, without their outcomes");
   assert.ok(!JSON.stringify(v).includes("one problem is left") && !JSON.stringify(v).includes("weight high"));
@@ -184,5 +184,6 @@ test("a maintainer's message waiting for Opus can be withdrawn from the chat, an
   assert.deepEqual([bubble(await read(db)).pending, bubble(await read(db)).canWithdraw], [true, true], "an operator may withdraw it");
   const after = await postChatWithdraw(db, { ...req("operator"), json: {} });
   assert.ok(!bubble(after).pending && !bubble(after).canWithdraw);
-  assert.match(bubble(after).refusal ?? "", /op/);
+  assert.equal(bubble(after).withdrawnBy, "op");
+  assert.equal(bubble(after).refusal, undefined, "a withdrawal is no refusal");
 });

@@ -2,7 +2,7 @@
 // filters, sorts and pages over the repos the reader may see, narrowed to the picked project. `presets=1` also counts every preset
 // view and lists the quick-filter values, which the page asks for with its first page only.
 import type { BrowseResult, BrowseRow, PriorityLevel } from "../../../web/src/api/types.ts";
-import { KIND_NAMES, parseItemQuery, PRESETS, STAFF_FLAGS, type ItemQuery } from "../../core/item-query.ts";
+import { forReader, KIND_NAMES, parseItemQuery, PRESETS } from "../../core/item-query.ts";
 import { countPresets, loadBrowsePage, loadFacets, type BrowseItem, type BrowseScope } from "../../data/views/items-browse.ts";
 import { WEIGHT_NORMAL } from "../../workflow/types.ts";
 import type { Db } from "../../db/index.ts";
@@ -17,14 +17,6 @@ const LIMIT_MAX = 100;
 const OFFSET_MAX = 100_000;
 const REFS_MAX = 100;
 const CI: Record<string, BrowseRow["ci"]> = { SUCCESS: "green", FAILURE: "red", ERROR: "red", PENDING: "pending", EXPECTED: "pending" };
-
-/** `q` without the flags the reader may not filter by: those move to `unknown`, so the page shows them as not applied. */
-export function forReader(q: ItemQuery, staff: boolean): ItemQuery {
-  if (staff) return q;
-  const barred = (t: ItemQuery["terms"][number]) => t.key === "flag" && t.values.some((v) => STAFF_FLAGS.includes(v));
-  const out = q.terms.filter((t) => barred(t));
-  return { ...q, terms: q.terms.filter((t) => !barred(t)), unknown: [...q.unknown, ...out.map((t) => `${t.not ? "-" : ""}is:${t.values.join(",")}`)] };
-}
 
 function labelsOf(json: string | null): string[] {
   if (!json) return [];

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { connectDb } from "./helpers/raw-db.ts";
-import { parseItemQuery, PRESETS } from "../src/core/item-query.ts";
+import { forReader, parseItemQuery, PRESETS } from "../src/core/item-query.ts";
 import { countPresets, loadBrowsePage, loadFacets } from "../src/data/views/items-browse.ts";
 
 const NOW = Date.parse("2026-11-20T12:00:00.000Z");
@@ -67,4 +67,11 @@ test("label, Discord and sort qualifiers combine, negation and paging hold, pres
   } finally {
     await db.close?.();
   }
+});
+
+test("viewers cannot filter by review verdict or staff-only flags: those terms are reported as not applied", () => {
+  const viewer = forReader(parseItemQuery("is:open review:clean -is:security"), false);
+  assert.deepEqual(viewer.terms.map((x) => x.key), ["state"]);
+  assert.deepEqual(viewer.unknown, ["review:clean", "-is:security"]);
+  assert.equal(forReader(parseItemQuery("review:clean"), true).terms.length, 1, "staff keep the filter");
 });

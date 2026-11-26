@@ -2725,7 +2725,7 @@ export interface ChatShot { label: string; taskId: number; name: string }
  * item on Discord, folded the same way. On a quiet pull request a viewer gets who and when, without bodies, findings or outcomes.
  */
 export type ChatEntry =
-  | { t: "said"; id: string; at: string; login: string; via: ChatVia; body: string; url: string | null; /** Waiting for Opus's answer. */ pending?: boolean; /** Why the message got no answer. */ refusal?: string | null; /** The reader may withdraw it while it waits: an operator, or the maintainer who wrote it. */ canWithdraw?: boolean }
+  | { t: "said"; id: string; at: string; login: string; via: ChatVia; body: string; url: string | null; /** Waiting for Opus's answer. */ pending?: boolean; /** Why the message got no answer, or what a command answered when no reply entry carries it; one line per answer line. */ refusal?: string | null; /** Who withdrew the message before Opus answered. */ withdrawnBy?: string; /** The reader may withdraw it while it waits: an operator, or the maintainer who wrote it. */ canWithdraw?: boolean }
   | { t: "reply"; id: string; at: string; body: string; findings: ChatFinding[]; ask: { to: string[]; question: string } | null }
   | { t: "work"; id: string; at: string; state: "done" | "running" | "failed"; title: string; model: string | null; seconds: number | null; costUsd: number | null; outcome: string | null; detail: [string, string][]; eventId: string | null; /** A screenshot run's pictures, base then head per screen. */ shots?: ChatShot[] }
   | { t: "github"; id: string; at: string; lines: string[]; count?: number; eventIds?: string[] }

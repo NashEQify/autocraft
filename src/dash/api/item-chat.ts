@@ -178,11 +178,12 @@ export function entriesOf(c: Ctx, s: Sources): ChatEntry[] {
       if (hash) discordCommands.add(hash);
       const turn = m.turnId !== null ? turnById.get(m.turnId) : undefined;
       const withdrawnBy = turn?.status === "failed" ? /^withdrawn by (\S+)$/.exec(turn.error ?? "")?.[1] : undefined;
-      const refusal = str(p.refusal) ?? (withdrawnBy ? t("Withdrawn by {login}.", { login: withdrawnBy }) : turn?.status === "failed" ? t("Opus could not answer this message.") : null);
+      const refusal = str(p.refusal) ?? (!withdrawnBy && turn?.status === "failed" ? t("Opus could not answer this message.") : null);
       parts.push({ at: m.at, rank: 0, key: `msg:${m.id}`, entry: {
         t: "said", id: `msg:${m.id}`, at: m.at, login: m.author, via: VIA[m.via] ?? "dashboard", body: c.veiled ? "" : m.body, url: str(p.url),
         ...(turn && WAITING.has(turn.status ?? "") ? { pending: true, ...(turn.kind === "maintainer" && (c.operator || turn.login.toLowerCase() === s.reader?.toLowerCase()) ? { canWithdraw: true } : {}) } : {}),
         ...(refusal ? { refusal: c.veiled ? "" : refusal } : {}),
+        ...(withdrawnBy && !str(p.refusal) ? { withdrawnBy } : {}),
       } });
       const ev = m.workflowEventId !== null ? eventById.get(m.workflowEventId) : undefined;
       if (ev?.line) parts.push({ at: ev.at < m.at ? m.at : ev.at, rank: 1, key: `workflow:${ev.id}`, entry: { t: "reply", id: `workflow:${ev.id}`, at: ev.at, body: hide(ev.line), findings: [], ask: null } });
@@ -266,8 +267,9 @@ function workOf(c: Ctx, e: Ev, shots: ChatShot[] | undefined): ChatEntry {
   const ended = e.call?.endedAt ? Date.parse(e.call.endedAt) : NaN;
   const seconds = Number.isNaN(ended) ? null : Math.max(0, Math.round((ended - Date.parse(e.at)) / 1000));
   const model = e.call?.model ?? (e.actor.type === "model" ? e.actor.name : null);
+  // A veiled reader keeps that work happened and when; the title comes from the prompt or the finding, the model says what ran.
   return {
-    t: "work", id: `work:${e.id}`, at: e.at, state, title, model, seconds,
+    t: "work", id: `work:${e.id}`, at: e.at, state, title: c.veiled ? t("AutoCraft work") : title, model: c.veiled ? null : model, seconds,
     costUsd: c.veiled ? null : e.call?.costUsd ?? e.costUsd ?? null,
     outcome: c.veiled ? null : outcome,
     detail: c.veiled || !e.head ? [] : [[t("Commit"), e.head.slice(0, 7)]],

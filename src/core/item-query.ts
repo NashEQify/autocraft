@@ -19,6 +19,19 @@ export const DEFAULT_SORT: SortKey = "updated";
 export const FLAGS = ["draft", "outside", "mine", "asked", "approved", "duplicate", "security", "stuck", "outside-held"] as const;
 /** Flags only operators and maintainers may filter by. */
 export const STAFF_FLAGS: readonly string[] = ["security", "stuck"];
+/** Qualifiers only operators and maintainers may filter by: a review verdict says something about a quiet security pull request. */
+export const STAFF_KEYS: readonly QueryKey[] = ["review"];
+
+/**
+ * `q` as a reader sees it: for viewers, the terms they may not filter by move to `unknown`, so the page shows them as not
+ * applied. Used by the server and the mock alike.
+ */
+export function forReader(q: ItemQuery, staff: boolean): ItemQuery {
+  if (staff) return q;
+  const barred = (t: QueryTerm) => STAFF_KEYS.includes(t.key) || (t.key === "flag" && t.values.some((v) => STAFF_FLAGS.includes(v)));
+  const text = (t: QueryTerm) => `${t.not ? "-" : ""}${t.key === "flag" ? "is" : t.key}:${t.values.join(",")}`;
+  return { ...q, terms: q.terms.filter((t) => !barred(t)), unknown: [...q.unknown, ...q.terms.filter(barred).map(text)] };
+}
 /** `has:` / `no:` facts. `response`: a comment by a maintainer of the repo. */
 export const HAS = ["pr", "label", "priority", "area", "kind", "discord", "response"] as const;
 /** Classification labels by their short name. */

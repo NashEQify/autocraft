@@ -1,5 +1,5 @@
 // The Items browser's mock: about fifty items of several repos, matched by the same query grammar the server parses.
-import { KINDS, parseItemQuery, PRESETS, STAFF_FLAGS, type ItemQuery, type QueryTerm } from "../../../../src/core/item-query.ts";
+import { forReader, KINDS, parseItemQuery, PRESETS, type ItemQuery, type QueryTerm } from "../../../../src/core/item-query.ts";
 import type { BrowseQuery, BrowseResult, BrowseRow, User } from "../types";
 import { requestProject } from "../scope";
 import { NOW } from "./fixtures";
@@ -123,16 +123,10 @@ function sorted(rows: Row[], q: ItemQuery): Row[] {
   });
 }
 
-function strip(q: ItemQuery, staff: boolean): ItemQuery {
-  if (staff) return q;
-  const barred = (t: QueryTerm) => t.key === "flag" && t.values.some((v) => STAFF_FLAGS.includes(v));
-  return { ...q, terms: q.terms.filter((t) => !barred(t)), unknown: [...q.unknown, ...q.terms.filter(barred).map((t) => `is:${t.values.join(",")}`)] };
-}
-
 export function browseFor(me: User, query: BrowseQuery): BrowseResult {
   const staff = me.role !== "viewer";
   const repo = requestProject();
-  const q = strip(parseItemQuery(query.q), staff);
+  const q = forReader(parseItemQuery(query.q), staff);
   const hit = (r: Row) => !query.refs || query.refs.includes(`${r.repo}#${r.number}`);
   const found = ROWS.filter((r) => hit(r) && matches(r, q, repo));
   const all = query.refs ? found.sort((a, b) => query.refs!.indexOf(`${a.repo}#${a.number}`) - query.refs!.indexOf(`${b.repo}#${b.number}`)) : sorted(found, q);
@@ -142,7 +136,7 @@ export function browseFor(me: User, query: BrowseQuery): BrowseResult {
   return {
     rows: all.slice(offset, offset + limit).map(({ mine: _m, replied: _r, ready: _x, ...row }) => row),
     total: all.length, offset, limit, unknown: q.unknown,
-    presets: query.presets ? Object.fromEntries(PRESETS.map((p) => [p.id, ROWS.filter((r) => matches(r, strip(parseItemQuery(p.query), staff), repo)).length])) : null,
+    presets: query.presets ? Object.fromEntries(PRESETS.map((p) => [p.id, ROWS.filter((r) => matches(r, forReader(parseItemQuery(p.query), staff), repo)).length])) : null,
     facets: query.presets ? { labels: top(open.flatMap((r) => r.labels)), authors: top(open.flatMap((r) => (r.author ? [r.author] : []))), areas: top(open.flatMap((r) => (r.area ? [r.area] : []))) } : null,
   };
 }
