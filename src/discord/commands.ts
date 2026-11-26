@@ -16,6 +16,7 @@ import { envVar } from "../env.ts";
 import { DISCORD_PRIVACY_PATH } from "../dash/server/discord-privacy.ts";
 import { DISCORD_TERMS_PATH } from "../dash/server/discord-terms.ts";
 import { optIn, optOut } from "./store.ts";
+import type { ItemKey } from "./refs.ts";
 
 const ATTEMPTS = { n: 5, ms: 60_000 };
 const READ_LIMIT = { n: 10, ms: 60_000 };
@@ -38,6 +39,24 @@ export function formatStatus(s: PublicStatus): string {
   return `${s.ref} ${plain(s.title).slice(0, 100)}\n${s.step}${place}`;
 }
 
+/** Most items one status answer shows: one row of link buttons. */
+export const STATUS_ITEMS = 5;
+const NO_ITEM = "No item found. Use the form repo#123.";
+
+/**
+ * The status answer for items (the first STATUS_ITEMS): each item's public status, and a link button per item found. An item of a
+ * private or untracked repo, or one the public layer leaves out, reads as not found, so the answer is safe to post publicly.
+ */
+export async function statusReply(db: Db, refs: readonly ItemKey[]): Promise<{ content: string; components: unknown[] }> {
+  const shown = refs.slice(0, STATUS_ITEMS);
+  const found = await Promise.all(shown.map(async (r) => ({ r, s: await publicStatus(db, r.repo, r.number) })));
+  const buttons = found.flatMap(({ s }) => s ? [{ type: 2, style: 5, label: s.ref.slice(0, 80), url: s.url }] : []);
+  if (!buttons.length && shown.length <= 1) return { content: NO_ITEM, components: [] };
+  const blocks = found.map(({ r, s }) => s ? formatStatus(s) : t("{ref}: no item found.", { ref: `${r.repo}#${r.number}` }));
+  if (refs.length > shown.length) blocks.push(t("(+{n} more)", { n: refs.length - shown.length }));
+  return { content: blocks.join("\n\n").slice(0, 1990), components: buttons.length ? [{ type: 1, components: buttons }] : [] };
+}
+
 /** The command words and weight words of Help, generated from the command vocabulary. */
 export function doHelp(): string[] {
   return [
@@ -52,6 +71,7 @@ export function atHelp(): string[] {
     t("`/autocraft do text:merge: photocraft#123 photocraft#456` sends it privately"),
     t("`@AutoCraft review photocraft#123` in a watched channel sends it in public"),
     t("Reply to a message that names items with `@AutoCraft review` for all of them, or name one"),
+    t("Reply to a message with `@AutoCraft status` for the status of the items it names"),
     t("AutoCraft answers in a thread and posts each item's status and result there"),
     t("In that thread, `@AutoCraft fix-up and merge` or a reply to AutoCraft acts on the thread's items"),
   ];
@@ -179,8 +199,6 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
   ix.command("autocraft status", null, async (call) => {
     if (!mayRead(call)) return void (await call.edit({ content: TOO_MANY }));
     const m = REF.exec(call.option("item") ?? "");
-    const s = m ? await publicStatus(db, m[1]!, Number(m[2])) : null;
-    if (!s) return void (await call.edit({ content: "No item found. Use the form repo#123." }));
-    await call.edit({ content: formatStatus(s), components: [{ type: 1, components: [{ type: 2, style: 5, label: s.ref.slice(0, 80), url: s.url }] }] });
+    await call.edit(await statusReply(db, m ? [{ repo: m[1]!, number: Number(m[2]) }] : []));
   });
 }

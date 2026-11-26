@@ -3,7 +3,7 @@
 // kept only as a keyed hash that serves a deletion request.
 import type { DiscordKeys } from "./keys.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
-import { messageText, parseRefs, type TrackedRepo } from "./refs.ts";
+import { messageText, parseRefs, type ItemKey, type TextMessage, type TrackedRepo } from "./refs.ts";
 import type { Db } from "../db/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import * as dc from "../data/discord/index.ts";
@@ -58,6 +58,19 @@ export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage
     remove: have.filter((h) => !want.has(`${h.repo}#${h.number}`)).map((h) => `${h.repo}#${h.number}`),
     add: refs.map((r) => ({ repo: r.repo, number: r.number, sealed })),
   }]);
+}
+
+/**
+ * The items a message names, each once: its mention rows, then the items its text names (`text`: the message as an event carries it,
+ * which also covers a message recorded before its channel was watched, by an opted-out author, or over a limit).
+ */
+export async function messageItems(db: Db, keys: DiscordKeys, messageId: string, text: TextMessage | null | undefined): Promise<ItemKey[]> {
+  const h = keys.hash("message", messageId);
+  const rows = ((await dc.loadMessageMentions(db, [h])).get(h) ?? []).map((r) => ({ repo: r.repo, number: r.number }));
+  const named = text ? parseRefs(messageText(text), await trackedRepos(db)) : [];
+  const out = new Map<string, ItemKey>();
+  for (const r of [...rows, ...named]) if (!out.has(`${r.repo}#${r.number}`)) out.set(`${r.repo}#${r.number}`, r);
+  return [...out.values()];
 }
 
 /** Mention rows, and what a deleted command reply of the bot followed. Returns the mention rows removed; our ping replies live in Discord and are deleted with it (src/discord/replies.ts). */
