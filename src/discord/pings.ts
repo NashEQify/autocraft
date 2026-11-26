@@ -60,7 +60,12 @@ export class Pings {
       const m = d as PingMessage;
       const to = await this.#addressed(m);
       if (!to) return;
-      const command = this.#d.commands ? await this.#d.commands.take(m, { botId: this.#botId!, mentioned: to.mentioned }) : null;
+      let command: (() => Promise<void>) | null = null;
+      try {
+        command = this.#d.commands ? await this.#d.commands.take(m, { botId: this.#botId!, mentioned: to.mentioned }) : null;
+      } catch (e) {
+        this.#d.log(`discord: reading a message as a command failed: ${(e as Error).message}`);
+      }
       if (command) this.#run(command);
       else if (to.ping) this.#run(() => this.#ping(m));
     } else if (type === "MESSAGE_DELETE") {
