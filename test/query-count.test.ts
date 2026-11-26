@@ -203,8 +203,11 @@ test("a pool waiting for room reads the room when the queue changes, not on ever
     await w.db.run(w.db.k.insertInto("access").values({ login: "olga", role: "operator" }));
     const id = (await createToken(w.db, "olga", "helper", { kind: "runner" })).row.id;
     await storeStatus(w.db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+    // A reading of the room is one wave that holds the change counters' read beside the room's loaders. How many statements a reading
+    // takes varies with the 2 s caches of the runner snapshot and the queue (a stale cache adds a read after the wave, on Postgres a
+    // statement of its own), so the readings are counted, not their statements; a poll of the counters alone is no reading.
     let n = 0;
-    const stop = w.db.observe((e) => { if (e.kind === "query" && !/change_seq/.test(e.sql)) n++; });
+    const stop = w.db.observe((e) => { if (e.kind === "query" && /change_seq/.test(e.sql) && e.site.includes(" + ")) n++; });
     try {
       // Each unit stands for a call waiting in the queue: the others wait for room meanwhile.
       await pool(numbers(3).map(() => () => new Promise((r) => setTimeout(r, unitMs))), poolRoom(w.db, () => ["app"], (i) => [{ repo: "app", number: i + 1 }]), { pollMs: 2 });
@@ -216,6 +219,7 @@ test("a pool waiting for room reads the room when the queue changes, not on ever
     return n;
   };
   const short = await reads(20), long = await reads(200);
+  assert.ok(short > 0, "the readings are seen");
   assert.ok(long <= short, `the room was read ${long} times while the calls took 200 ms each, against ${short} times at 20 ms`);
 });
 
