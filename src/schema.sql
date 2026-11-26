@@ -952,6 +952,8 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   own_lane INTEGER NOT NULL DEFAULT 0, -- 1 while leased on the Task Runner's own lane (Claim.ownLane): counts toward no slot or Max calls at once
   bound_slot INTEGER NOT NULL DEFAULT 0, -- 1: a call bound to for_login that runs in one of that user's Task Runner slots (counts toward Max calls at once), never in the own lane
   released_by TEXT COLLATE NOCASE, released_at INTEGER, -- the last helper that gave the lease back: not offered that login again for a while
+  release_wait_ms INTEGER,            -- how long that give-back keeps the call from released_by's runners; NULL: RELEASE_SKIP_MS (src/remote/calls.ts)
+  setup_retries INTEGER NOT NULL DEFAULT 0, -- give-backs after a local setup failure that got the short wait (SETUP_RETRY_MS): at most max_attempts
   progress TEXT,                      -- the helper's last progress line
   reply TEXT, usage TEXT, turns INTEGER, session_id TEXT, duration_ms INTEGER,
   error TEXT,

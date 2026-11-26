@@ -324,6 +324,9 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   // A call a model's safety filter declined: its retry elsewhere, and the runner token it is not offered to again.
   ["remote_calls", "refusals", "INTEGER NOT NULL DEFAULT 0"],
   ["remote_calls", "refused_token", "INTEGER"],
+  // A give-back after a local setup failure: the short wait before the same login may take it again, and how many got it.
+  ["remote_calls", "release_wait_ms", "INTEGER"],
+  ["remote_calls", "setup_retries", "INTEGER NOT NULL DEFAULT 0"],
   // The login whose conversation message the reply that wrote the choices answered.
   ["decision_choices", "asked_by", "TEXT"],
   // Build pod placement and capacity (src/build/pods.ts, src/build/sizing.ts).

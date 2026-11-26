@@ -29,7 +29,7 @@ export type CallSummary = {
 /** A queued call as claims read it: items parsed, the repos it names and its authors, plus the fields the queue view shows. */
 export type QueuedCall = {
   id: number; promptId: string; promptVersion: string; tier: Tier; step: string; parentId: number | null; stickyLogin: string | null; seenAt: number;
-  timeoutMs: number; refs: ItemRef[]; repos: string[]; authors: ReadonlySet<string>; releasedBy: string | null; releasedAt: number | null;
+  timeoutMs: number; refs: ItemRef[]; repos: string[]; authors: ReadonlySet<string>; releasedBy: string | null; releasedAt: number | null; releaseWaitMs: number | null;
   forLogin: string | null; boundSlot: boolean; refusedToken: number | null; pickedBy: string | null; pickedAt: number | null; pickUntil: number | null;
   askedModel: string; queuedMs: number; queuedSince: number | null; error: string | null; level: number; jobId: number | null; since: number;
   /** Queue class and the call's repo: the inputs of the pure queue order. */
@@ -70,7 +70,7 @@ export type RunnerSnapshot = {
 export type LiveLease = {
   id: number; jobId: number | null; runId: number | null; login: string; promptId: string; items: ItemRef[]; repo: string | null; root: string | null;
   secretHash: string; tokenId: number | null; tier: Tier; model: string | null; askedModel: string; step: string; attempt: number; maxAttempts: number;
-  leasedAt: number | null; parentId: number | null; forLogin: string | null; refusals: number;
+  leasedAt: number | null; parentId: number | null; forLogin: string | null; refusals: number; setupRetries: number;
 };
 export type HelperInfo = {
   tokenId: number; label: string | null; readiness: Readiness | null; until: string | null; reason: string | null; fresh: boolean; lastSeen: string | null;

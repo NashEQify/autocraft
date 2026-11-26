@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.5.3";
+export const HELPER_VERSION = "1.5.4";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -179,7 +179,7 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
  *   | { ok: false, error: string, usage?: Usage, durationMs: number, refused?: boolean, stopReason?: string, subtype?: string }} Submit
  */
 /** @typedef {{ accepted: boolean, reason?: string }} SubmitReply */
-/** @typedef {{ reason: string }} Release */
+/** @typedef {{ reason: string, setup?: boolean }} Release */
 
 // ---------------------------------------------------------------------------
 // Harness adapters: `claudeAdapter` and `codexAdapter`, listed in ADAPTERS.
@@ -2156,7 +2156,12 @@ export const holdRetryDelay = (rand = Math.random) => Math.round(HOLD_RETRY_MS *
 const USAGE_ERROR_RETRY_MS = scaled(30_000);
 /** The last good reading keeps counting this long when a new read fails or is refused, while every window keeps the reserve plus LAST_GOOD_MARGIN free. */
 export const LAST_GOOD_MS = 15 * 60_000;
-export const LAST_GOOD_MARGIN = 10;
+export const LAST_GOOD_MARGIN = 3;
+/**
+ * The Claude usage endpoint is asked at most this often per user, whatever the answer: it answers 429 to more, and every helper
+ * process of the user shares the asking time and the reading through usage.json.
+ */
+export const CLAUDE_ASK_EVERY_MS = scaled(5 * 60_000);
 /** The longest a process waits for another process's usage read. */
 const USAGE_LOCK_WAIT_MS = 20_000;
 export const STATUS_EVERY_MS = scaled(5 * 60_000);
@@ -2314,7 +2319,7 @@ export function parseCodexRateLimits(res, models, now = Date.now()) {
   return { at: now, windows, ...(blocked && { blocked }) };
 }
 
-/** Reads Claude Code's plan usage with the harness credential: no model call. @param {string} token @param {string[]} models @returns {Promise<{ reading: QuotaReading, retryAt?: number }>} */
+/** Reads Claude Code's plan usage with the harness credential: no model call. `raw`: the good reply, parsed again for other models. @param {string} token @param {string[]} models @returns {Promise<{ reading: QuotaReading, raw?: unknown, retryAt?: number }>} */
 async function claudeQuota(token, models) {
   const now = Date.now();
   let res;
@@ -2338,13 +2343,13 @@ async function claudeQuota(token, models) {
   if (!res.ok) return { reading: { at: now, error: `the usage endpoint answered HTTP ${res.status}` } };
   let body;
   try { body = await res.json(); } catch { return { reading: { at: now, error: "unreadable usage reply" } }; }
-  return { reading: parseClaudeUsage(body, models, now) };
+  return { reading: parseClaudeUsage(body, models, now), raw: body };
 }
 
 /**
  * Asks the Codex app-server (`codex app-server`, JSON-RPC lines on stdio) for `account/rateLimits/read`, with the helper's
  * own CODEX_HOME. It may refresh the login, so it holds the Codex lock that calls hold; while a call runs there is no reading.
- * @param {string} bin @param {string} home @param {string[]} models @returns {Promise<{ reading: QuotaReading }>}
+ * @param {string} bin @param {string} home @param {string[]} models @returns {Promise<{ reading: QuotaReading, raw?: unknown }>}
  */
 async function codexQuota(bin, home, models) {
   const now = Date.now();
@@ -2382,7 +2387,7 @@ async function codexQuota(bin, home, models) {
       send({ id: 1, method: "initialize", params: { clientInfo: { name: "autocraft", title: null, version: HELPER_VERSION } } });
     });
     const r = /** @type {{ error?: string, result?: unknown }} */ (result);
-    return { reading: r.error ? { at: now, error: r.error } : parseCodexRateLimits(r.result, models, now) };
+    return r.error ? { reading: { at: now, error: r.error } } : { reading: parseCodexRateLimits(r.result, models, now), raw: r.result };
   } finally {
     unlock();
   }
@@ -2397,13 +2402,32 @@ function withLastGood(failed, good, now) {
   return { ...good, lastGood: failed.error };
 }
 
-/** @typedef {{ harness: string, models: string[], reading: QuotaReading, good?: QuotaReading, retryAt?: number }} UsageCache */
+/**
+ * `goodRaw`: the provider's reply behind `good`, so another model list (a config or helper update) reads it again instead of
+ * dropping it. `askedAt`: when the Claude usage endpoint was last asked (CLAUDE_ASK_EVERY_MS).
+ * @typedef {{ harness: string, models: string[], reading: QuotaReading, good?: QuotaReading, goodRaw?: unknown, retryAt?: number, askedAt?: number }} UsageCache
+ */
 
-/** The usage cache when it belongs to this harness and these models. @param {Adapter} adapter @param {string[]} models @returns {UsageCache | null} */
+/** @param {string} harness @param {unknown} raw @param {string[]} models @param {number} at @returns {QuotaReading} */
+const parseUsageRaw = (harness, raw, models, at) => (harness === "claude" ? parseClaudeUsage(raw, models, at) : parseCodexRateLimits(raw, models, at));
+
+/**
+ * The usage cache of this harness, its readings for these models. Readings taken for other models are parsed again from the
+ * reply behind them; without that reply (an older cache) the cache does not count.
+ * @param {Adapter} adapter @param {string[]} models @returns {UsageCache | null}
+ */
 function usageCache(adapter, models) {
   /** @type {UsageCache | null} */
   const c = readJson(usageFile());
-  return c && c.harness === adapter.id && JSON.stringify(c.models) === JSON.stringify(models) && c.reading ? c : null;
+  if (!c || c.harness !== adapter.id || !c.reading) return null;
+  if (JSON.stringify(c.models) === JSON.stringify(models)) return c;
+  /** @param {QuotaReading} r */
+  const again = (r) => ("error" in r || c.goodRaw === undefined ? null : parseUsageRaw(c.harness, c.goodRaw, models, r.at));
+  const reading = "error" in c.reading ? c.reading : again(c.reading);
+  const good = c.good && again(c.good);
+  if (!reading) return null;
+  const { good: _old, ...rest } = c;
+  return { ...rest, models, reading, ...(good && !("error" in good) && { good }) };
 }
 
 /** What the cache answers without asking the provider, or null when a new read is due. @param {UsageCache | null} c @param {number} now @returns {QuotaReading | null} */
@@ -2412,6 +2436,7 @@ function usageFromCache(c, now) {
   if (c.retryAt && now < c.retryAt) return withLastGood({ at: now, error: `${"error" in c.reading ? c.reading.error : "the provider asked to wait"}; asking again after ${clock(c.retryAt)}` }, c.good, now);
   const age = now - c.reading.at;
   if (age < 0) return null;
+  if (c.askedAt !== undefined && now >= c.askedAt && now - c.askedAt < CLAUDE_ASK_EVERY_MS) return withLastGood(c.reading, c.good, now);
   if ("error" in c.reading) return age < USAGE_ERROR_RETRY_MS ? withLastGood(c.reading, c.good, now) : null;
   return age < USAGE_REUSE_MS ? c.reading : null;
 }
@@ -2442,6 +2467,7 @@ const usageFlights = new Map();
  * The harness's plan usage, one read at a time per machine: slots of this process share one promise, other processes a
  * lock file and the cached reading. A reading of the last USAGE_REUSE_MS is reused; a failed or refused read is shared
  * only for USAGE_ERROR_RETRY_MS (or the provider's own wait), and the last good reading stands in for it for LAST_GOOD_MS.
+ * Claude's endpoint is asked at most every CLAUDE_ASK_EVERY_MS, whatever it answered.
  * @param {Config} cfg @param {Adapter} adapter @param {string} bin @param {string[]} models @returns {Promise<QuotaReading>}
  */
 export function readQuota(cfg, adapter, bin, models) {
@@ -2464,21 +2490,25 @@ async function readQuotaShared(cfg, adapter, bin, models) {
     const again = usageFromCache(usageCache(adapter, models), Date.now());
     if (again) return again;
   }
-  if (!unlock) return { at: Date.now(), error: "another helper process is reading the usage" };
+  if (!unlock) return withLastGood({ at: Date.now(), error: "another helper process is reading the usage" }, usageCache(adapter, models)?.good, Date.now());
   try {
     const now = Date.now();
     const prev = usageCache(adapter, models);
     const raced = usageFromCache(prev, now);
     if (raced) return raced;
     const good = prev && !("error" in prev.reading) ? prev.reading : prev?.good;
-    /** @type {{ reading: QuotaReading, retryAt?: number }} */
+    /** @type {{ reading: QuotaReading, raw?: unknown, retryAt?: number }} */
     let r;
+    let askedAt = prev?.askedAt;
     if (adapter.id === "claude") {
       const token = adapter.token(cfg);
+      if (token) askedAt = now;
       r = token ? await claudeQuota(token, models) : { reading: { at: now, error: "no Claude login" } };
     } else r = await codexQuota(bin, codexHome(), models);
-    const keep = "error" in r.reading ? good : r.reading;
-    writePrivate(usageFile(), { harness: adapter.id, models, reading: r.reading, ...(keep && { good: keep }), ...(r.retryAt && { retryAt: r.retryAt }) });
+    const fresh = !("error" in r.reading);
+    const keep = fresh ? r.reading : good;
+    const keepRaw = fresh ? r.raw : prev?.goodRaw;
+    writePrivate(usageFile(), { harness: adapter.id, models, reading: r.reading, ...(keep && { good: keep }), ...(keep && keepRaw !== undefined && { goodRaw: keepRaw }), ...(r.retryAt && { retryAt: r.retryAt }), ...(askedAt !== undefined && { askedAt }) });
     return withLastGood(r.reading, good, Date.now());
   } finally {
     unlock();
@@ -3101,10 +3131,11 @@ async function runLease(cfg, id, opt = {}) {
   /**
    * The helper's own fault, not the call's: the call goes back to the queue without using an attempt.
    * @param {string} reason @param {RunHold} [hold] the helper can take no call for a while @param {boolean} [noStrike] RunStatus.noStrike
+   * @param {boolean} [setup] setting up the files or the slot failed here (Release.setup): this helper may take the call again soon
    */
-  const giveBack = async (reason, hold, noStrike) => {
+  const giveBack = async (reason, hold, noStrike, setup) => {
     /** @type {Release} */
-    const body = { reason: redact(reason).slice(0, 300) };
+    const body = { reason: redact(reason).slice(0, 300), ...(setup && { setup: true }) };
     try { await call(ROUTES.release, body); } catch (e) { return undelivered(`the release (${reason})`, e); }
     return end("released", `released: ${lease.title}: ${reason}`, hold, noStrike);
   };
@@ -3164,7 +3195,7 @@ async function runLease(cfg, id, opt = {}) {
     taskDir = mkdtempSync(join(cacheDir(), "tasks", `${b.callId}-`));
     const late = adapter.tokenFor && (() => { const t = adapter.tokenFor?.(cfg, b.timeoutSeconds); return t && "problem" in t && t.problem === CLAUDE_LOGIN_EXPIRES ? t.problem : null; });
     const out = await execute(b, { adapter, bin: d.bin, token: runToken, model, taskDir, lease, root: lease.root ?? "", ...(lease.slot !== undefined && { slot: lease.slot }), ...(opt.signal && { signal: opt.signal }), prep, beat, ...(late && { late }) });
-    if ("giveBack" in out) { const stopped = prepStopped(); return await giveBack(stopped ?? out.giveBack, undefined, !stopped && out.noStrike); }
+    if ("giveBack" in out) { const stopped = prepStopped(); return await giveBack(stopped ?? out.giveBack, undefined, !stopped && out.noStrike, !stopped && out.setup); }
     if ("fail" in out) return await fail(out.fail, out.usage);
     const { r, reply, tools } = out;
     if (r.gone) return lost();
@@ -3202,7 +3233,7 @@ async function runLease(cfg, id, opt = {}) {
     return end("submitted", `submitted: ${lease.title}, ${kTokens(tokensOf(usage))} tokens`);
   } catch (e) {
     if (e instanceof Gone || beat.gone.aborted) return lost();
-    if (beat.runStart === null) return await giveBack(prepStopped() ?? `preparing failed: ${msg(e)}`);
+    if (beat.runStart === null) { const stopped = prepStopped(); return await giveBack(stopped ?? `preparing failed: ${msg(e)}`, undefined, undefined, !stopped); }
     return await fail(msg(e));
   } finally {
     beat.stop();
@@ -3221,7 +3252,7 @@ async function runLease(cfg, id, opt = {}) {
  * @param {TaskBundle} b
  * `late`: why the call may no longer start once its files are ready (its login no longer outlasts it), or null.
  * @param {{ adapter: Adapter, bin: string, token: string, model: string, taskDir: string, lease: LeaseRecord | null, root: string, slot?: number, signal?: AbortSignal, prep?: AbortSignal, beat?: ReturnType<typeof heartbeats>, late?: () => string | null }} x
- * @returns {Promise<{ giveBack: string, noStrike?: boolean } | { fail: string, usage?: Usage } | { r: Awaited<ReturnType<typeof harness>>, reply: Reply, tools: SubmitTool[] }>}
+ * @returns {Promise<{ giveBack: string, noStrike?: boolean, setup?: boolean } | { fail: string, usage?: Usage } | { r: Awaited<ReturnType<typeof harness>>, reply: Reply, tools: SubmitTool[] }>}
  */
 async function execute(b, x) {
   const { adapter } = x;
@@ -3229,7 +3260,7 @@ async function execute(b, x) {
   let mounts;
   try { mounts = await prepareMounts(server, secret, b, x.taskDir, x.prep); } catch (e) {
     if (e instanceof Gone || x.prep?.aborted) throw e;
-    return { giveBack: `setting up the files failed: ${msg(e)}` };
+    return { giveBack: `setting up the files failed: ${msg(e)}`, setup: true };
   }
   for (const n of b.mcpServers) if (!NAME.test(n)) return { fail: `bad MCP server name ${n}` };
   const mcp = b.mcpServers.length ? JSON.stringify(mcpConfig(server, b.mcpServers, secret)) : "";

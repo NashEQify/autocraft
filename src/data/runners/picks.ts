@@ -39,7 +39,7 @@ export function pickerLoginsOf(s: RunnerSnapshot, now: number): Set<string> {
 }
 
 const CALL_COLUMNS = ["id", "state", "prompt_id", "prompt_version", "tier", "step", "parent_id", "sticky_login", "seen_at", "timeout_ms", "items", "repo", "authors", "released_by",
-  "released_at", "for_login", "bound_slot", "refused_token", "picked_by", "picked_at", "pick_until", "asked_model", "queued_ms", "queued_since", "error", "level", "job_id", "since", "class as cls"] as const;
+  "released_at", "release_wait_ms", "for_login", "bound_slot", "refused_token", "picked_by", "picked_at", "pick_until", "asked_model", "queued_ms", "queued_since", "error", "level", "job_id", "since", "class as cls"] as const;
 
 /** Live picks of `login` at `now` (a pick counts while its time is not up), not counting call `except`. */
 const livePickCount = (db: Db, login: string, now: number, except = -1) => {
@@ -71,6 +71,7 @@ export async function loadPickContext(db: Db, user: string, callId: number, now:
       id: Number(row.id), promptId: row.prompt_id, promptVersion: row.prompt_version, tier: row.tier as Tier, step: row.step, parentId: row.parent_id === null ? null : Number(row.parent_id),
       stickyLogin: row.sticky_login, seenAt: Number(row.seen_at), timeoutMs: Number(row.timeout_ms), refs, repos: [...new Set([...refs.map((i) => i.repo), ...(row.repo ? [row.repo] : [])])],
       authors: new Set(authors.map((a) => a.toLowerCase())), releasedBy: row.released_by?.toLowerCase() ?? null, releasedAt: row.released_at === null ? null : Number(row.released_at),
+      releaseWaitMs: row.release_wait_ms === null ? null : Number(row.release_wait_ms),
       forLogin: row.for_login?.toLowerCase() ?? null, boundSlot: Number(row.bound_slot) === 1, refusedToken: row.refused_token === null ? null : Number(row.refused_token),
       pickedBy: row.picked_by?.toLowerCase() ?? null, pickedAt: row.picked_at === null ? null : Number(row.picked_at), pickUntil: row.pick_until === null ? null : Number(row.pick_until),
       askedModel: row.asked_model, queuedMs: Number(row.queued_ms), queuedSince: row.queued_since === null ? null : Number(row.queued_since), error: row.error,

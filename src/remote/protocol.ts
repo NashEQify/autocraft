@@ -315,7 +315,10 @@ export type ToolReply = { content: ToolContent[]; isError?: boolean };
 export const toolContent = (r: { text: string; images?: readonly { data: string; mimeType: string }[] }): ToolContent[] =>
   [{ type: "text", text: r.text }, ...(r.images ?? []).map((i): ToolContent => ({ type: "image", data: i.data, mimeType: i.mimeType }))];
 
-export type Release = { /** Why the helper gives the lease back, shown on the call. */ reason: string };
+export type Release = {
+  /** Why the helper gives the lease back, shown on the call. */ reason: string;
+  /** Setting up the call's files or slot failed on the helper (a fetch, git, disk): the same login may take the call again after SETUP_RETRY_MS instead of RELEASE_SKIP_MS (src/remote/calls.ts). */ setup?: boolean;
+};
 
 /** The machine a Task Runner runs on, as Node's `os.hostname()`, `process.platform` and `process.arch` give it. */
 export type Machine = { hostname: string; platform: string; arch: string };
