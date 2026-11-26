@@ -42,14 +42,6 @@ export const judges = (promptId: string): boolean => JUDGING.has(promptId) || pr
 /** The named lock of one login's lease transactions (lowercase). */
 export const remoteLeaseLock = (login: string): string => `remote-lease:${login.toLowerCase()}`;
 
-/** JSON with object keys sorted, so equal values give equal text. */
-function canonicalJson(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map((x) => canonicalJson(x === undefined ? null : x)).join(",")}]`;
-  if (v && typeof v === "object") return `{${Object.keys(v).filter((k) => (v as Record<string, unknown>)[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(",")}}`;
-  return JSON.stringify(v);
-}
-/** The hash a resumed run matches its earlier run's calls by: everything the call asks. */
-export const bundleHash = (bundle: unknown): string => createHash("sha256").update(canonicalJson(bundle)).digest("hex");
 export const sha256hex = (s: string): string => createHash("sha256").update(s).digest("hex");
 
 const ident = (_eb: Eb, p: string, name: string) => ref<any>(p ? `${p}.${name}` : name);
