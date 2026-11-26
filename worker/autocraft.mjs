@@ -5106,6 +5106,18 @@ export function parseToolArgs(tool, argv, cmd) {
     }
     return one(p, raw);
   };
+  // A boolean flag may take a separate on/off value; such a word is the flag's value only while there are more bare words than
+  // positional arguments, so `<cmd> --flag on` sets the flag and a positional on/off after a boolean flag stays positional.
+  const slots = cmd ? (cmd.args?.length ?? 0) : positionalOf(tool.inputSchema) ? 1 : 0;
+  let spare = -slots;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") { spare += argv.length - i - 1; break; }
+    if (a === "--json") continue;
+    if (!a.startsWith("--")) { spare++; continue; }
+    const k = a.includes("=") ? undefined : byFlag.get(toolKey(a.slice(2)));
+    if (k && typeOf(props[k]) !== "boolean") i++;
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--") { positional.push(...argv.slice(i + 1)); break; }
@@ -5122,7 +5134,7 @@ export function parseToolArgs(tool, argv, cmd) {
     if (!key) throw new UsageError(`unknown option ${a.slice(0, eq < 0 ? undefined : eq)} for ${name}; valid: ${valid()}`);
     const t = typeOf(props[key]);
     if (t === "boolean") {
-      if (inline === undefined && /^(true|false|on|off)$/.test(argv[i + 1] ?? "")) inline = argv[++i];
+      if (inline === undefined && spare > 0 && /^(true|false|on|off)$/.test(argv[i + 1] ?? "")) { inline = argv[++i]; spare--; }
       args[key] = inline === undefined ? true : typed(key, inline);
       continue;
     }

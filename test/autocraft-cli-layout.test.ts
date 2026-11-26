@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ALL_TOOL_NAMES, TOOLS } from "../src/dash/mcp/index.ts";
-import { CLI_COMMANDS, MCP_ONLY } from "../worker/autocraft.mjs";
+import { CLI_COMMANDS, MCP_ONLY, parseToolArgs } from "../worker/autocraft.mjs";
 
 const WORKER = new URL("../worker/autocraft.mjs", import.meta.url).pathname;
 
@@ -36,6 +36,15 @@ async function cli(url: string | null, args: string[]) {
     return { code, out, err };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
+
+test("a boolean flag takes a following on/off only when no positional argument needs that word", () => {
+  const tool = { name: "t", inputSchema: { type: "object", properties: { item: { type: "string" }, force: { type: "boolean" } } } };
+  const withItem = { path: ["x"], args: ["item"], usage: "<item>", summary: "", tool: "t" };
+  const noItem = { path: ["y"], usage: "", summary: "", tool: "t" };
+  assert.deepEqual(parseToolArgs(tool, ["--force", "off"], noItem).args, { force: false });
+  assert.deepEqual(parseToolArgs(tool, ["--force", "on"], withItem).args, { force: true, item: "on" });
+  assert.deepEqual(parseToolArgs(tool, ["--force", "off", "app#1"], withItem).args, { force: false, item: "app#1" });
+});
 
 test("commands send their tool with their arguments", async () => {
   const calls: { name: string; arguments: unknown }[] = [];
