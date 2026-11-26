@@ -4,7 +4,6 @@ src/classify/run.ts :: pool :: launch(any);
 src/classify/run.ts :: pool :: launch(i);
 src/classify/run.ts :: pool :: launch(pending[0]!);
 src/discord/gateway.ts :: Gateway.#connectOnce.<anonymous>.onMessage :: this.#identify(send, signal).catch((err: Error) => { this.#d.log(`discord: identify failed: ${err.me
-src/embed/model.ts :: localEmbedder.embed :: runner.catch(() => { runner = null; });
 src/github/identity.ts :: botUserId :: p.catch(() => botIds.delete(k));
 src/github/pipeline-account.ts :: pipelineAccount :: p.catch(() => { if (cached === p) cached = undefined; });
 src/remote/calls.ts :: claimCall :: reply.catch(() => { if (claimReplies.get(key)?.reply === reply) claimReplies.delete(key); });
