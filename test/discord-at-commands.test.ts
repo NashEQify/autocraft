@@ -92,3 +92,41 @@ test("a sender with no linked login gets one short reply and nothing runs", asyn
   assert.equal(rest.sent.length, sent + 1);
   assert.match(rest.sent.at(-1)!.body.content!, /\/autocraft link/);
 });
+
+test("an item of a private repo shows a status line and its link, never the recommendation", async () => {
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "hidden" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values([{ name: "hidden", owner: "storytold", visibility: "private" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("items").values({ repo: "hidden", number: 3, kind: "pr", state: "OPEN", title: "Fix 3", body: "", url: "https://github.com/storytold/hidden/pull/3" }));
+  await db.run(db.k.insertInto("main.repo_permissions").values({ login: "nora", repo: "hidden", permission: "write", checked_at: new Date().toISOString() }));
+  const at = new Date().toISOString();
+  const rec = JSON.stringify({ text: "SECRETPLAN rewrite the vault code.", parts: { fix: [1], drop: [] }, merges: false });
+  await db.run(db.k.insertInto("item_workflows").values({ repo: "hidden", number: 3, kind: "pr", entry: "review", weight: 5, state: "recommending", started_by: "nora", started_at: at, started_via: "github", plan: "[]", rec, rec_at: at, rec_head: "sha1", updated_at: at } as never));
+  const sent = rest.sent.length;
+  await say("p-1", "u70", "<@100> merge hidden#3");
+  const posted = rest.sent.slice(sent).map((s) => s.body.content ?? "").join("\n");
+  assert.ok(posted.includes("hidden#3"), posted);
+  assert.ok(posted.includes("https://github.com/storytold/hidden/pull/3"), posted);
+  assert.ok(!posted.includes("SECRETPLAN"), posted);
+});
+
+test("text that starts with a command word but reads as ambiguous goes to search, not the link refusal", async () => {
+  const sent = rest.sent.length;
+  const searched: string[] = [];
+  const own = new Pings({ db, keys, rest, search: { allow: () => true, find: async (q: string) => { searched.push(q); return { matches: [] }; } } as unknown as Search, log: () => {}, commands: new AtCommands({ db, keys, rest, log: () => {} }) });
+  await own.dispatch("READY", { user: { id: "100" } });
+  const m = { id: "s-1", channel_id: "c1", guild_id: "g1", content: "<@100> stop button does nothing on the export panel", type: 0, author: { id: "u99" } };
+  await handleDispatch(db, keys, "MESSAGE_CREATE", m);
+  await own.dispatch("MESSAGE_CREATE", m);
+  await own.idle();
+  assert.equal(searched.length, 1);
+  assert.ok(!rest.sent.slice(sent).some((s) => /\/autocraft link/.test(s.body.content ?? "")));
+});
+
+test("a replayed message runs its command once", async () => {
+  const sent = rest.sent.length;
+  await say("dup-1", "u70", "<@100> review photocraft#4");
+  const first = rest.sent.length;
+  assert.ok(first > sent);
+  await say("dup-1", "u70", "<@100> review photocraft#4");
+  assert.equal(rest.sent.length, first);
+});

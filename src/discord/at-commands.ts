@@ -12,11 +12,12 @@
 // one per REFUSAL_GAP_MS) and nothing runs.
 //
 // Answer: when anything ran, the bot starts a public thread on the command message ("review · photocraft#123 (+2)") and posts the
-// confirmation lines there, the same lines GitHub shows; a command sent in a thread is answered in that thread. Without Create Public
+// confirmation lines there, the lines GitHub shows (an item of a private or quiet repo shows a status line and its link only); a command sent in a thread is answered in that thread. Without Create Public
 // Threads, Send Messages in Threads or Read Message History in the channel, or when starting the thread fails, the answer is a plain
 // reply (logged once per channel). The thread, or that reply, then follows the items that ran (threads.ts). A command that ran nothing
 // gets a plain reply. No reply mentions anyone.
 import { loadTrackedRepos } from "../data/control/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
 import * as dc from "../data/discord/index.ts";
 import { PERM_WRITE_TTL, cachedWrite } from "../dash/server/sessions.ts";
 import type { Db } from "../db/index.ts";
@@ -29,6 +30,7 @@ import type { ItemRef, Parsed } from "../workflow/types.ts";
 import { commandOf } from "../workflow/vocab.ts";
 import { prepareDo, runDo, targetsOf, type DoText } from "./do.ts";
 import type { DiscordKeys } from "./keys.ts";
+import { discordDetail } from "./visibility.ts";
 import { loginOf } from "./links.ts";
 import { CREATE_PUBLIC_THREADS, READ_MESSAGE_HISTORY, SEND_MESSAGES_IN_THREADS, guildPerms } from "./perms.ts";
 import type { DiscordRest } from "./rest.ts";
@@ -38,16 +40,21 @@ import { WindowLimits } from "./window-limit.ts";
 /** The least time between two refusal replies to one sender. */
 export const REFUSAL_GAP_MS = 10 * 60_000;
 const THREAD_PERMS = CREATE_PUBLIC_THREADS | SEND_MESSAGES_IN_THREADS | READ_MESSAGE_HISTORY;
+const SEEN_MAX = 2000;
 const MENTION = /<@[!&]?\d+>/g;
 
 /** The text of a message without mentions, on one line. */
 export const withoutMentions = (s: string): string => s.replace(MENTION, " ").replace(/\s+/g, " ").trim();
 
-/** Whether text written to the bot is a command: it starts with a command word or alias, or reads whole as one. */
+/** Whether text written to the bot may be a command: it starts with a command word or alias, or reads whole as one. `take` then drops text that parses as ambiguous and has no items to act on. */
 export function isCommand(text: string): boolean {
+  return startsWithCommandWord(text) || (text.trim().length > 0 && parse(text).kind !== "ambiguous");
+}
+
+function startsWithCommandWord(text: string): boolean {
   const words = text.toLowerCase().replace(/[‘’]/g, "'").split(/[\s,.:;!]+/).filter(Boolean);
   for (let n = Math.min(4, words.length); n > 0; n--) if (commandOf(words.slice(0, n).join(" "))) return true;
-  return words.length > 0 && parse(text).kind !== "ambiguous";
+  return false;
 }
 
 /** What a message carries that the bot reads (pings.ts PingMessage is this and more). */
@@ -73,10 +80,40 @@ function commandLabel(p: Parsed): string {
 export const threadName = (command: string, items: readonly ItemRef[]): string =>
   `${command.slice(0, 60)} · ${refOf(items[0]!)}${items.length > 1 ? ` (+${items.length - 1})` : ""}`.slice(0, 100);
 
+/** The Discord error code in an error from rest.ts, else the message's first words. */
+function discordCode(e: unknown): string {
+  const msg = (e as Error).message ?? "";
+  return /\b(\d{5})\b/.exec(msg)?.[1] ?? String((e as { status?: number }).status ?? "error");
+}
+
+/**
+ * The lines of a result as a public channel may show them: an item of a private or quiet repo gets a status line (item, whether it
+ * ran, GitHub link) in place of its line, which can carry the recommendation or review text.
+ */
+export async function publicLines(db: Db, result: CommandResult): Promise<string[]> {
+  const detail = await discordDetail(db, result.items);
+  const quiet = (o: CommandResult["items"][number]): boolean => detail.get(`${o.repo.split("/").pop()!}#${o.number}`) !== "full";
+  if (!result.items.some(quiet)) return result.lines;
+  const many = result.items.length > 1;
+  const lines: string[] = [];
+  for (const o of result.items) {
+    const ref = refOf(o);
+    if (!quiet(o)) { lines.push(many ? t("{ref}: {line}", { ref, line: o.line }) : o.line); continue; }
+    const row = (await loadItems(db, [{ repo: o.repo.split("/").pop()!, number: o.number }], "labels")).values().next().value;
+    const state = o.outcome === "run" ? t("ran") : t("did not run");
+    lines.push([`${ref}: ${state}.`, row?.url].filter(Boolean).join(" "));
+  }
+  const failed = result.items.filter((o) => o.outcome !== "run");
+  if (many && failed.length) lines.push(t("Not run: {refs}.", { refs: listText(failed.map(refOf)) }));
+  return lines;
+}
+
 export class AtCommands {
   #d: AtDeps;
   #refusals = new WindowLimits();
   #logged = new Set<string>();
+  /** Ids of messages already taken as commands: a replayed MESSAGE_CREATE (gateway resume) must not run one twice. */
+  #seen = new Set<string>();
 
   constructor(deps: AtDeps) {
     this.#d = deps;
@@ -102,15 +139,20 @@ export class AtCommands {
       context = ((await dc.loadMessageMentions(db, [h])).get(h) ?? []).map((r) => ({ repo: r.repo, number: r.number }));
     }
     if (!context.length) context = here?.items ?? [];
-    return () => this.#run(m, text, context, here);
+    // Text that starts with a command word but reads as ambiguous is a command only with items to act on; otherwise it is a search.
+    const d = prepareDo(text, context);
+    if (d.parsed.kind === "ambiguous" && !(startsWithCommandWord(text) && (d.named.length || context.length))) return null;
+    if (this.#seen.has(m.id)) return async () => {};
+    this.#seen.add(m.id);
+    if (this.#seen.size > SEEN_MAX) this.#seen.delete(this.#seen.values().next().value!);
+    return () => this.#run(m, d, here);
   }
 
-  async #run(m: AtMessage, text: string, context: ItemRef[], here: Follow | null): Promise<void> {
+  async #run(m: AtMessage, d: DoText, here: Follow | null): Promise<void> {
     const { db, keys } = this.#d;
     const userId = m.author!.id;
     const login = await loginOf(db, keys, userId);
     if (!login) return await this.#refuse(m, t("Link your Discord account with /autocraft link to send commands. Nothing ran."));
-    const d = prepareDo(text, context);
     const tracked = await loadTrackedRepos(db);
     const denied: string[] = [];
     for (const repo of new Set(targetsOf(d).map((i) => i.repo.split("/").pop()!))) {
@@ -130,7 +172,7 @@ export class AtCommands {
 
   async #answer(m: AtMessage, d: DoText, result: CommandResult, here: Follow | null, login: string): Promise<void> {
     const { db, keys, rest } = this.#d;
-    const content = result.lines.join("\n").slice(0, 1990) || t("Nothing ran.");
+    const content = (await publicLines(db, result)).join("\n").slice(0, 1990) || t("Nothing ran.");
     const ran = result.items.filter((o) => o.outcome === "run").map((o) => ({ repo: o.repo, number: o.number }));
     const command = commandLabel(d.parsed);
     const where = (await dc.loadWatchedChannels(db, [m.channel_id])).get(m.channel_id);
@@ -151,7 +193,7 @@ export class AtCommands {
       try {
         thread = await rest.startThread(m.channel_id, m.id, threadName(command, ran));
       } catch (e) {
-        this.#logOnce(m.channel_id, `starting a thread failed (${(e as Error).message}); answering with a reply`);
+        this.#logOnce(m.channel_id, `starting a thread failed (${(e as Error).message}); answering with a reply`, discordCode(e));
       }
       if (thread) {
         await keep(threadTarget(keys, thread.id), keys.hash("channel", m.channel_id), { kind: "thread", guildId, channelId: thread.id, messageId: m.id });
@@ -159,14 +201,15 @@ export class AtCommands {
         return;
       }
     } else if (ran.length) {
-      this.#logOnce(m.channel_id, "missing Create Public Threads, Send Messages in Threads or Read Message History; answering with a reply");
+      this.#logOnce(m.channel_id, "missing Create Public Threads, Send Messages in Threads or Read Message History; answering with a reply", "perms");
     }
     const sent = await rest.createMessage(m.channel_id, reply);
     if (ran.length) await keep(replyTarget(keys, sent.id), keys.hash("channel", m.channel_id), { kind: "reply", guildId, channelId: m.channel_id, messageId: sent.id });
   }
 
-  #logOnce(channelId: string, what: string): void {
-    const key = `${channelId}|${what.slice(0, 40)}`;
+  /** Once per channel and cause (`cause`: the Discord error code, or a fixed word). */
+  #logOnce(channelId: string, what: string, cause: string): void {
+    const key = `${channelId}|${cause}`;
     if (this.#logged.has(key)) return;
     this.#logged.add(key);
     this.#d.log(`discord: command in channel ${channelId}: ${what}`);
