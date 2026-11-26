@@ -5,7 +5,6 @@
 import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
 import { exec } from "../fixup/git.ts";
-import { addAudit } from "../data/control/index.ts";
 import { guardItem } from "../core/guard.ts";
 import { byOfJob } from "../core/gates.ts";
 import { repoApproved } from "../core/repo-approvals.ts";
@@ -32,10 +31,10 @@ import {
   PLAN_TEXT_CHARS, PLAN_TIMEOUT_SEC,
   type PlanAsked, type PlanGuidance, type PlanInput, type PlanIssue,
 } from "./plan-types.ts";
-import { addRounds, attemptNow, currentAttempt, writeStep, type Attempt } from "./attempt.ts";
+import { addRounds, attemptNow, currentAttempt, writeStep } from "./attempt.ts";
 import { askedSoFar, askQuestions, IMPLEMENT_ASKER, LIMIT_IMPLEMENT, openQuestion, type QuestionDeps } from "./questions.ts";
-import { attemptGuidance, isStuckQuestion, markStuck, STUCK_CAUSES, type StuckCause, type StuckQuestion } from "./stuck.ts";
-import { IMPLEMENT_START_RETRIES, startFailureTimes, stuckOnStart } from "./start-retry.ts";
+import { attemptGuidance, markStuck, STUCK_CAUSES, type StuckCause } from "./stuck.ts";
+import { IMPLEMENT_START_RETRIES, startFailureTimes } from "./start-retry.ts";
 import { implementStartDelayMs } from "../core/backoff.ts";
 import type { AskFailedRound, Implementation, ImplementationRound, PlanQuestion, PlanReply, PlanWorkflow, QuestionRound, StartFailedRound } from "./types.ts";
 import { mainHeadOf, readyWorkspace, resetTree, runBoundCall, WorkspaceUnavailable, type CallResult } from "./workspace.ts";
@@ -340,19 +339,6 @@ export async function startFailed(db: Db, impl: Implementation, error: string, a
   return `${ref}: the workspace did not start (${detail}); AutoCraft starts it again at ${due} UTC (retry ${before + 1} of ${IMPLEMENT_START_RETRIES})`;
 }
 
-/** A stuck attempt AutoCraft takes up again itself (stuckOnStart): back to `planning`, its stuck failure recorded as the first failed start. */
-async function takeUpStuckStart(db: Db, impl: Implementation, rounds: ImplementationRound[]): Promise<Attempt | null> {
-  const { question, answer } = openQuestion(rounds);
-  const cause = isStuckQuestion(question) ? (question!.result as StuckQuestion).cause : null;
-  if (!stuckOnStart({ state: impl.state, planCallId: impl.planCallId, reason: impl.reason, cause, answered: !!answer, rounds })) return null;
-  const w = await db.write(async () => {
-    const w = await writeStep(db, impl, { to: "planning", expect: ["stuck"], rounds: [{ kind: "start-failed", result: { error: impl.reason ?? STUCK_CAUSES["workspace-lost"], fromStuck: true } satisfies StartFailedRound }] });
-    if (w) await addAudit(db, [{ login: IMPLEMENT_ASKER, action: "implement-start-retry", target: `${impl.repo}#${impl.number}`, details: { implementation: impl.id, reason: impl.reason } }]);
-    return w;
-  });
-  return w ? await attemptNow(db, w.impl) : null;
-}
-
 /**
  * Moves the attempt on from a stored plan round (finishPlan) with the job's GitHub grant. A failed post or ask is recorded
  * and the job fails, so the next job tries the write again from the stored round; after ASK_TRIES failures the attempt is stuck.
@@ -405,11 +391,6 @@ export async function runPlan(ctx: StepContext, o: PlanOptions): Promise<string>
       const r = s.refused[0];
       if (r) throw new Error(`${ref} has implementation ${r.current.id} in state ${r.current.state}`);
       impl = s.started[0]!;
-    }
-    if (impl.state === "stuck") {
-      const took = await takeUpStuckStart(db, impl, rounds);
-      if (!took) return `${ref}: nothing to plan (implementation ${impl.id} is stuck)`;
-      ({ impl, rounds } = took);
     }
     if (impl.state !== "planning" && impl.state !== "asked") return `${ref}: nothing to plan (implementation ${impl.id} is ${impl.state})`;
     assume = goesOnWithAssumptions(rounds);

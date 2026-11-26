@@ -1,6 +1,6 @@
 // A workspace that did not start before the plan call is AutoCraft's to retry, not a person's decision: the attempt waits on a
-// backoff and is planned again, and only the failure after the retries asks a maintainer. A stuck attempt from before the retries
-// existed is taken up again; one that got stuck after a model call still asks.
+// backoff and is planned again, and only the failure after the retries asks a maintainer. One that got stuck after a model call
+// still asks.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { implementStep } from "../src/core/decide-item.ts";
@@ -15,7 +15,7 @@ import { OPERATOR, world } from "./world-db.ts";
 const ENV_ERROR = "2 kubernetes environments are enabled; implementations need exactly one";
 
 test("a failed workspace start retries on a backoff without asking; after the retries, or after a model call, a maintainer is asked", async () => {
-  const w = await (await (await (await (await world()).repo()).issue(7)).issue(8)).issue(9);
+  const w = await (await (await (await world()).repo()).issue(7)).issue(9);
   const db = w.db;
   // Facts as a queued issue in scope sees them, at `ms`.
   const step = async (n: number, ms?: number) => {
@@ -37,11 +37,6 @@ test("a failed workspace start retries on a backoff without asking; after the re
   await startFailed(db, impl, ENV_ERROR);
   assert.equal((await currentImplementation(db, "app", 7))?.state, "stuck", "the failure after the retries is stuck");
   assert.equal(waitWho(await step(7, Date.now() + 24 * 3600_000)), "person", "and asks a maintainer, also later");
-
-  // Stuck on its first failed start before the retries existed: taken up again at once.
-  const old = await startImplementation(db, { repo: "app", number: 8, queuedBy: OPERATOR, textHash: "h" });
-  await markStuck(db, old, "workspace-lost", `workspace 3 is failed: ${ENV_ERROR}`);
-  assert.deepEqual(await step(8), { bucket: "plan" });
 
   // A workspace lost after the plan call ran keeps asking.
   const built = await startImplementation(db, { repo: "app", number: 9, queuedBy: OPERATOR, textHash: "h" });

@@ -108,7 +108,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
       }),
       reviseHeads: revises.flatMap((x) => { const v = x.result as Partial<ReviseRound> | null; return typeof v?.head === "string" && (v.review || v.ci) ? [v.head] : []; }),
       lastRevise: (revises.at(-1)?.result ?? null) as ReviseRound | null,
-      startRetry: startRetryOf({ state: r.state as ImplementationState, planCallId: num(r.plan_call_id), reason: r.reason, cause: r.state === "stuck" ? qr?.cause ?? null : null, answered: !!answer, rounds: rs }),
+      startRetry: startRetryOf({ state: r.state as ImplementationState, rounds: rs }),
       textCounts: counts,
       prAttempts: (prAttempts.get(refKey(r.repo, Number(r.number))) ?? []).sort((x, y) => y.id - x.id),
     });

@@ -84,8 +84,8 @@ export type QuestionRound = { audience: QuestionAudience; text: string; commentI
 export type AnswerRound = { by: string; via: string; at: string; option?: string; text?: string; question: number };
 /** The result of an `ask-failed` round: what failed, for the plan round whose questions it was writing. */
 export type AskFailedRound = { planRound: number; error: string };
-/** A `start-failed` round: why the workspace did not start; `fromStuck` when the attempt was stuck on it and AutoCraft took it up again. */
-export type StartFailedRound = { error: string; fromStuck?: true };
+/** A `start-failed` round: why the workspace did not start. */
+export type StartFailedRound = { error: string };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /**
