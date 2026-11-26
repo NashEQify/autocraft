@@ -240,7 +240,7 @@ export function checkoutCapBytes(): number {
 
 /**
  * Removes checkouts under `root/<repo>/<sha>` not used for `maxAgeMs`, and unfinished ones; then, while the rest hold more
- * than `maxBytes`, the least recently used. Checkouts a running call holds stay.
+ * than `maxBytes`, the least recently used. Checkouts held with `holdCheckouts` (by a running scan, for example) stay.
  */
 export function pruneCheckouts(root: string, maxAgeMs: number, now = Date.now(), maxBytes = checkoutCapBytes()): number {
   let n = 0;

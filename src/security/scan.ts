@@ -8,6 +8,7 @@ import { addAudit } from "../data/control/index.ts";
 import * as sec from "../data/security/index.ts";
 import { featureOn } from "../build/features.ts";
 import type { CratesResult } from "../verify/crates.ts";
+import { holdCheckouts } from "../sandbox/checkout.ts";
 import { writeAndQueue } from "./scantest.ts";
 import { finishScan } from "./store.ts";
 import {
@@ -201,9 +202,12 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
     throw new Error(`${repo}: scan ${scanId} failed: ${msg}`);
   };
 
+  // The scan reads the checkout for its whole run; held, pruning cannot evict it and silently drop the findings of later areas.
+  let release = (): void => {};
   try {
     const co = await deps.checkout(repo, scan.commit_sha ?? undefined);
     if (!co) return await fail("The repository could not be checked out for a read-only scan.");
+    release = holdCheckouts([co.dir]);
     if (scan.commit_sha && co.sha !== scan.commit_sha) return await fail(`The checkout is at ${co.sha.slice(0, 7)}, not the scan's pinned commit ${scan.commit_sha.slice(0, 7)}.`);
     await sec.setScanCommit(db, scanId, co.sha);
     const base = { repo: securityRepo(repo), number: scanId, project: repo, commit: co.sha } as const;
@@ -341,5 +345,7 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
     }
     await finishScan(db, scanId, "failed", (e as Error).message.slice(0, 500));
     throw e;
+  } finally {
+    release();
   }
 }
