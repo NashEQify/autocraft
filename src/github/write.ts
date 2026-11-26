@@ -1172,6 +1172,7 @@ export function removeInstallation(w: Writer, o: { app: Pick<AppSecrets, "client
  * `webhook-redeliver` on the delivery's GUID. A redelivery is safe to receive twice: it queues re-reads, and a comment's command once.
  */
 export function redeliverWebhook(w: Writer, o: { app: Pick<AppSecrets, "clientId" | "privateKey"> & { owner?: AppOwner | null }; id: number; guid: string; event: string; apiBase?: string }): Promise<void> {
-  return recorded(w, "app", "webhook-redeliver", o.guid, { delivery: o.id, event: o.event },
+  const identity = "app";
+  return recorded(w, identity, "webhook-redeliver", o.guid, { delivery: o.id, event: o.event },
     () => call(o.apiBase ?? GITHUB_API, `/app/hook/deliveries/${o.id}/attempts`, appJwt(o.app), "POST").then(() => undefined), undefined, undefined, undefined, o.app.owner?.login);
 }
