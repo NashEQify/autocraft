@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { safeEqual } from "../src/dash/server/crypto.ts";
-import { checkDeliveries, type Delivery } from "../src/github/deliveries.ts";
+import { checkDeliveries, type Delivery, type DeliveryPage } from "../src/github/deliveries.ts";
 import { drainSyncRequests, handleDelivery, resetDeliveryNote, signatureOf } from "../src/github/webhooks.ts";
 import { loadSyncState, saveSyncState } from "../src/data/mirror/index.ts";
 import { pollReason, writeItemNode } from "../src/mirror.ts";
@@ -153,7 +153,7 @@ test("with webhooks arriving the poll waits for the backstop; a failed delivery 
     { id: 4, guid: "fresh", delivered_at: at(t0 - 5_000), status_code: 0, event: "issues" },
   ];
   const asked: string[] = [];
-  const deps = { list: async () => [...page], redeliver: async (d: Delivery) => { asked.push(d.guid); }, log: () => {} };
+  const deps = { list: async () => ({ deliveries: [...page], next: null }), redeliver: async (d: Delivery) => { asked.push(d.guid); }, log: () => {} };
   const app = {} as AppSecrets;
   const first = await checkDeliveries(db, app, t0, deps);
   assert.deepEqual(asked, ["down"], "only a delivery that got no good answer, settled and worth retrying, is asked for again");
@@ -166,4 +166,39 @@ test("with webhooks arriving the poll waits for the backstop; a failed delivery 
   page.push({ id: 5, guid: "down", delivered_at: at(t0 + 25_000), status_code: 202, event: "issue_comment" });
   await checkDeliveries(db, app, t0 + 60_000, deps);
   assert.deepEqual(asked, ["down", "fresh"], "the redelivered one succeeded; the in-flight one failed once settled");
+});
+
+test("a failed delivery a check could not have sent again is asked for on the next check, past newer ones and on a later page, and its comment command arrives", async () => {
+  const db = await scratch();
+  const t0 = Date.now();
+  const at = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
+  const slug = "autocraft-bot";
+  const comment = { action: "created", repository: { full_name: "storytold/a", name: "a" }, issue: { number: 3 },
+    comment: { id: 77, body: `@${slug} review`, created_at: new Date(t0 - 90_000).toISOString(), user: { login: "someone", id: 5, type: "User" } } };
+  const lost: Delivery = { id: 9, guid: "cmd", delivered_at: at(t0 - 90_000), status_code: 502, event: "issue_comment" };
+  const newest: Delivery[] = [{ id: 10, guid: "newer", delivered_at: at(t0 - 40_000), status_code: 202, event: "issues" }];
+  const pages = (): Record<string, DeliveryPage> => ({
+    first: { deliveries: [...newest], next: "p2" },
+    p2: { deliveries: [lost, { id: 1, guid: "old", delivered_at: at(t0 - 4000_000), status_code: 202, event: "issues" }], next: null },
+  });
+  let down = true;
+  const asked: string[] = [];
+  const deps = {
+    list: async (cursor: string | null) => pages()[cursor ?? "first"]!,
+    redeliver: async (d: Delivery) => {
+      asked.push(d.guid);
+      if (down) throw new Error("HTTP 502");
+      const raw = Buffer.from(JSON.stringify(comment));
+      await handleDelivery(db, SECRET, { event: d.event, signature: signatureOf(SECRET, raw) }, raw, safeEqual, slug);
+    },
+    log: () => {},
+  };
+  await checkDeliveries(db, {} as AppSecrets, t0, deps);
+  assert.deepEqual(asked, ["cmd"]);
+  down = false;
+  newest.unshift({ id: 11, guid: "newest", delivered_at: at(t0 + 20_000), status_code: 202, event: "issues" });
+  await checkDeliveries(db, {} as AppSecrets, t0 + 60_000, deps);
+  assert.deepEqual(asked, ["cmd", "cmd"], "the next check reads back to the delivery left over and asks for it again");
+  const commands = await db.all(db.k.selectFrom("github_commands").select(["comment_id", "number"]));
+  assert.deepEqual(commands.map((r) => ({ ...r })), [{ comment_id: 77, number: 3 }]);
 });

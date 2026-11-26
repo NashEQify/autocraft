@@ -2876,6 +2876,15 @@ CREATE TABLE IF NOT EXISTS sync_state (
   deliveries_checked_at TEXT          -- GitHub's list of the app's webhook deliveries was checked up to here
 );
 
+-- Webhook deliveries the delivery check asked GitHub to send again (src/github/deliveries.ts), by delivery GUID. GitHub keeps
+-- deliveries three days; rows older than that are pruned.
+CREATE TABLE IF NOT EXISTS webhook_redeliveries (
+  guid TEXT PRIMARY KEY,
+  asked INTEGER NOT NULL,             -- redelivery requests made, failed requests included
+  asked_at TEXT,                      -- the last request GitHub accepted; an attempt before it is answered by the redelivery
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
+
 -- Per-repo step approvals (control): the repo lets AutoCraft run the step where no person asked for it.
 CREATE TABLE IF NOT EXISTS repo_step_approvals (
   repo TEXT NOT NULL,

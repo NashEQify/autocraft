@@ -130,8 +130,11 @@ async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): 
   return { text: served.map(passageText).join("\n\n") + cut };
 }
 
-// One worker for the item tools of this process; it opens the snapshot on its first call.
-const itemsThread = new ThreadCall<ItemsCall, ToolResult>(new URL("./items-worker.ts", import.meta.url), "item tools");
+// One worker for the item tools of this process; it opens the snapshot on its first call. A read can wait up to the
+// snapshot's 30 s busy timeout while a refresh writes; the call limit leaves room for that wait plus the query, and stays
+// under the runner's tool timeout so the caller gets this error instead of a dropped request.
+const ITEMS_CALL_TIMEOUT_MS = 50_000;
+const itemsThread = new ThreadCall<ItemsCall, ToolResult>(new URL("./items-worker.ts", import.meta.url), "item tools", undefined, { timeoutMs: ITEMS_CALL_TIMEOUT_MS });
 const items = (name: string, raw: unknown): Promise<ToolResult> => itemsThread.call({ file: snapshotFile(), diffs: diffCacheDir(), name, raw });
 
 /** The runner's worker API, for a dashboard that does not share the runner's disk (AUTOCRAFT_RUNNER_URL); null: the files are local. */

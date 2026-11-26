@@ -2502,6 +2502,13 @@ export interface Verifications {
   finished_at: string | null;
 }
 
+export interface WebhookRedeliveries {
+  guid: string;
+  asked: number;
+  asked_at: string | null;
+  updated_at: string;
+}
+
 export interface WhitelistOverrides {
   login: string;
   status: string;
@@ -2830,6 +2837,7 @@ export interface DB {
   user_token_revocations: UserTokenRevocations;
   user_tokens: UserTokens;
   verifications: Verifications;
+  webhook_redeliveries: WebhookRedeliveries;
   whitelist_overrides: WhitelistOverrides;
   work_leases: WorkLeases;
   workflow_actions: WorkflowActions;
@@ -3043,6 +3051,7 @@ export interface DB {
   "main.user_token_revocations": UserTokenRevocations;
   "main.user_tokens": UserTokens;
   "main.verifications": Verifications;
+  "main.webhook_redeliveries": WebhookRedeliveries;
   "main.whitelist_overrides": WhitelistOverrides;
   "main.work_leases": WorkLeases;
   "main.workflow_actions": WorkflowActions;
@@ -3260,6 +3269,7 @@ export const COLUMNS = {
   user_token_revocations: ["id", "login", "token_enc", "queued_at", "kind", "aad", "attempts"],
   user_tokens: ["login", "github_id", "token_enc", "version", "updated_at", "status", "refresh_error"],
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
+  webhook_redeliveries: ["guid", "asked", "asked_at", "updated_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
   workflow_actions: ["id", "workflow_id", "repo", "number", "kind", "by", "head", "state", "reason", "comment_url", "attempts", "created_at", "updated_at", "done_at", "close_as"],
