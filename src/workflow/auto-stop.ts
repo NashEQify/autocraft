@@ -9,21 +9,27 @@
 // conflict, sensitive files), a failed verification and a screenshot regression. Waits that clear by themselves (CI, GitHub's
 // mergeable state, a check that has not read the diff yet) make none. Nothing is started while the pipeline is off.
 //
+// A yes does not merge past a pre-merge defect: the defect is fixed first, as on an item approved for merge (recommend.ts premergeFirst).
+//
 // One live rule row per PR. A row nobody answered ends as `superseded` when the author pushes (advance.ts), and the rule takes the PR
-// back: a later stop may start a new row. Once a person answered or ended a row, or started any workflow on the PR, the rule starts none.
+// back: a later stop may start a new row. At the same head each pass reads it again as the rule reads the PR without it
+// (recheckRuleRow): a stop that went, or a PR the rule no longer takes, ends it as `superseded` too, and a stop that changed comes back
+// with its new recommendation. Once a person answered or ended a row, or started any workflow on the PR, the rule starts none.
 import type { WaitCode } from "../core/codes.ts";
 import { conflictPath, decidePr, onAutoPath } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import type { Plan, PlanState, PrFacts } from "../core/plan.ts";
+import { PREMERGE_DEFECT_REASON } from "../core/rules.ts";
 import { EXTRAS_PENDING_REASON, UNCHECKED_REASON } from "../core/sensitive.ts";
 import { readConfig, SETTINGS } from "../data/control/index.ts";
 import { listPlans } from "../data/planner/index.ts";
-import { loadReviewRows, type ReviewRow } from "../data/review/index.ts";
+import { loadPremerge, loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review/index.ts";
 import { loadStartedRefs, recordEvents, saveWorkflows, startWorkflows } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { questionFor } from "./ask.ts";
-import { planOf, ruleStopped } from "./recommend.ts";
-import { RULE_STARTER, WEIGHT_NORMAL, type PlanPart, type Recommendation, type WorkflowState } from "./types.ts";
+import { premergePartsOf } from "./premerge.ts";
+import { planOf, premergeFirst, ruleStopped } from "./recommend.ts";
+import { RULE_STARTER, WEIGHT_NORMAL, type ItemWorkflow, type PlanPart, type Recommendation, type WorkflowState } from "./types.ts";
 
 /** The waits of a stop that only a person's judgement settles. */
 export const JUDGEMENT_WAITS: readonly WaitCode[] = ["answer", "verification-failed", "screenshots"];
@@ -36,18 +42,31 @@ const KEEPS_OFF: WorkflowState[] = ["running", "waiting", "blocked", "recommendi
 
 export type AutoStop = { repo: string; number: number; head: string; code: WaitCode; plan: PlanPart[]; rec: Recommendation };
 
-/** The judgement stop of a PR on the auto path, with the recommendation it comes back with; null for any other PR or wait. Pure. */
-export function autoStop(f: PrFacts, p: Plan, reviews: readonly ReviewRow[]): AutoStop | null {
+/**
+ * The judgement stop of a PR on the auto path, with the recommendation it comes back with; null for any other PR or wait. `premerge`: the
+ * pre-merge review of its head. Pure.
+ */
+export function autoStop(f: PrFacts, p: Plan, reviews: readonly ReviewRow[], premerge: PremergeRow | null = null): AutoStop | null {
   if (f.ghState !== "OPEN" || f.draft || !f.head || !onAutoPath(f)) return null;
   const code = p.waitCode ?? null;
   if (code === null || p.waitKind !== "person" || !JUDGEMENT_WAITS.includes(code) || p.reasons.some((r) => PASSING.has(r))) return null;
   const review = reviews.find((r) => r.head === f.head) ?? null;
-  const plan = review ? planOf(review.fixes, []) : [];
+  const fixes = review ? planOf(review.fixes, []) : [];
   const view = review ? { verdict: review.verdict, sure: review.sure, rec: review.workflow?.recommendation ?? null } : null;
   const conflict = f.mergeable === "CONFLICTING" ? { path: conflictPath(f) } : null;
-  const q = questionFor(f, p, { approved: false, review: view, parts: plan, conflict });
-  return q ? { repo: f.repo, number: f.number, head: f.head, code, plan, rec: ruleStopped(q.rec, p.reasons) } : null;
+  const q = questionFor(f, p, { approved: false, review: view, parts: fixes, conflict });
+  if (!q) return null;
+  const defects = p.reasons.includes(PREMERGE_DEFECT_REASON) ? premergePartsOf(premerge, fixes) : null;
+  const plan = defects ? [...fixes, ...defects] : fixes;
+  const rec = defects ? premergeFirst(q.rec, defects.map((d) => d.n)) : q.rec;
+  return { repo: f.repo, number: f.number, head: f.head, code, plan, rec: ruleStopped(rec, p.reasons) };
 }
+
+/** The pre-merge reviews at the heads of `facts`, by `repo#number@head` (headKey). */
+export const premergeOf = async (db: Db, facts: readonly PrFacts[]): Promise<Map<string, PremergeRow>> =>
+  await loadPremerge(db, facts.flatMap((f) => (f.head ? [{ repo: f.repo, number: f.number, head: f.head }] : [])));
+
+export const headKey = (f: Pick<PrFacts, "repo" | "number" | "head">): string => `${f.repo}#${f.number}@${f.head}`;
 
 /**
  * The judgement stops of open auto-path PRs that the rule may start a row for: candidates from the stored plans (on the auto path as the
@@ -60,8 +79,8 @@ export async function findAutoStops(db: Db, o: { repos?: string[] } = {}): Promi
   const refs = plans.filter((p) => !started.has(`${p.repo}#${p.number}`)).map((p) => ({ repo: p.repo, number: p.number }));
   if (!refs.length) return [];
   const facts = await loadPrFacts(db, { refs: refs.map((r) => `${r.repo}#${r.number}`) });
-  const reviews = await loadReviewRows(db, refs);
-  return facts.flatMap((f) => autoStop(f, decidePr(f), reviews.get(`${f.repo}#${f.number}`) ?? []) ?? []);
+  const [reviews, premerge] = await Promise.all([loadReviewRows(db, refs), premergeOf(db, facts)]);
+  return facts.flatMap((f) => autoStop(f, decidePr(f), reviews.get(`${f.repo}#${f.number}`) ?? [], premerge.get(headKey(f)) ?? null) ?? []);
 }
 
 /**
@@ -81,4 +100,23 @@ export async function startAutoStops(db: Db, at: string = new Date().toISOString
     await recordEvents(db, started.map(({ s, id }) => ({ workflowId: id, repo: s.repo, number: s.number, login: RULE_STARTER, via: "cli" as const, kind: "set" as const, line: s.rec.text, at })));
     return started.length;
   });
+}
+
+/** The facts of a PR as the rule reads them without its own row, as it read them when it started that row. */
+const withoutRow = (f: PrFacts): PrFacts => ({ ...f, workflow: null, endedWorkflow: null, standing: { merge: null, work: null }, may: { ...f.may, workflow: null, ended: null } });
+
+/** What a person reads of a recommendation and what a yes runs. */
+const said = (r: Recommendation | null, plan: readonly PlanPart[]): string =>
+  JSON.stringify(r && [r.text, r.stop ?? null, r.parts, r.merges, r.again ?? null, r.close ?? false, r.waits ?? null, plan]);
+
+/**
+ * A rule row nobody answered, read again at the head its question was made at (`f`: the PR's facts there, its own row in them), as the
+ * rule reads the PR without it: "superseded" when the stop went or the rule no longer takes the PR, which takes the PR back; the stop
+ * when it changed (its review, its pre-merge findings, the rule's reasons); null while it stands as it is. Pure.
+ */
+export function recheckRuleRow(w: Pick<ItemWorkflow, "rec" | "plan">, f: PrFacts, reviews: readonly ReviewRow[], premerge: PremergeRow | null): AutoStop | "superseded" | null {
+  const g = withoutRow(f);
+  const stop = autoStop(g, decidePr(g), reviews, premerge);
+  if (!stop) return "superseded";
+  return said(stop.rec, stop.plan) === said(w.rec, w.plan) ? null : stop;
 }

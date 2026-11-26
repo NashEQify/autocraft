@@ -127,3 +127,19 @@ test("an author push before anyone answers gives the PR back to the rule, which 
   await sweep(w);
   assert.deepEqual(await states(w), ["superseded", "stopped"], "after a person ended it, the rule asks no more");
 });
+
+test("the rule's stop at a pre-merge defect fixes it before any merge, and once that stop goes at the same head the rule takes the PR back", async () => {
+  const w = current = await (await (await world()).repo()).acting(MAINT);
+  await (await (await w.pr(1)).review(1)).verified(1);
+  await w.premerge(1, "defect", false);
+  await w.premergeRoundsSpent(1);
+  await sweep(w);
+  const wf = (await liveWorkflow(w.db, "app", 1))!;
+  const fix = wf.rec?.parts.fix ?? [];
+  assert.equal(wf.state, "recommending");
+  assert.ok(fix.length && wf.plan.some((p) => fix.includes(p.n) && p.major), `a yes fixes the defect first: ${wf.rec?.text}`);
+
+  await w.premerge(1, "clean");
+  await advanceWorkflows(w.db);
+  assert.deepEqual(await states(w), ["superseded"], "the stop went at the head it was made at");
+});

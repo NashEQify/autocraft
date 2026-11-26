@@ -16,7 +16,7 @@ import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
-import { loadReviewRows, type ReviewRow } from "../data/review/index.ts";
+import { loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review/index.ts";
 import { adoptLegs, listWorkflows, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { isFenced } from "../db/fence.ts";
@@ -35,7 +35,8 @@ import { fixPath, redCiPath } from "../preapproval/paths.ts";
 import { t } from "../i18n/index.ts";
 import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED } from "../core/author-round.ts";
 import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
-import { startAutoStops } from "./auto-stop.ts";
+import { asksNobody } from "./asked.ts";
+import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
 import { codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
 import { premergeParts } from "./premerge.ts";
@@ -73,6 +74,8 @@ type Pass = {
   goOn: Map<number, GoneOn>;
   legs: Map<string, Preapproval[]>;
   reviews: Map<string, ReviewRow[]>;
+  /** The pre-merge reviews at the heads the automatic merge rule's unanswered rows stopped at (auto-stop.ts headKey). */
+  premerge: Map<string, PremergeRow>;
   patches: Map<string, PatchFacts>;
   fixes: Map<string, { fromHead: string; toHead: string | null; createdAt: string; lines: number; files: string[] }>;
   /** Every push of ours per PR. */
@@ -174,6 +177,9 @@ function premergeStopped(pass: Pass, w: ItemWorkflow, head: string): boolean {
 
 const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
+/** A row the automatic merge rule started whose question nobody answered: it asks nobody (asked.ts). */
+const unansweredRuleRow = (w: ItemWorkflow): boolean => w.state === "recommending" && w.startedBy === RULE_STARTER && asksNobody(w);
+
 /** Starts or adopts the approved PR's merge leg; a refusal is returned as the reason it cannot go on. */
 async function ensureLeg(db: Db, pass: Pass, writes: Writes, w: ItemWorkflow, repo: string, pr: number, head: string, since: string): Promise<string | null> {
   const legs = pass.legs.get(key(repo, pr)) ?? [];
@@ -252,8 +258,10 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const alone = live.filter((w) => w.kind === "issue" && candidatePr(implement.byIssue.get(key(w.repo, w.number)), w) === null);
     const facts = byRef(prRefs.length ? await loadPrFacts(db, { refs: prRefs.map((r) => key(r.repo, r.number)) }) : []);
     const issueFacts = byRef(alone.length ? await loadItemFacts(db, { refs: alone.map((w) => key(w.repo, w.number)) }) : []);
+    const ruleHeads = live.flatMap((w) => { const f = unansweredRuleRow(w) ? facts.get(key(w.repo, w.number)) : undefined; return f && f.head === w.recHead ? [f] : []; });
+    const premerge = ruleHeads.length ? await premergeOf(db, ruleHeads) : new Map<string, PremergeRow>();
     const pass: Pass = {
-      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, issues: issueFacts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin },
+      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, premerge, issues: issueFacts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin },
     };
     const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [] };
     const moved: Moved[] = [];
@@ -466,6 +474,12 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   if (repushed && (!head || w.recHead === null || ownChain(pass, ref, w.recHead, head))) {
     // Nor does it wait when what the question is about went: the approval covers the head, or our pushes on it, as it did.
     const now = pass.facts.get(ref);
+    // The automatic merge rule's question nobody answered stands only while the rule would stop the PR there as it did (auto-stop.ts).
+    if (unansweredRuleRow(w) && now && now.head === head && head === w.recHead && (pass.goOn.get(w.id)?.said ?? w.startedAt) <= w.startedAt) {
+      const again = recheckRuleRow(w, now, pass.reviews.get(ref) ?? [], pass.premerge.get(headKey(now)) ?? null);
+      if (again === "superseded") return write({ state: "superseded", rec: null, recAt: null, blocker: null, blockerParams: null });
+      if (again) return write({ ...base, rec: again.rec, recAt: pass.at, plan: again.plan });
+    }
     const went = head && w.recHead !== null && now?.head === head ? causeWent(w.rec?.cause, now, w.approvedBy !== null) : null;
     if (went === null) return settle(base);
     await closeQuestion(went);
