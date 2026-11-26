@@ -130,3 +130,31 @@ test("a replayed message runs its command once", async () => {
   await say("dup-1", "u70", "<@100> review photocraft#4");
   assert.equal(rest.sent.length, first);
 });
+
+test("a write permission cached over a minute ago is read again through the GitHub App, which decides", async () => {
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "texturecraft" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values([{ name: "texturecraft", owner: "storytold", visibility: "public" }]).onConflict((oc) => oc.doNothing()));
+  for (const n of [1, 2]) {
+    await db.run(db.k.insertInto("items").values({ repo: "texturecraft", number: n, kind: "pr", state: "OPEN", title: `Fix ${n}`, body: "", url: `https://github.com/storytold/texturecraft/pull/${n}` }));
+  }
+  await db.run(db.k.insertInto("main.repo_permissions").values({ login: "nora", repo: "texturecraft", permission: "admin", checked_at: new Date(Date.now() - 2 * 3_600_000).toISOString() }));
+  let answer = "admin";
+  const asked: string[] = [];
+  const own = new Pings({ db, keys, rest, search: {} as Search, log: (l) => assert.fail(l), commands: new AtCommands({ db, keys, rest, log: (l) => assert.fail(l), permission: async (_d, login, repo) => { asked.push(`${login} ${repo}`); return { kind: "ok", permission: answer }; } }) });
+  await own.dispatch("READY", { user: { id: "100" } });
+  const send = async (id: string, content: string) => {
+    const m = { id, channel_id: "c1", guild_id: "g1", content, type: 0, author: { id: "u70" } };
+    await handleDispatch(db, keys, "MESSAGE_CREATE", m);
+    await own.dispatch("MESSAGE_CREATE", m);
+    await own.idle();
+  };
+  await send("w-1", "<@100> review texturecraft#1");
+  assert.ok(asked.length > 0, "the stale row is not trusted");
+  assert.ok((await started()).includes("texturecraft#1"));
+
+  answer = "read";
+  const sent = rest.sent.length;
+  await send("w-2", "<@100> review texturecraft#2");
+  assert.ok(!(await started()).includes("texturecraft#2"));
+  assert.match(rest.sent.slice(sent).map((s) => s.body.content ?? "").join("\n"), /no write access to texturecraft/);
+});
