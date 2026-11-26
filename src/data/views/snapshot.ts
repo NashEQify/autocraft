@@ -230,14 +230,19 @@ async function readSeqs(db: Db): Promise<Seqs> {
   return out;
 }
 
+/** `q` on `t` limited to the rows the snapshot copies: those of public repositories, without reviews still pending. */
+function publicRows(t: PgTable, q: SelectQueryBuilder<any, any, any>): SelectQueryBuilder<any, any, any> {
+  return q
+    .where("repo", "in", (eb: ExpressionBuilder<any, any>) => eb.selectFrom("repos").select("name").where("visibility", "=", "public"))
+    .$if(t.pending, (q) => q.where((eb) => eb.or([eb("review_state", "is", null), eb("review_state", "<>", "PENDING")])));
+}
+
 /** The public rows of `t` with `select` added, keyset-paged by its key in pages of `size`. */
 async function* pgPages(db: Db, t: PgTable, select: (q: SelectQueryBuilder<any, any, any>) => SelectQueryBuilder<any, any, any>, size: number): AsyncGenerator<Record<string, unknown>[]> {
   let last: (string | number)[] | null = null;
   for (;;) {
     const after = last;
-    const q = select(anyK(db).selectFrom(t.name))
-      .where("repo", "in", (eb: ExpressionBuilder<any, any>) => eb.selectFrom("repos").select("name").where("visibility", "=", "public"))
-      .$if(t.pending, (q) => q.where((eb) => eb.or([eb("review_state", "is", null), eb("review_state", "<>", "PENDING")])))
+    const q = publicRows(t, select(anyK(db).selectFrom(t.name)))
       .$if(after !== null, (q) => q.where((eb) => (t.key.length === 1 ? eb(t.key[0]!, ">", after![0]) : eb(eb.refTuple(t.key[0]!, t.key[1]!), ">", eb.tuple(after![0]!, after![1]!)))))
       .$call((q) => t.key.reduce((o, k) => o.orderBy(k), q))
       .limit(size);
@@ -293,18 +298,21 @@ const countOf = (out: DatabaseSync, table: string): number => Number((out.prepar
  * is missing, has another schema version, or the change is too large to apply row by row. Both read Postgres statement by
  * statement, with no transaction open (see refreshFromDb).
  */
-export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE): Promise<SnapshotStats> {
+export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE, hooks: RefreshHooks = {}): Promise<SnapshotStats> {
   mkdirSync(dirname(dest), { recursive: true });
   recoverJournal(dest);
   if (existsSync(dest) && hasVersion(dest)) {
-    const r = await refreshFromDb(db, dest, pageSize);
+    const r = await refreshFromDb(db, dest, pageSize, hooks);
     if (r) return r;
   }
   return rebuildFromDb(db, dest, pageSize);
 }
 
+/** Tests: `beforeRefetch` runs after a table's keys were compared, before its changed rows are read again. */
+type RefreshHooks = { beforeRefetch?: (table: PgTable["name"]) => Promise<void> };
+
 /** The incremental refresh; null when the change is large enough that a rebuild is cheaper. */
-async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<SnapshotStats | null> {
+async function refreshFromDb(db: Db, dest: string, pageSize: number, hooks: RefreshHooks): Promise<SnapshotStats | null> {
   const out = new DatabaseSync(dest, { timeout: 30_000 });
   try {
     const stored = storedMark(out);
@@ -354,12 +362,14 @@ async function refreshFromDb(db: Db, dest: string, pageSize: number): Promise<Sn
       out.exec(`CREATE TEMP TABLE new_${t.name} (${t.columns.join(", ")}, h)`);
       const fetch = out.prepare(`SELECT ${keys} FROM temp.chg_${t.name} WHERE refetch = 1`).all() as Record<string, string | number>[];
       const w = writer(out, t, "temp.new_");
+      await hooks.beforeRefetch?.(t.name);
+      // A changed row that is no longer public is not read again, so it is deleted like a row that is gone.
       for (let i = 0; i < fetch.length; i += kx.BATCH_ROWS) {
         const chunk = fetch.slice(i, i + kx.BATCH_ROWS);
         const where = t.key.length === 1
           ? kx.inList(db, sql.ref(t.key[0]!), chunk.map((r) => r[t.key[0]!]!))
           : kx.refIn(db, t.name, chunk.map((r) => [String(r.repo), Number(r.number)] as const));
-        w.add((await queryDb(db).all(anyK(db).selectFrom(t.name).select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]).where(where))) as Record<string, unknown>[]);
+        w.add((await queryDb(db).all(publicRows(t, anyK(db).selectFrom(t.name).select([...t.columns.map((c) => sql.ref(c).as(c)), t.hash().as("h")]).where(where)))) as Record<string, unknown>[]);
       }
       w.flush();
     }
@@ -552,13 +562,40 @@ function hasVersion(file: string): boolean {
 /** Starts the line by which `item-tools snapshot` reports a failed build. */
 export const SNAPSHOT_FAILED = "item snapshot failed: ";
 
-/** An error's message and those of its causes, on one line. */
+const redact = (text: string): string => text.replace(/postgres(ql)?:\/\/\S+/gi, "postgres://<redacted>");
+
+/** An error and its causes, at most five. */
+function chain(e: unknown): unknown[] {
+  const out: unknown[] = [];
+  for (let c = e; c !== undefined && c !== null && out.length < 5; c = (c as { cause?: unknown }).cause) out.push(c);
+  return out;
+}
+
+/** One error's message; a connection failure's AggregateError has none, so its code and first inner error's message. */
+function messageOf(e: unknown): string {
+  const x = e as { message?: unknown; code?: unknown; errors?: unknown[] } | null;
+  const message = typeof x?.message === "string" ? x.message.replace(/\s+/g, " ").trim() : "";
+  if (message) return message;
+  const inner = Array.isArray(x?.errors) && x.errors.length ? messageOf(x.errors[0]) : "";
+  return [typeof x?.code === "string" ? x.code : "", inner].filter(Boolean).join(": ") || String(e);
+}
+
+/** An error's message and those of its causes, on one line, with connection strings redacted. */
 export function errorLine(e: unknown): string {
-  const parts: string[] = [];
-  for (let c: unknown = e; c !== undefined && c !== null && parts.length < 5; c = (c as { cause?: unknown }).cause) {
-    parts.push(String((c as Error)?.message ?? c).replace(/\s+/g, " ").trim());
-  }
-  return parts.join("; cause: ");
+  return redact(chain(e).map(messageOf).join("; cause: "));
+}
+
+/**
+ * An error and its causes for a log: name, code, message and stack frames, without the error's other properties (an
+ * invalid URL error carries the URL it was given, which can be a connection string with its password).
+ */
+export function errorReport(e: unknown): string {
+  return redact(chain(e).map((c, i) => {
+    const x = c as { name?: unknown; code?: unknown; stack?: unknown } | null;
+    const head = `${i ? "cause: " : ""}${typeof x?.name === "string" ? x.name : "Error"}${typeof x?.code === "string" ? ` [${x.code}]` : ""}: ${messageOf(c)}`;
+    const frames = typeof x?.stack === "string" ? x.stack.split("\n").filter((l) => /^\s+at /.test(l)) : [];
+    return [head, ...frames].join("\n");
+  }).join("\n"));
 }
 
 /** Updates the snapshot after a run that changed what it copies; a failure is logged, never thrown into the run. */
