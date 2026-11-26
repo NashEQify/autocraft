@@ -4,7 +4,8 @@
 // The rules the spec fixes: a yes needs an open recommendation; `merge` puts a pull request nobody started into the merge queue
 // and approves the merge of a started item; a yes to a recommendation that ends in a merge records the approval; parts named by
 // words must match exactly one planned part; a weight alone needs a started item. While an implementation's question is open, its
-// options are the parts, and a reply that is only an option's number or words answers it.
+// options are the parts, and a reply that is only an option's number or words answers it. A fix whose words match no part is an
+// instruction the fix-up carries out, with the planned parts; a bare fix where the review lists no fix fixes its finding.
 import { describe } from "./parse.ts";
 import { heldWork, sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
 
@@ -49,6 +50,8 @@ export type Run = {
   goesOn: boolean;
   /** The implementation's question this answers, with the option picked, as the person. */
   pick: QuestionAnswer | null;
+  /** What the fix-up is to do beyond the parts: the person's words after fix, or the finding of a review that lists no fix (`review`). */
+  instruction: { text: string; review?: true } | null;
 };
 
 export type Ambiguity =
@@ -65,7 +68,9 @@ export type Ambiguity =
   /** An implement question's options: the answer leaves several to go with, or names more than one. */
   | { why: "pick-one"; parts: number[] }
   /** A yes to a recommendation that runs nothing by itself: `text` says what answers it. */
-  | { why: "needs-words"; text: string };
+  | { why: "needs-words"; text: string }
+  /** A bare fix where nothing is named to fix: no planned part, and the review wrote no finding. */
+  | { why: "nothing-to-fix" };
 
 export type Refusal =
   | { why: "implement-not-issue" }
@@ -95,7 +100,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, instruction: null, ...r },
 });
 
 /** The item stopped at defects of the pre-merge review: their plan parts (none where nobody asked for their fixes yet); null otherwise. */
@@ -173,6 +178,9 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   if (!live) {
     // The yes would go on with what was held, the start would drop it.
     if (state.held && parsed.yes && (entry || merge)) return ambiguous({ why: "conflict", words: ["yes", ...parts.map((p) => p.word)] });
+    // Words after fix on an item nobody started name no part: the fix-up starts with them.
+    const said = named.length === 1 && named[0]!.word === "fix" && typeof named[0]!.part === "string" && "text" in named[0]! && named[0].text && !entry ? named[0].text : null;
+    if (said !== null && state.kind === "pr") return run({ start: "fixup", instruction: { text: said }, approve: merge, merges: merge, weight, how: merge ? "approved" : "started" });
     if (named.length) return ambiguous({ why: "no-plan" });
     if (entry) return run({ start: ENTRY_OF[entry], approve: merge, merges: merge, weight, how: merge ? "approved" : "started" });
     if (merge) {
@@ -187,6 +195,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   // Parts named by number or by words, each matching exactly one part of the plan.
   const fix: number[] = [];
   const drop: number[] = [];
+  let instruction: Run["instruction"] = null;
   for (const p of named) {
     let ns: number[];
     if (typeof p.part === "number") {
@@ -200,6 +209,8 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
       ns = pool;
     } else {
       const hits = partsMatching(wf.plan, p.part);
+      // A fix's words that name no part are what the fix-up is to do.
+      if (hits.length === 0 && p.word === "fix" && "text" in p && p.text) { instruction = { text: p.text }; continue; }
       if (hits.length === 0) return ambiguous({ why: "part-matches-none", words: p.part });
       if (hits.length > 1) return ambiguous({ why: "part-matches-several", words: p.part, parts: hits.map((h) => h.n) });
       ns = [hits[0]!.n];
@@ -220,7 +231,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   // An implement question: its options are the parts. Naming one picks it; dropping options picks the recommended one when it is
   // left, else the one option left.
   const options = optionsOf(wf);
-  if (rec?.question && options.length && (fix.length || drop.length) && !entry) {
+  if (rec?.question && options.length && (fix.length || drop.length) && !entry && !instruction) {
     const left = options.filter((p) => p.state === "planned" && !drop.includes(p.n));
     if (fix.length > 1) return ambiguous({ why: "pick-one", parts: fix });
     const chosen = fix.length ? options.find((p) => p.n === fix[0]) : left.find((p) => p.option === rec.answer?.option) ?? (left.length === 1 ? left[0] : undefined);
@@ -228,7 +239,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     return pick(wf, chosen, { drop, merge, weight });
   }
   // Only drops, while a recommendation is open: the recommendation without those parts, as a yes would run it.
-  if (rec && drop.length && !fix.length && !entry) {
+  if (rec && drop.length && !fix.length && !entry && !instruction) {
     // A close drops nothing: dropping parts of it could mean "close anyway" or "don't close".
     if (rec.close) return ambiguous({ why: "conflict", words: ["close", ...named.map((p) => `drop ${p.part}`)] });
     if (merge && state.redCi) return refused({ why: "red-ci", approved });
@@ -251,12 +262,18 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   }
   if (!entry && !named.length) return run({ weight, how: "set" });
 
+  if (instruction && entry === "review") return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
   const planned = wf.plan.filter((p) => p.state === "planned" && !drop.includes(p.n)).map((p) => p.n);
-  const again = entry === "review" ? "review" : entry === "fix-up" || fix.length ? "fixup" : null;
+  const again = entry === "review" ? "review" : entry === "fix-up" || fix.length || instruction ? "fixup" : null;
   const fixes = again === "fixup" ? (fix.length ? fix : planned) : [];
+  // A bare fix of an open question that names nothing to fix: the review's finding is what to fix; without one, the person says what.
+  if (again === "fixup" && !fixes.length && !instruction && rec && rec.again !== "fixup") {
+    if (!rec.finding) return ambiguous({ why: "nothing-to-fix" });
+    instruction = { text: rec.finding, review: true };
+  }
   const approve = merge && !approved;
   return run({
-    again, fix: fixes, drop, approve, merges: merge || approved, weight, answers: !!rec,
+    again, fix: fixes, drop, approve, merges: merge || approved, weight, answers: !!rec, instruction,
     how: approve ? "approved" : rec ? "answered" : null,
   });
 }

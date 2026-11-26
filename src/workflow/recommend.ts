@@ -97,7 +97,7 @@ export function onConflict(rec: Recommendation, conflict: Conflict | null): Reco
  * review (unapprovedStop), which the sentence names.
  */
 export function afterSteps(review: ReviewView | null, plan: readonly PlanPart[], stop: keyof typeof STOPS | null = null, conflict: Conflict | null = null): Recommendation {
-  const rec = onConflict(recommended(review, plan), conflict);
+  const rec = onConflict(withFinding(recommended(review, plan), review?.finding ?? null), conflict);
   // Where the sentence is already about the conflict and who settles it, it is not said twice.
   const said = stop === "conflict" && !!conflict?.path && conflict.path !== "merge" && rec.merges;
   return stop && !rec.close && !said ? { ...rec, text: STOPS[stop](rec.text) } : rec;
@@ -121,6 +121,15 @@ function recommended(review: ReviewView | null, plan: readonly PlanPart[]): Reco
     return { text: textFor({ fix: [], merges: false, again: "review" }), parts: { fix: [], drop }, merges: false, again: "review" };
   }
   return { text: textFor({ fix, merges: true }), parts: { fix, drop }, merges: true };
+}
+
+/** Characters of a review's finding a bare fix hands the fix-up (the instructions take at most INSTRUCTIONS_MAX). */
+const FINDING_FIX_CHARS = 1200;
+
+/** The review's finding on a recommendation that fixes no part and closes nothing: a bare fix in answer fixes what it says. */
+function withFinding(rec: Recommendation, finding: string | null): Recommendation {
+  const text = finding?.trim();
+  return text && !rec.parts.fix.length && !rec.close ? { ...rec, finding: clipText(text, FINDING_FIX_CHARS) } : rec;
 }
 
 /** A question that takes the place of one the author pushed past. */
@@ -198,7 +207,7 @@ function holdOrClose(verdict: "hold" | "close", finding: string | null, drop: nu
     ? said ? t("The review says to hold it: {finding}", { finding: asSentence(said) }) : t("The review says to hold it and recommends nothing.")
     : said ? t("The review says to close it: {finding}", { finding: asSentence(said) }) : t("The review says to close it.");
   if (verdict === "close") return { text: `${found} ${textFor({ fix: [], merges: false, close: true })}`, parts: { fix: [], drop }, merges: false, close: true };
-  return { text: `${found} ${textFor({ fix: [], merges: false, again: "review" })}`, parts: { fix: [], drop }, merges: false, again: "review" };
+  return withFinding({ text: `${found} ${textFor({ fix: [], merges: false, again: "review" })}`, parts: { fix: [], drop }, merges: false, again: "review" }, finding);
 }
 
 const afterStop = (reason: string, go: (text: string) => Recommendation): Recommendation =>

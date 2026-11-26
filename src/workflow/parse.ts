@@ -6,6 +6,8 @@
 //   fix and merge                    fix alone is fix-up
 //   fix 1 and 2, drop 3, then merge  an answer naming plan parts by number
 //   drop export dialog               a part named by words from its title (resolve.ts matches them)
+//   fix the UV seam normals, then merge  fix with words that name no part: the fix-up carries them out (resolve.ts); they run
+//   fix: weld the normals and merge  up to a comma, full stop, `and` or `then` before the next command word or a weight
 //   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
 //   review photocraft#12 urgent      items written inline: repo#n, owner/repo#n, a GitHub link, or #n after one (or in an item's context)
 //   close as duplicate of #12        a close with its reason: completed, not planned, or duplicate of an item
@@ -17,7 +19,8 @@
 // applies anyway beside a merge ("once CI is green", "when ready"), exceptions to a yes ("yes except 3", "all but the export change"),
 // number words, ordinals and ranges for parts ("drop the second one", "fix 1 to 3", "fix both"), and a typo of one letter in a
 // command word of five letters or more. Negation, hedges and questions (not, don't, never, maybe, perhaps, unless, ?) leave a
-// message unread, except the hold phrases "not yet", "not now" and "don't merge yet". Quoted lines and code are not read.
+// message unread, except the hold phrases "not yet", "not now" and "don't merge yet"; inside a fix's words too. Quoted lines and
+// code are not read; inline code in a fix's words stays part of them.
 import { commentLines } from "../github/comment-lines.ts";
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { WEIGHT_MAX, WEIGHT_MIN, WEIGHT_WORDS, type CloseReason, type CommandPart, type ItemRef, type Parsed, type WeightWord } from "./types.ts";
@@ -58,7 +61,7 @@ function readClose(seg: string): CloseReason | null {
 /** The canonical text of parts and items, as an ambiguous reply quotes what was understood: `fix 1, merge, urgent: photocraft#12`. */
 export function describe(parts: readonly CommandPart[], items: readonly ItemRef[] = []): string {
   const words = parts.map((p) => {
-    if ("part" in p) return `${p.word} ${p.part}`;
+    if ("part" in p) return `${p.word} ${"text" in p && p.text ? p.text : p.part}`;
     if ("weight" in p) return weightWord(p.weight) ?? `weight ${p.weight}`;
     if (p.word === "close") return p.reason ? `close ${closeText(p.reason)}` : "close";
     return p.args ? `${p.word} ${p.args}` : p.word;
@@ -75,6 +78,9 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
   // Quoted lines and code blocks are someone else's words; inline code only names a part (readWords).
   const code: string[] = [];
   s = commentLines(s).filter(Boolean).join("\n").replace(/`([^`\n]+)`/g, (_m, c: string) => `${CODE}${code.push(c) - 1}${CODE}`);
+  // A fix's own words come out first, so no other reading (conditions, items, the list form) reaches into them.
+  const said = pullInstruction(s);
+  s = said.text;
   const normal = normalise(s);
   s = normal.text;
   // The list form: the command, a colon, then the items. A colon that starts `://` belongs to a URL.
@@ -93,7 +99,7 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     const read = readItems(list[2]!, inline.last ?? opts.repo);
     items = addItems(items, read.items);
     if (read.bad.length || !read.items.length) {
-      const r = readWords(marked.text, marked.marks, code);
+      const r = readWords(marked.text, marked.marks, code, said.instruction);
       return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: [...r.unknown, ...read.bad].join(" ") };
     }
   }
@@ -104,9 +110,9 @@ export function parse(text: string, opts: ParseOptions = {}): Parsed {
     if (yes) return { kind: "yes", ...(items.length ? { items } : {}), ...(yes.weight === null ? {} : { weight: yes.weight }) };
     if (saysHold(plain)) return { kind: "commands", items, parts: [{ word: "hold" }] };
   }
-  const r = readWords(marked.text, marked.marks, code);
+  const r = readWords(marked.text, marked.marks, code, said.instruction);
   const unmet = unmetConditions(normal.conditions, r.parts);
-  const guard = GUARD.exec(marked.text.replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
+  const guard = GUARD.exec(marked.text.replace(INSTRUCTION_RE, () => ` ${said.instruction} `).replace(MARK_RE, " ").replace(CODE_RE, " ").replace(/(?<![\w-])not[-\s]planned(?![\w-])/gi, " "))?.[0];
   const rest = [...r.unknown, ...unmet, ...(normal.refused ? [normal.refused] : []), ...(guard && !r.unknown.some((u) => u.toLowerCase().includes(guard.toLowerCase())) ? [guard] : [])];
   if (rest.length || r.conflict || !r.parts.length) return { kind: "ambiguous", understood: describe(r.parts, named(r, items)), rest: rest.join(", ") };
   return { kind: "commands", items, parts: r.parts, ...(r.yes ? { yes: true } : {}) };
@@ -326,6 +332,43 @@ function normalise(text: string): { text: string; conditions: Condition[]; /** A
   return { text: s, conditions, refused: null };
 }
 
+/** Stands for a fix's own words taken out of the text (pullInstruction). */
+const INSTRUCTION = "\u00030\u0003";
+const INSTRUCTION_RE = /\u0003\d+\u0003/g;
+/** Words that start the next command after a fix's words: every command word and alias, and the weights. */
+const NEXT_COMMAND = String.raw`(?:(?:please|pls|also)\s+)?(?=(?:${any([...COMMANDS.flatMap((c) => [c.word, ...c.aliases]), ...Object.keys(WEIGHT_WORDS), "weight"])})(?![\w-]))`;
+const LIST_ITEM = String.raw`(?:https?:\/\/\S+|(?:[\w.-]+\/)?[\w.-]*#\d+|\d+)`;
+/** Where a fix's words end: a comma, semicolon, new line or full stop, or `and` / `then`, before the next command; or the colon of a list of items. */
+const INSTRUCTION_END = new RegExp(String.raw`(?:\s*[,;\n]\s*|[.!]+\s+)(?:(?:and\s+then|then|and|&)\s+)?${NEXT_COMMAND}|\s+(?:and\s+then|then|and|&)\s+${NEXT_COMMAND}|\s*(?=:\s*${LIST_ITEM}(?:(?:[\s,;]+(?:and\s+|&\s*)?)${LIST_ITEM})*[\s.]*$)`, "i");
+/** Words after fix that mean every planned part, as fix alone does. */
+const EVERY_PART = /^(?:them|those|these|them all|all those|all these|the (?:findings|fixes|issues|problems)|the review(?:'s)? (?:findings|fixes)|what the review (?:found|lists|asks for))$/i;
+
+/** The words after a fix that name parts as the reader already reads them: numbers, positions, all or both, a weight, or nothing but filler. */
+function namesParts(words: string): boolean {
+  if (CODE_RE.test(words)) { CODE_RE.lastIndex = 0; return false; }
+  const bare = stripFiller(words).toLowerCase();
+  if (!bare || /^up(?![\w-])/.test(bare) || EVERY_PART.test(bare) || BOTH_PARTS.test(bare) || ALL_PARTS.test(bare) || POSITION.test(bare)) return true;
+  if (/^[#\d][#\d\s,&\-\u2013]*$/.test(bare) || partNumbers(bare)) return true;
+  return bare.split(/\s+/).every((w, i, all) => isWeightWord(w) || w === "weight" || (/^\d+$/.test(w) && all[i - 1] === "weight"));
+}
+
+/**
+ * The first fix whose words name something other than parts by number, position or all ("fix the UV seam normals, then merge",
+ * "fix: weld the normals"): its words up to where the next command starts come out of the text, and `fix` stays with a marker in their
+ * place. Whether the words name a part by its title only the plan tells (resolve.ts). "fix all but 2" stays for normalise.
+ */
+function pullInstruction(text: string): { text: string; instruction: string | null } {
+  if (EXCEPT_RE.test(text.trim())) return { text, instruction: null };
+  for (const m of text.matchAll(/(?<![\w-])fix(?![\w-])/gi)) {
+    const tail = text.slice(m.index + m[0].length);
+    const end = INSTRUCTION_END.exec(tail);
+    const words = (end ? tail.slice(0, end.index) : tail).replace(/^\s*:?\s*/, "").replace(/[\s,;.!]+$/, "").replace(/(?:[\s,]+(?:thanks|thank you|thx|please|pls))+[.!]*$/i, "").trim();
+    if (!words || namesParts(words)) continue;
+    return { text: `${text.slice(0, m.index)}fix ${INSTRUCTION}${end ? tail.slice(end.index) : ""}`, instruction: words };
+  }
+  return { text, instruction: null };
+}
+
 /** The list before the first `then` / `and then`, and what follows it (null without one). */
 function splitThen(list: string): [string, string | null] {
   const m = /(?:\s*[,;]\s*|\s+)(?:and\s+)?then\s+/i.exec(list);
@@ -404,7 +447,7 @@ function oneSwapOrSubstitution(a: string, b: string): boolean {
 const NAMED_RE = new RegExp(`^(${any(COMMANDS.filter((c) => c.answer).flatMap((c) => [c.word, ...c.aliases]))})\\s+(.+)$`, "i");
 
 /** Commands, separated by commas, semicolons, new lines, `and` or `then`. */
-function readWords(src: string, marks: readonly { tok: string }[] = [], code: readonly string[] = []): Read {
+function readWords(src: string, marks: readonly { tok: string }[] = [], code: readonly string[] = [], instruction: string | null = null): Read {
   const tainted = new Set<number>();
   const parts: CommandPart[] = [];
   const unknown: string[] = [];
@@ -447,6 +490,12 @@ function readWords(src: string, marks: readonly { tok: string }[] = [], code: re
       if (!/[\p{L}\p{N}]/u.test(bare.replace(CODE_RE, ""))) { if (bare.replace(CODE_RE, "").trim()) unknown.push(seg.replace(CODE_RE, " ").trim()); return; }
       seg = bare;
     }
+    // A fix's own words (pullInstruction): a part's title when they match one, else what the fix-up is to do (resolve.ts).
+    if (instruction !== null && /^fix \u0003\d+\u0003$/i.test(seg)) {
+      const withCode = (x: string, quote: string) => x.replace(CODE_RE, (_m, i: string) => `${quote}${code[Number(i)] ?? ""}${quote}`);
+      push({ word: "fix", part: withCode(stripFiller(instruction), " ").replace(/\s+/g, " ").trim(), text: withCode(instruction, "`") });
+      return;
+    }
     // Inline code counts only as words of a part's title.
     const named = NAMED_RE.exec(seg);
     seg = seg.replace(CODE_RE, " ").replace(/\s+/g, " ").trim();
@@ -456,6 +505,8 @@ function readWords(src: string, marks: readonly { tok: string }[] = [], code: re
       // "skip review" means a step, not a part.
       if (word === "drop" && !/^drop$/i.test(named[1]!) && /^(?:the\s+)?(?:review|fix-?up|ci|checks|tests|build|merge)$/i.test(arg)) { unknown.push(seg); return; }
       if (BOTH_PARTS.test(arg) || ALL_PARTS.test(arg)) { push({ word, part: BOTH_PARTS.test(arg) ? "both" : "all" }); return; }
+      // "fix them", "fix urgent": every planned part, as fix alone.
+      if (word === "fix" && (EVERY_PART.test(arg) || arg.split(/\s+/).every((w) => isWeightWord(w.toLowerCase())))) { takeWeights(arg.split(/\s+/)); push({ word: "fix-up" }); return; }
       const numbers = partNumbers(arg);
       // A position other than a number ("the last one") or a range too long to be parts would match titles by accident.
       if (!numbers && (POSITION.test(arg) || /^[#\d][#\d\s,&\-\u2013]*$/.test(arg))) { unknown.push(seg); return; }
@@ -504,7 +555,9 @@ function readWords(src: string, marks: readonly { tok: string }[] = [], code: re
   const conflict = distinct.length > 1;
   if (conflict) unknown.push(...weights.map((w) => w.text));
   else if (distinct.length) push({ word: "weight", weight: distinct[0]! });
-  return { parts, unknown, conflict, yes, tainted };
+  // Words that were not read quote a fix's own words as written.
+  const quoted = instruction === null ? unknown : unknown.map((u) => u.replace(INSTRUCTION_RE, () => instruction.replace(CODE_RE, (_m, i: string) => `\`${code[Number(i)] ?? ""}\``)));
+  return { parts, unknown: quoted, conflict, yes, tainted };
 }
 
 /** The part numbers when the tokens are numbers (with `part`, `finding` or `change` before them, and weight words), else null. */

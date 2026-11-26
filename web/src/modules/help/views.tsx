@@ -30,6 +30,7 @@ const WORKS: [string, () => string][] = [
   ["drop the second one", () => "drop 2"],
   ["merge once CI is green", () => t("merge; it only merges on green CI anyway")],
   ["close, it's a dupe of #12", () => "close as duplicate of #12"],
+  ["fix the UV seam normals, then merge", () => t("a fix-up that does what the words say, then the merge")],
 ];
 /** Phrasings that run nothing, with why. */
 const NOT_RUN: [string, () => string][] = [
@@ -200,7 +201,7 @@ function Commands() {
       </Part>
       <Part title={t("Combining")}>
         <p>
-          <Code>fix-up and merge</Code>, <Code>implement and merge</Code>, <Code>fix 1, drop 2, then merge</Code>.
+          <Code>fix-up and merge</Code>, <Code>implement and merge</Code>, <Code>fix 1, drop 2, then merge</Code>, <Code>fix the export normals, then merge</Code>.
         </p>
       </Part>
       <Part title={t("Writing normally")}>
@@ -279,7 +280,7 @@ function After() {
             <Code>yes</Code>, <Code>lgtm</Code>, <Code>go</Code>: {t("runs the recommendation. If it ends in a merge, the yes also approves the merge.")}
           </li>
           <li>
-            {t("Or say what you want instead:")} <Code>fix 1, drop 2, then merge</Code>, <Code>review</Code>, <Code>close</Code>, <Code>hold</Code>.
+            {t("Or say what you want instead:")} <Code>fix 1, drop 2, then merge</Code>, <Code>fix the export normals, then merge</Code>, <Code>review</Code>, <Code>close</Code>, <Code>hold</Code>.
           </li>
           <li>{t("Anything unclear runs nothing as written. AutoCraft reads it as the part below says.")}</li>
         </ul>

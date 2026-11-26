@@ -4,6 +4,7 @@
 import { t, tk } from "../i18n/index.ts";
 import type { Ambiguity, Refusal, Resolved, Run } from "./resolve.ts";
 import type { Blocker, Entry, ItemWorkflow, Recommendation } from "./types.ts";
+import { clipText } from "../prose.ts";
 import { asksNobody } from "./asked.ts";
 import { heldWork, openRecommendation, RULE_STARTER } from "./types.ts";
 import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
@@ -234,6 +235,18 @@ function byText(how: Run["how"], login: string, time: string): string {
   }
 }
 
+/** Characters of a fix's instruction the confirmation quotes. */
+const INSTRUCTION_SHOWN = 200;
+
+/** What a fix-up of a started item fixes: the person's words, the review's finding, the named parts. */
+function fixingText(r: Run): string {
+  const parts = r.fix.length ? listText(r.fix) : null;
+  if (!r.instruction) return parts ? t("fixing {parts}", { parts }) : t("fixing what the review found");
+  const instruction = clipText(r.instruction.text, INSTRUCTION_SHOWN);
+  if (r.instruction.review) return t("fixing what the review found: “{finding}”", { finding: instruction });
+  return parts ? t("fixing “{instruction}” and {parts}", { instruction, parts }) : t("fixing “{instruction}”", { instruction });
+}
+
 /**
  * The one-line confirmation of an accepted command, the same on every surface:
  * "Fixing 1 and 2, then merging when CI is green (approved by mira, 09:31 UTC). Reply hold to halt."
@@ -258,10 +271,11 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   const did: string[] = [];
   if (r.drop.length) did.push(t("dropping {parts}", { parts: listText(r.drop) }));
   if (r.start === "review") did.push(t("reviewing"));
+  else if (r.start === "fixup" && r.instruction && !waits) did.push(t("fixing “{instruction}”", { instruction: clipText(r.instruction.text, INSTRUCTION_SHOWN) }), t("reviewing the fix"));
   else if (r.start === "fixup") did.push(waits ? t("reviewing") : t("reviewing, fixing what the review finds, reviewing again"));
   else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
-  else if (r.again === "fixup" && !waits) did.push(r.fix.length ? t("fixing {parts}", { parts: listText(r.fix) }) : t("fixing what the review found"));
+  else if (r.again === "fixup" && !waits) did.push(fixingText(r));
   if (r.resume) did.push(t("going on where it was held"));
   else if (r.goesOn && !r.merges) did.push(t("going on"));
   if (r.pick) did.push(r.pick.label ? t("going on with “{option}”", { option: r.pick.label }) : t("going on with the implementation"));
@@ -340,6 +354,7 @@ function ambiguityText(understood: string, a: Ambiguity, mention?: string, propo
       ? t("Name one of {parts} to go with. Nothing runs until you do.", { parts: listText(a.parts) })
       : t("Every option is dropped. Nothing runs: name one to go with, or answer in a comment on the issue.");
     case "needs-words": return t("A yes can't answer this. {text} Nothing runs until then.", { text: a.text });
+    case "nothing-to-fix": return t("The review names nothing to fix. Nothing runs until you say what to fix, as in “fix the export normals, then merge”.");
     case "merge-skips-fixes": if (a.verdict) return earlierReview(a.parts, a.verdict) + " " + t("“merge” does not pass over that. Nothing runs: reply yes for the recommendation.");
       return t("“merge” could mean merging without fixing {parts}, or the recommendation. Nothing runs: reply yes for the recommendation, or “drop {parts}, merge” to merge without them.", { parts: listText(a.parts) });
   }

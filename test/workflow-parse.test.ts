@@ -128,6 +128,40 @@ describe("workflow commands", () => {
     assert.ok(fix.kind === "run" && fix.run.fix.join() === "1,3" && fix.run.drop.join() === "2" && fix.run.approve);
   });
 
+  test("fix with words that name no part is the fix-up's instruction; part words stay parts; a bare fix fixes the review's finding", () => {
+    const rec: Recommendation = { text: "The review says to hold it.", parts: { fix: [], drop: [] }, merges: false, again: "review" };
+    const held = started({ state: "blocked", blocker: "major-finding", approvedBy: "mira", plan: [part(1, "Export dialog title typo")], rec });
+    // What the person wrote after fix, up to where the next command starts, is the instruction; the merge and weight beside it stay commands.
+    for (const [text, said] of [
+      ["fix the UV seam normals, then merge", "the UV seam normals"],
+      ["fix: use the importer's welded normals for exports and merge", "use the importer's welded normals for exports"],
+      ["please fix the normals from `Mesh::compute_normals` and the tangents, urgent", "the normals from `Mesh::compute_normals` and the tangents"],
+      ["fix the crash from #12", "the crash from #12"],
+    ] as const) {
+      const r = run(text, pr(held));
+      assert.ok(r.kind === "run" && r.run.again === "fixup" && r.run.instruction?.text === said && !r.run.instruction.review, `${text}: ${JSON.stringify(r)}`);
+      assert.ok(r.run.merges, "the approval carries on");
+      assert.ok(r.run.fix.includes(1), "with the parts the plan still has");
+    }
+    assert.deepEqual((parse("fix the crash from #12", { repo: "photocraft" }) as { items: unknown[] }).items, [], "an item inside the words is no target");
+    // Words that match a part, part numbers and bare fixes are what they were.
+    const typo = run("fix the title typo", pr(held));
+    assert.ok(typo.kind === "run" && typo.run.instruction === null && typo.run.fix.join() === "1");
+    for (const text of ["fix 1 and 2, drop 3, then merge", "fix the second one and merge", "fix all but 2", "fix it and merge", "fix them"]) {
+      const p = parse(text);
+      assert.ok(p.kind === "commands" && p.parts.every((x) => !("text" in x) || !x.text), text);
+    }
+    // Negations, hedges and questions inside the words leave the message unread.
+    for (const text of ["fix the normals so they don't split", "maybe fix the normals", "fix the normals?", "fix the normals unless it is slow"]) assert.equal(parse(text).kind, "ambiguous", text);
+    // A bare fix where the review lists no fix: its finding is the instruction, and without one nothing runs.
+    const finding = started({ ...held, plan: [], rec: { ...rec, finding: "Exports recompute normals without welding vertices split at UV seams." } });
+    const bare = run("fix it", pr(finding));
+    assert.ok(bare.kind === "run" && bare.run.instruction?.review && /UV seams/.test(bare.run.instruction.text));
+    const none = run("fix", pr(started({ ...held, plan: [] })));
+    assert.ok(none.kind === "ambiguous" && none.ambiguity.why === "nothing-to-fix");
+    assert.match(replyLine(none), /nothing to fix/);
+  });
+
   test("merge is the merge queue on an unstarted pull request and approval on a started item", () => {
     const fresh = run("merge", pr());
     assert.ok(fresh.kind === "run" && fresh.run.start === "merge" && fresh.run.approve);
