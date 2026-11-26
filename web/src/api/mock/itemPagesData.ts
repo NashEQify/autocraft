@@ -19,6 +19,9 @@ const HEADER_1484: Partial<ItemPageHeader> = {
 
 type Seed = { repo: string; number: number; kind: "pr" | "issue"; state: "open" | "closed" | "merged"; title: string; author: string; status: ItemStatus; updated: number };
 const seeds: Seed[] = [
+  { repo: "photocraft", number: 812, kind: "pr", state: "merged", title: "Crop handles snap past the canvas edge", author: "larkspur-dev", updated: 211, status: status("Merged", 219, null, null) },
+  { repo: "designcraft", number: 455, kind: "pr", state: "open", title: "Snap guides ignore hidden layers", author: "sable-ui", updated: 26, status: status("Waiting for a person", 26, "an answer to the recommendation", "what the answer says") },
+  { repo: "deckcraft", number: 77, kind: "issue", state: "open", title: "Export speaker notes", author: "brushstroke42", updated: 6, status: status("Fixing", 96, "the workspace test run", "open a PR, review it, then ask before merging") },
   { repo: "designcraft", number: 1484, kind: "pr", state: "open", title: "Add Hungarian spellchecking and nonstandard hyphenation", author: "rhea-m", updated: 20, status: status("Waiting for a person", 5 * H, "an answer to the recommendation", "what the answer says") },
   { repo: "photocraft", number: 9981, kind: "pr", state: "open", title: "Fix crop handles on rotated layers", author: "dana-k", updated: 38, status: status("In queue", 46, "CI on a1b2c3d", "merge in batch #41") },
   { repo: "wordcraft", number: 2231, kind: "pr", state: "open", title: "Keep the hyperlink run when exporting the last paragraph", author: "linnea-w", updated: 3, status: status("Fixing", 6, "fix-up round 2", "review of the new head, then merge") },
@@ -286,6 +289,60 @@ const GITHUB_2214: GithubSide = {
   checks: [], commits: [], files: [],
 };
 
+// ---- The chat mock's items (chatMock.ts tells the same story) ----
+const BOT = "AutoCraft Bot";
+const GITHUB_812: GithubSide = {
+  syncedAt: at(1),
+  description: "The crop handles can be dragged past the canvas edge and then snap back on release. This clamps them while dragging.\n\nFixes #790.",
+  url: "https://github.com/storytold/photocraft/pull/812",
+  events: [
+    gh("g1", "opened", 26 * H, "larkspur-dev", "The crop handles can be dragged past the canvas edge. This clamps them while dragging."),
+    gh("g2", "review", 295, "autocraft", "**Review of 4e1a2b7: take with two fixes.**\n\n1. Handles still snap past the edge below 100 % zoom (`crates/crop/src/handles.rs:142`).\n2. No test covers the clamped position.", { as: BOT, historyId: "h1" }),
+    gh("g3", "comment", 270, "kiri-n", "Nice catch on the zoom case, I hit that last week."),
+    gh("g4", "comment", 262, "larkspur-dev", "Thanks! Happy for the fixes to go in on my branch."),
+    gh("g5", "comment", 241, "ochre-fox", "@autocraft yes"),
+    gh("g6", "push", 239, "autocraft", "Pushed 1 commit: clamp in canvas units, test the clamped position (9c0d3e1)", { as: BOT, historyId: "h2" }),
+    gh("g7", "push", 231, "autocraft", "Pushed 1 commit: fix clippy::manual_clamp (a7f2c10)", { as: BOT, historyId: "h3" }),
+    gh("g8", "merged", 219, "autocraft", "Merged into main (approved by ochre-fox)", { as: "ochre-fox via the App", historyId: "h4" }),
+  ],
+  checks: [{ name: "build", state: "passing" }, { name: "test", state: "passing" }, { name: "clippy", state: "passing" }, { name: "fmt", state: "passing" }, { name: "wasm", state: "passing" }],
+  commits: [
+    { sha: "4e1a2b7", message: "Clamp crop handles to the canvas while dragging", author: "larkspur-dev", at: at(26 * H), byAutoCraft: false },
+    { sha: "9c0d3e1", message: "Clamp in canvas units; test the clamped position", author: "autocraft", at: at(239), byAutoCraft: true },
+    { sha: "a7f2c10", message: "Fix clippy::manual_clamp", author: "autocraft", at: at(231), byAutoCraft: true },
+  ],
+  files: [{ path: "crates/crop/src/handles.rs", additions: 31, deletions: 9 }, { path: "crates/crop/tests/handles.rs", additions: 44, deletions: 0 }],
+};
+const GITHUB_455: GithubSide = {
+  syncedAt: at(1),
+  description: "Hidden layers were still offered as snap targets. This filters them out and renames `SnapSource` to `SnapTarget` (#430).",
+  url: "https://github.com/storytold/designcraft/pull/455",
+  events: [
+    gh("g1", "opened", 2 * D, "sable-ui", "Hidden layers were still offered as snap targets. This filters them out and renames SnapSource to SnapTarget (#430)."),
+    gh("g2", "comment", 185, "kiri-n", "@autocraft review this, and check that locked layers still snap."),
+    gh("g3", "review", 176, "autocraft", "**Review of 2c9e4f1: take with one fix.** Locked layers still snap. Hidden layers inside a hidden group are still offered as snap targets (`crates/snap/src/targets.rs:57`).", { as: BOT, historyId: "h1" }),
+    gh("g4", "comment", 120, "sable-ui", "The SnapSource → SnapTarget rename was asked for in #430, that's why it's in here."),
+    gh("g5", "comment", 26, "kiri-n", "@autocraft merge after the 2.4 release"),
+    gh("g6", "comment", 26, "autocraft", "I understood **merge**, but not “after the 2.4 release”: I can't wait for a release. Nothing runs until the instruction is clear.", { as: BOT, historyId: "h2" }),
+  ],
+  checks: [{ name: "build (linux)", state: "passing" }, { name: "build (macos)", state: "passing" }, { name: "test", state: "passing" }, { name: "clippy", state: "passing" }, { name: "fmt", state: "passing" }, { name: "wasm", state: "passing" }],
+  commits: [{ sha: "2c9e4f1", message: "Skip hidden layers as snap targets; rename SnapSource", author: "sable-ui", at: at(2 * D), byAutoCraft: false }],
+  files: [{ path: "crates/snap/src/targets.rs", additions: 22, deletions: 6 }, { path: "crates/snap/tests/targets.rs", additions: 30, deletions: 0 }, { path: "crates/snap/src/lib.rs and 12 more (rename)", additions: 61, deletions: 61 }],
+};
+const GITHUB_77: GithubSide = {
+  syncedAt: at(1),
+  description: "Speaker notes are lost on export. PDF export should be able to include them, and PPTX export should keep them.",
+  url: "https://github.com/storytold/deckcraft/issues/77",
+  events: [
+    gh("g1", "opened", 3 * D, "brushstroke42", "Speaker notes are lost on export."),
+    gh("g2", "comment", 2 * D, "quietgrid", "Would love this for conference talks."),
+    gh("g3", "label", 95, "autocraft", "assigned autocraft and added label enhancement", { as: BOT, historyId: "h1" }),
+    gh("g4", "comment", 74, "brushstroke42", "Notes should use the slide's font if possible."),
+  ],
+  checks: [], commits: [], files: [],
+};
+const chatHistory = (outcome: string): HistoryEntry[] => [hist("h1", 300, "Conversation", outcome, null, null, "event")];
+
 // ---- photocraft#9970: merged ----
 const HISTORY_9970: HistoryEntry[] = [
   hist("h1", 2 * D, "Review", "Take", "Opus", 0.9, "model"),
@@ -334,6 +391,9 @@ const SCREENSHOTS_9981: ScreenshotRun = {
 };
 
 const FULL: Record<string, Omit<MockPage, "repo" | "number" | "kind" | "state" | "title" | "author" | "status" | "costUsd" | "stamp" | "header" | "bar"> & { header?: Partial<ItemPageHeader> }> = {
+  "photocraft#812": { reviews: { latest: null, earlier: [] }, results: [], history: chatHistory("merged"), github: GITHUB_812 },
+  "designcraft#455": { reviews: { latest: null, earlier: [] }, results: [], history: chatHistory("waiting for an answer"), github: GITHUB_455 },
+  "deckcraft#77": { reviews: { latest: null, earlier: [] }, results: [], history: chatHistory("implementing"), github: GITHUB_77 },
   "designcraft#1484": { prBuild: { headSha: "9f3a1c2", current: true, state: "failed", summary: "test failed with exit code 101", disagree: true, ci: "success", createdAt: at(80), finishedAt: at(35) }, header: HEADER_1484, reviews: REVIEWS_1484, results: RESULTS_1484, history: HISTORY_1484, github: GITHUB_1484 },
   "photocraft#9981": { prBuild: { headSha: "b51e7d0", current: true, state: "running", summary: null, disagree: false, ci: "pending", createdAt: at(12), finishedAt: null }, reviews: REVIEWS_9981, results: RESULTS_9981, history: HISTORY_9981, github: GITHUB_9981, screenshots: [SCREENSHOTS_9981] },
   "wordcraft#2214": {

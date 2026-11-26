@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
 import { SidebarSimpleIcon, XIcon } from "@phosphor-icons/react";
 import { Tabs } from "../molecules/Tabs";
@@ -17,7 +17,7 @@ export interface DockView<V extends string = string> {
 }
 
 /** The selected view and whether the panel is open, remembered per viewer. */
-export function useDockState<V extends string>(login: string, id: string, views: DockView<V>[]) {
+export function useDockState<V extends string>(login: string, id: string, views: Pick<DockView<V>, "value">[]) {
   const [saved, setView] = usePref<V>(login, `dock:${id}:view`, views[0]!.value);
   const [open, setOpen] = usePref<boolean>(login, `dock:${id}:open`, true);
   const view = views.some((v) => v.value === saved) ? saved : views[0]!.value;
@@ -36,6 +36,7 @@ interface DockProps<V extends string> {
   views: DockView<V>[];
   view: V;
   onView: (v: V) => void;
+  /** Wide: the panel shows. Phones: a view's tab is selected instead of the main column. */
   open: boolean;
   onOpen: (open: boolean) => void;
 }
@@ -57,8 +58,8 @@ export function SideDock<V extends string>(p: DockProps<V>) {
 }
 
 /** Phones: Chat · GitHub · Events as tabs. The main column stays mounted while another tab shows, so a draft in it survives. */
-function PhoneTabs<V extends string>({ id, main, mainLabel, views, view, onView }: DockProps<V>) {
-  const [showMain, setShowMain] = useState(true);
+function PhoneTabs<V extends string>({ id, main, mainLabel, views, view, onView, open, onOpen }: DockProps<V>) {
+  const showMain = !open;
   const options = [{ value: "main" as const, label: mainLabel }, ...views.map((v) => ({ value: v.value as V | "main", label: v.label, count: v.count }))];
   const value = showMain ? "main" : view;
   const current = views.find((v) => v.value === view);
@@ -70,10 +71,10 @@ function PhoneTabs<V extends string>({ id, main, mainLabel, views, view, onView 
         value={value}
         options={options}
         onChange={(v) => {
-          if (v === "main") setShowMain(true);
+          if (v === "main") onOpen(false);
           else {
-            setShowMain(false);
             onView(v);
+            onOpen(true);
           }
         }}
         className="shrink-0 bg-panel px-2 [&>button]:flex-1 [&>button]:justify-center"

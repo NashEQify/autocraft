@@ -1,6 +1,7 @@
 // The expanded body of a trace row. Each kind loads what it shows when the row opens.
 import { Link } from "react-router-dom";
 import { useQuery } from "../../api/client";
+import { t } from "../../../../src/i18n/index.ts";
 import type { Item, TraceEvent } from "../../api/types";
 import { ErrorLine } from "../../ui/atoms/ErrorLine";
 import { Facts } from "../../ui/molecules/Facts";
@@ -54,13 +55,16 @@ export type EventItem = Pick<Item, "repo" | "number" | "kind"> & { comments?: It
 
 export function TraceEventBody({ event: e, item }: { event: TraceEvent; item: EventItem }) {
   const { repo, number } = item;
-  const needsDetail = !(e.kind === "model-call" && e.ref.runId !== undefined) && e.kind !== "github";
+  const needsDetail = !(e.kind === "model-call" && e.ref.runId !== undefined) && e.kind !== "github" && e.kind !== "discord";
   const detail = useQuery(`item-trace-detail:${repo}#${number}:${e.id}`, (a) => a.itemTraceDetail(repo, number, e.id), { enabled: needsDetail });
   const run = useQuery(`item-trace-run:${e.ref.runId}`, (a) => a.agents.get(e.ref.runId!), { enabled: e.kind === "model-call" && e.ref.runId !== undefined, pollMs: (d) => (d && !d.endedAt ? 3000 : false) });
   const task = useQuery(`item-trace-task:${e.ref.taskId}`, (a) => a.tasks.get(e.ref.taskId!), { enabled: e.ref.taskId !== undefined && e.kind !== "model-call" });
 
   if (e.kind === "model-call" && e.call && e.ref.runId !== undefined)
     return <ModelCallDetail call={e.call} runId={e.ref.runId} run={run.data} error={run.error?.message} />;
+
+  if (e.kind === "discord")
+    return e.ref.url ? <TextLink href={e.ref.url} className="text-sm">{t("Open in Discord")}</TextLink> : null;
 
   if (e.kind === "github") {
     const c = e.ref.commentId ? item.comments?.find((x) => x.id === e.ref.commentId) : undefined;

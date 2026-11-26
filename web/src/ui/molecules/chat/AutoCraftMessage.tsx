@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { t } from "../../../../../src/i18n/index.ts";
-import type { ChatEntry } from "../../../api/chat-types";
+import type { ChatEntry } from "../../../api/types";
 import { Logo } from "../../atoms/Logo";
 import { MessageTime } from "../../atoms/MessageTime";
 import { Markdown } from "../Markdown";

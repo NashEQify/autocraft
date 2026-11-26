@@ -208,6 +208,8 @@ export interface Api {
   /** The item's conversations with AutoCraft: what people said, AutoCraft's replies and work, GitHub and Discord activity folded into lines. `since` as for `itemTrace`. */
   itemChat: {
     get(repo: RepoName, number: number, since?: string): Promise<ItemChat | ItemChatUnchanged>;
+    /** Posts the reader's message to one conversation; `lines` is what AutoCraft understood or why nothing ran. */
+    send(repo: RepoName, number: number, conversation: string, text: string): Promise<{ chat: ItemChat; lines: string[] }>;
   };
   /** The item in brief, for the hover card on its number. */
   itemPeek(repo: RepoName, number: number): Promise<ItemPeek>;

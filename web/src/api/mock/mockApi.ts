@@ -5,6 +5,7 @@ import { createAdminMock } from "./adminMock";
 import { createMcpMock } from "./mcpMock";
 import { createAgentsMock } from "./agentsMock";
 import { createTraceMock } from "./traceMock";
+import { createChatMock } from "./chatMock";
 import { createHealthMock } from "./healthMock";
 import { createMaintainMock } from "./maintainMock";
 import { createMaintainItemMock } from "./maintainItemMock";
@@ -246,7 +247,7 @@ export function createMockApi(): Api {
     ...createQueueMock(me, changed),
     ...createMaintainMock(me),
     ...createMaintainItemMock(me, changed),
-    itemChat: { get: (repo, number) => wait({ repo, number, stamp: "mock", status: "Not started", state: "idle" as const, next: null, conversations: [] }, 60) },
+    ...createChatMock(me, changed),
     prompts: () => wait(promptsReport(null), 60),
     next: () => wait(nextPageFixture(), 60),
     mention: () => wait({ mention: "autocraft" }, 20),

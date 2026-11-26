@@ -1,10 +1,10 @@
 // One conversation between the maintainers and AutoCraft, oldest first: people's messages as bubbles on the right, AutoCraft's
 // replies in the main flow with its work as compact rows that open to their detail, GitHub and Discord activity as single lines.
 // The view follows new entries only while the reader is at the bottom; otherwise it offers "New messages".
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowDownIcon } from "@phosphor-icons/react";
 import { t } from "../../../../../../src/i18n/index.ts";
-import type { ChatEntry, ItemConversation as Conversation } from "../../../../api/chat-types";
+import type { ChatEntry, ItemConversation as Conversation } from "../../../../api/types";
 import { AutoCraftMessage, AutoCraftTurn } from "../../../../ui/molecules/chat/AutoCraftMessage";
 import { ChatBubble } from "../../../../ui/molecules/chat/ChatBubble";
 import { ChatComposer } from "../../../../ui/molecules/chat/ChatComposer";
@@ -47,9 +47,11 @@ interface Props {
   onGithub: () => void;
   /** Why the reader cannot reply, shown in the disabled box; used when `c.canReply` is false. */
   blockedReason?: string;
+  /** Rows with their own controls (holds, paused steps), right above the composer. */
+  notice?: ReactNode;
 }
 
-export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason }: Props) {
+export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, notice }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const listEl = useRef<HTMLOListElement>(null);
   const atBottom = useRef(true);
@@ -153,6 +155,7 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason }
       <div aria-live="polite" className="sr-only">
         {announce}
       </div>
+      {notice}
       <ChatComposer open={!!c.open} blocked={c.canReply ? null : (blockedReason ?? t("You can reply when you have write access to this repository"))} onSend={send} />
     </div>
   );

@@ -1,6 +1,6 @@
 import { GithubLogoIcon } from "@phosphor-icons/react";
 import { t } from "../../../../../src/i18n/index.ts";
-import type { ChatEntry } from "../../../api/chat-types";
+import type { ChatEntry } from "../../../api/types";
 import { MessageTime } from "../../atoms/MessageTime";
 
 type Github = Extract<ChatEntry, { t: "github" }>;

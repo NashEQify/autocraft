@@ -1,6 +1,6 @@
 import { CircleNotchIcon, DiscordLogoIcon, GithubLogoIcon, MonitorIcon, RobotIcon, TerminalWindowIcon } from "@phosphor-icons/react";
 import { t } from "../../../../../src/i18n/index.ts";
-import type { ChatEntry, ChatVia } from "../../../api/chat-types";
+import type { ChatEntry, ChatVia } from "../../../api/types";
 import { Avatar } from "../../atoms/Avatar";
 import { MessageTime } from "../../atoms/MessageTime";
 import { safeHref } from "../../safeHref";

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { DiscordLogoIcon } from "@phosphor-icons/react";
 import { t } from "../../../../../src/i18n/index.ts";
-import type { ChatEntry } from "../../../api/chat-types";
+import type { ChatEntry } from "../../../api/types";
 import { MessageTime } from "../../atoms/MessageTime";
 import { safeHref } from "../../safeHref";
 

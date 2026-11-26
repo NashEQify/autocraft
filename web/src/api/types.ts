@@ -2666,6 +2666,8 @@ export type ChatVia = "dashboard" | "github" | "discord" | "agent" | "cli";
 export interface ChatFinding { n: number; title: string; file: string | null; major: boolean }
 /** One Discord mention of the item: the link opens the message in Discord; `channel` is null for a channel the bot cannot name. */
 export interface ChatDiscordLink { url: string; at: string; channel: string | null }
+/** One picture of a screenshot run: a build task's artifact, served at /api/tasks/:taskId/artifacts/:name. */
+export interface ChatShot { label: string; taskId: number; name: string }
 /**
  * One entry of an item conversation, oldest first. `work` is something AutoCraft did; `github` stands for GitHub activity not addressed
  * to AutoCraft between two other entries (`count` events in all; `lines` and `eventIds` keep the last 5); `discord` for mentions of the
@@ -2674,7 +2676,7 @@ export interface ChatDiscordLink { url: string; at: string; channel: string | nu
 export type ChatEntry =
   | { t: "said"; id: string; at: string; login: string; via: ChatVia; body: string; url: string | null; /** Waiting for Opus's answer. */ pending?: boolean; /** Why the message got no answer. */ refusal?: string | null }
   | { t: "reply"; id: string; at: string; body: string; findings: ChatFinding[]; ask: { to: string[]; question: string } | null }
-  | { t: "work"; id: string; at: string; state: "done" | "running" | "failed"; title: string; model: string | null; seconds: number | null; costUsd: number | null; outcome: string | null; detail: [string, string][]; eventId: string | null }
+  | { t: "work"; id: string; at: string; state: "done" | "running" | "failed"; title: string; model: string | null; seconds: number | null; costUsd: number | null; outcome: string | null; detail: [string, string][]; eventId: string | null; /** A screenshot run's pictures, base then head per screen. */ shots?: ChatShot[] }
   | { t: "github"; id: string; at: string; lines: string[]; count?: number; eventIds?: string[] }
   | { t: "discord"; id: string; at: string; links: ChatDiscordLink[] };
 export interface ItemConversation {
