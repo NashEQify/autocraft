@@ -1802,6 +1802,44 @@ CREATE INDEX IF NOT EXISTS decision_choices_item ON decision_choices(repo, numbe
 CREATE INDEX IF NOT EXISTS decision_choices_decision ON decision_choices(decision_id, state);
 CREATE INDEX IF NOT EXISTS conversation_cards_turn ON conversation_cards(turn_id);
 CREATE INDEX IF NOT EXISTS conversation_cards_item ON conversation_cards(repo, number);
+-- The chat of an item (src/data/chat). A conversation refers to an item (repo, number), or to none (both null). An item has one main
+-- conversation (is_main = 1). title: the entry of the workflow the item had when the conversation started ("Review", ...), or "Conversation".
+CREATE TABLE IF NOT EXISTS chat_conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT,
+  number INTEGER,
+  is_main INTEGER NOT NULL DEFAULT 0,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL            -- the login whose message or workflow started it, or 'autocraft'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chat_conversations_main ON chat_conversations(repo, number) WHERE is_main = 1;
+CREATE INDEX IF NOT EXISTS chat_conversations_item ON chat_conversations(repo, number, id);
+-- What people wrote in a conversation, on any surface, as written; and AutoCraft's recommendations and end lines.
+-- kind: said | recommended | finished. via: dashboard | github | discord | agent | cli | autocraft. payload: JSON, by kind
+-- (said: {url?, reconstructed?}; recommended: {workflowId, rec, parts, asked}; finished: {workflowId, state, merged, base}).
+-- workflow_event_id: the workflow_events row a said message produced; turn_id: the conversation_turns row of a question to Opus;
+-- workflow_id: the workflow a recommendation or end line is about; github_comment_id: GitHub's numeric id of the comment a said message copies.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  author TEXT NOT NULL,               -- a login, or 'autocraft'
+  via TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  body TEXT NOT NULL,
+  payload TEXT,
+  workflow_event_id INTEGER,
+  turn_id INTEGER,
+  workflow_id INTEGER,
+  github_comment_id INTEGER,
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_conversation ON chat_messages(conversation_id, id);
+CREATE INDEX IF NOT EXISTS chat_messages_author ON chat_messages(author, at);
+CREATE INDEX IF NOT EXISTS chat_messages_event ON chat_messages(workflow_event_id) WHERE workflow_event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS chat_messages_turn ON chat_messages(turn_id) WHERE turn_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS chat_messages_workflow ON chat_messages(workflow_id, kind) WHERE workflow_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_comment ON chat_messages(github_comment_id) WHERE github_comment_id IS NOT NULL;
 
 -- A repo's area list, one row per saved version; the current version is the highest.
 CREATE TABLE IF NOT EXISTS area_lists (

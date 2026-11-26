@@ -22,6 +22,7 @@ import { splitStageTripsSqlite } from "./db/trip-split.ts";
 import { retireFixAttemptsSqlite } from "./db/fix-retire.ts";
 import { featuresRepoOnlySqlite } from "./db/feature-repo-only.ts";
 import { holdsToItemsSqlite } from "./db/holds-to-items.ts";
+import { chatBackfillSqlite } from "./db/chat-backfill.ts";
 import { ACTIVE_LEG_INDEX, ACTIVE_LEG_STATES, builtAfterCopy, copyStateSqlite, oneActiveLegSqlite } from "./db/state-copy.ts";
 
 export const DEFAULT_DB = join(homedir(), ".local/share/autocraft/mirror.db");
@@ -361,6 +362,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["held_followups", "approved_at", "TEXT"],
   // How a person's close ends the item: completed | not-planned | duplicate <repo>#<n>; null: no reason given (src/act/index.ts).
   ["workflow_actions", "close_as", "TEXT"],
+  // The chat conversation a turn belongs to: its item's main conversation (src/data/chat).
+  ["conversation_turns", "conversation_id", "INTEGER"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
@@ -475,7 +478,7 @@ export const HISTORY_COPY_SQL = `INSERT INTO main.opus_review_history (repo, num
   WHERE NOT EXISTS (SELECT 1 FROM main.opus_review_history h WHERE h.repo = o.repo AND h.number = o.number AND h.head_oid = o.head_oid AND h.at = o.at)`;
 
 // Bump when migrateValues() or backfill() change what they do.
-const MIGRATION_VERSION = 22;
+const MIGRATION_VERSION = 23;
 
 // Rows written before their column existed.
 function backfill(db: DatabaseSync): void {
@@ -519,6 +522,7 @@ function backfill(db: DatabaseSync): void {
   retireFixAttemptsSqlite(db);
   featuresRepoOnlySqlite(db);
   holdsToItemsSqlite(db);
+  chatBackfillSqlite(db);
   // Reviews made before snapshots existed count as having read everything up to now: no wave of re-reviews.
   const now = new Date().toISOString();
   db.prepare("UPDATE main.opus_reviews SET seen_at = ? WHERE seen_at IS NULL").run(now);
