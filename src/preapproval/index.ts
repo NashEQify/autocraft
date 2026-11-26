@@ -47,7 +47,8 @@ import { getBatch, loadBatchByBranch, loadBatchMembership, loadMergeFacts, type 
 import { loadOperatorFixResults } from "../data/changes/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { loadMergeEntryReviews, loadReviewsAt, type ReviewFinding } from "../data/review/index.ts";
-import { verdictKept } from "../workflow/work.ts";
+import { verdictToAct } from "../core/review-blocking.ts";
+import type { Blocking } from "../premerge/types.ts";
 import { isRunning } from "../data/jobs/index.ts";
 import { permKey, standings, type Standing } from "../data/access/index.ts";
 import { githubIdentity } from "../github/identity.ts";
@@ -292,7 +293,7 @@ type PassFacts = {
   actors: Map<number, string[]>;
   /** The reviewed heads of merge entries. */
   mergeEntryReviews: Map<string, HeadReview[]>;
-  reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string; fixes: ReviewFinding[] }>;
+  reviews: Map<string, { verdict: string; sure: boolean; reason: string; at: string; fixes: ReviewFinding[]; hold: Blocking | null }>;
   /** Who still counts on the repo, of the people the legs act for, keyed by permKey. */
   stands: Map<string, Standing>;
   /** The repo's optional checks. */
@@ -337,7 +338,7 @@ async function loadPassFacts(db: Db, { rows, context }: LegPass): Promise<PassFa
   return {
     items, checks, merge, fixResults, pushes, mergeEntryReviews, workflows, actors: wfFacts.actors, stands, optional, stale,
     syncedAt: new Map(repos.map((r) => [r, repoRows.get(r)?.synced_at ?? null])),
-    reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes }])),
+    reviews: new Map([...reviews].map(([k, v]) => [k, { verdict: v.verdict, sure: v.sure, reason: v.reason, at: v.at, fixes: v.fixes, hold: v.workflow?.hold ?? null }])),
   };
 }
 
@@ -374,13 +375,17 @@ async function onConflict(db: Db, p: Row, head: string, f: PrFacts | null): Prom
   if (byHand(path)) await noteOnce(db, p, head, "conflict", `The PR conflicts with its base branch: the merge stays approved and waits for ${path === "contributor" ? "the contributor" : "a person"} to resolve the conflict.`);
 }
 
-/** The verdict of the Opus review at `head` without the fixes a person dropped, stale or not; null with no review there. */
-function keptVerdict(p: Row, head: string, pf: PassFacts): string | null {
+/**
+ * The verdict of the Opus review at `head` the merge acts on, stale or not; null with no review there. Without the fixes a person dropped, and,
+ * as the merge is approved, without the fixes that do not block it; a hold that does not block it goes on.
+ */
+function keptVerdict(p: Row, head: string, pf: PassFacts, approval = true): string | null {
   const r = pf.reviews.get(`${refOf(p.repo, p.number)}@${head}`);
-  return r ? verdictKept(r.verdict, r.fixes, p.workflow_id === null ? undefined : pf.workflows.get(p.workflow_id)?.dropped) : null;
+  const w = p.workflow_id === null ? undefined : pf.workflows.get(p.workflow_id);
+  return r ? verdictToAct(r.verdict, r.fixes, w?.dropped, approval && (w ? w.approved : true), r.hold) : null;
 }
 
-type ReviewRead = { kind: "none" | "stale" | "take" | "takefix"; unsure: boolean; at?: string } | { kind: "bad"; stop: Stop; unsure: boolean; at: string };
+type ReviewRead = { kind: "none" | "stale" | "take" | "takefix"; unsure: boolean; at?: string; /** A take-fix or hold whose findings do not block the approved merge: they are filed as follow-ups. */ followUps?: true } | { kind: "bad"; stop: Stop; unsure: boolean; at: string };
 
 /**
  * The Opus review at `head`. A take or take-fix that is not stale goes on, sure or unsure: the merge approval says the change is wanted,
@@ -398,7 +403,7 @@ async function reviewAt(p: Row, leg: LegContext | null, head: string, pf: PassFa
   if (stale.heads.has(`${ref}@${head}`)) return { kind: "stale", unsure: false };
   const unsure = !r.sure;
   const verdict = keptVerdict(p, head, pf);
-  if (verdict === "take") return { kind: "take", unsure, at: r.at };
+  if (verdict === "take") return { kind: "take", unsure, at: r.at, ...(keptVerdict(p, head, pf, false) !== "take" ? { followUps: true as const } : {}) };
   if (verdict === "take-fix") return { kind: "takefix", unsure, at: r.at };
   const text = `the review says ${r.verdict}${unsure ? " (unsure)" : ""}${r.reason ? `: ${oneLine(r.reason, 160)}` : ""}`;
   return { kind: "bad", stop: stopOf(r.verdict === "close" ? "review-close" : "review-hold", text), unsure, at: r.at };
@@ -557,7 +562,8 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     if (r.kind === "bad") return await stop(r.stop);
     const name = p.fix_id !== null ? "the fix-up" : headName(p);
     if (r.kind === "take") {
-      return void await move(db, p, "ci", { line: r.unsure ? `The review of ${name} says take but is unsure; ${approvedAhead(p)}, so it goes on: waiting for CI.` : `The review of ${name} says take; waiting for CI.` });
+      return void await move(db, p, "ci", { line: r.followUps ? `The review of ${name} finds nothing that blocks the approved merge; what it found goes to a follow-up issue: waiting for CI.`
+        : r.unsure ? `The review of ${name} says take but is unsure; ${approvedAhead(p)}, so it goes on: waiting for CI.` : `The review of ${name} says take; waiting for CI.` });
     }
     // The planner's fix-up of the review's fixes runs next, sure or unsure (fixupOf). Its push is our own (ownPush), so the row stays and the new head is reviewed.
     // Fixes we cannot make are the contributor's, whose push brings the workflow back; when they cannot be asked either, a person decides.

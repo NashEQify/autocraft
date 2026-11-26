@@ -5,6 +5,19 @@ export const BLOCKING_CLASSES = ["regression", "security", "data-loss", "off-pur
 export type BlockingClass = (typeof BLOCKING_CLASSES)[number];
 /** `class` null: the defect does not stop an approved merge; `why` says why it does or does not, in one sentence. */
 export type Blocking = { class: BlockingClass | null; why: string };
+/** Characters of a blocking reason that are kept. */
+export const BLOCKING_WHY_CHARS = 300;
+
+/** A reply's blocking field: a class or null with its reason, or undefined when the field is missing or not valid (which counts as blocking). */
+export function blockingOf(v: unknown): Blocking | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const b = v as { class?: unknown; why?: unknown };
+  if (b.class !== null && (typeof b.class !== "string" || !(BLOCKING_CLASSES as readonly string[]).includes(b.class))) return undefined;
+  return { class: b.class as BlockingClass | null, why: typeof b.why === "string" ? b.why.replace(/\s+/g, " ").trim().slice(0, BLOCKING_WHY_CHARS) : "" };
+}
+
+/** True when a classed entry does not stop an approved merge: its class is null. A missing class blocks. */
+export const notBlocking = (x: { blocking?: Blocking | null }): boolean => !!x.blocking && x.blocking.class === null;
 
 export type PremergeFinding = {
   severity: "defect" | "minor";

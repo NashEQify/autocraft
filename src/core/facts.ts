@@ -33,7 +33,8 @@ import { ciAt, landedWhy, neededReview, type CiState } from "./evidence.ts";
 import { standingFor } from "./standing.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import type { WorkflowFact } from "../data/workflow/types.ts";
-import { keptFixes, settlerOf, verdictKept } from "../workflow/work.ts";
+import { settlerOf } from "../workflow/work.ts";
+import { fixesToMake, followUpFixes, holdGoesOn, verdictToAct } from "./review-blocking.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { Db } from "../db/index.ts";
@@ -398,8 +399,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   // A hold or close review that the leg went on past is one the person answered after (src/preapproval accepted): it counts as a take.
   const wentOn = !mx && (latest!.verdict === "hold" || latest!.verdict === "close") && !!wfRow
     && !!operator?.legs.some((l) => (l.state === "ci" || l.state === "queued") && l.head === qh && l.workflow_id === wfRow.id && l.updated_at > latest!.at);
-  const fixes = latest ? keptFixes(latest.fixes, wfFact?.dropped) : [];
-  const verdict = wentOn ? "take" : latest && verdictKept(latest.verdict, latest.fixes, wfFact?.dropped);
+  // On a PR approved for merge only the review's blocking fixes are made and only a blocking hold stops it; the rest are filed as follow-ups.
+  const approved = !!wfFact?.approved;
+  const fixes = latest ? fixesToMake(latest.fixes, wfFact?.dropped, approved) : [];
+  const verdict = wentOn ? "take" : latest && verdictToAct(latest.verdict, latest.fixes, wfFact?.dropped, approved, latest.workflow?.hold);
 
   const take = mx || verdict === "take" || verdict === "take-fix";
   const chain = take ? pushChainOf(patch.pushes, qh) : [qh];

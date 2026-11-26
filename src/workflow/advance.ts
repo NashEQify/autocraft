@@ -34,6 +34,7 @@ import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { fixPath, redCiPath } from "../preapproval/paths.ts";
 import { t } from "../i18n/index.ts";
 import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED } from "../core/author-round.ts";
+import { holdGoesOn, partsToMake } from "../core/review-blocking.ts";
 import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
 import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
@@ -537,7 +538,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   else if (leg === "queued") step = stepIn(w, "batch", "merge");
   else if (w.entry === "merge") step = stepIn(w, "update from main");
   else if (!review) step = (pass.reviews.get(ref) ?? []).some((r) => r.head !== head) ? stepIn(w, "review again", "review") : stepIn(w, "review");
-  else if (review.verdict === "take-fix" && plan.some((p) => p.state === "planned") && (w.entry !== "review" || w.approvedBy !== null)) step = stepIn(w, "fix-up", "merge", "recommend");
+  else if (review.verdict === "take-fix" && partsToMake(plan, review.fixes, w.approvedBy !== null).length && (w.entry !== "review" || w.approvedBy !== null)) step = stepIn(w, "fix-up", "merge", "recommend");
   else step = stepIn(w, "merge", "recommend");
 
   // A stuck revision of the implementation PR comes back before anything else the PR needs.
@@ -596,7 +597,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const found = detectBlocker({
     entry: w.entry, approved, authorPush,
     // A fix-up a person asked for is queued at this head: its push is reviewed again, so a major finding here waits for that review.
-    review: fresh ? { verdict: fresh.verdict, sure: fresh.sure, majors: leg === "fixup" ? [] : plan.filter((p) => p.major && p.state === "planned").map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0 } : null,
+    // On an approved PR a hold or part that does not block is filed as a follow-up and stops nothing.
+    review: fresh ? {
+      verdict: holdGoesOn(fresh.verdict, fresh.workflow?.hold, approved) ? "take" : fresh.verdict, sure: fresh.sure,
+      majors: leg === "fixup" ? [] : partsToMake(plan, fresh.fixes, approved).filter((p) => p.major).map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0,
+    } : null,
     failures: failures(pass, ref, since, head, f),
     fix: fixed.fix,
     plannedFiles: fixed.plannedFiles,
