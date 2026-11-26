@@ -50,7 +50,7 @@ export function atHelp(): string[] {
   return [
     t("`@AutoCraft review photocraft#123` in a watched channel sends the command in public, as `/autocraft do` does."),
     t("Reply to a message that names items with `@AutoCraft review` (or `review all`) for all of them, or name one for that one only. Replies to posts of bots and webhooks, such as GitHub's integration, do not pick up their links."),
-    t("AutoCraft confirms in a thread. There, `@AutoCraft fix-up and merge`, or a reply to its message, acts on the thread's items."),
+    t("AutoCraft confirms in a thread and posts each item's status and result there. In the thread, `@AutoCraft fix-up and merge`, or a reply to its message, acts on the thread's items."),
   ];
 }
 
