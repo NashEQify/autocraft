@@ -291,6 +291,12 @@ function singleCommand(rest: string): string | null {
   return found.length === 1 ? found[0]!.word : null;
 }
 
+/** How to write a part-naming word that came without its part (`drop and merge`), or null when the leftover is something else. */
+function partHint(rest: string): string | null {
+  const word = rest.trim().toLowerCase();
+  return COMMANDS.some((x) => x.answer && [x.word, ...x.aliases].includes(word)) ? t("“{word}” names a part of the plan, as in “{example}”.", { word, example: `${word} 1` }) : null;
+}
+
 function ambiguityText(understood: string, a: Ambiguity, mention?: string, proposed?: string): string {
   switch (a.why) {
     case "unreadable":
@@ -298,10 +304,17 @@ function ambiguityText(understood: string, a: Ambiguity, mention?: string, propo
         const unread = understood && a.rest ? t("I understood “{understood}” but not “{rest}”.", { understood, rest: a.rest }) : a.rest ? t("I couldn't read “{rest}” as a command.", { rest: a.rest }) : null;
         return [unread, proposalLine(proposed, mention)].filter((x) => x !== null).join(" ");
       }
-      if (understood && a.rest) return t("I understood “{understood}” but not “{rest}”. Nothing runs until the instruction is clear.", { understood, rest: a.rest });
+      if (understood && a.rest) {
+        const hint = partHint(a.rest);
+        return hint
+          ? t("I understood “{understood}” but not “{rest}”. {hint} Nothing runs until the instruction is clear.", { understood, rest: a.rest, hint })
+          : t("I understood “{understood}” but not “{rest}”. Nothing runs until the instruction is clear.", { understood, rest: a.rest });
+      }
       if (a.rest) {
         const one = singleCommand(a.rest);
         if (one) return proposalLine(one, mention);
+        const hint = partHint(a.rest);
+        if (hint) return t("{hint} Nothing runs until the instruction is clear.", { hint });
         return t("I couldn't read “{rest}” as a command. Nothing runs until the instruction is clear. Commands: {commands}.", { rest: a.rest, commands: COMMANDS.filter((c) => !c.answer || c.word === "drop").map((c) => c.usage).join(", ") });
       }
       if (understood) return t("I understood “{understood}” but not which items. Nothing runs until the instruction is clear.", { understood });

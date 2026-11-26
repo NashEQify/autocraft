@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import PgLib from "pg";
 import type { Db } from "./helpers/raw-db.ts";
 import { writeSnapshot, writeSnapshotFromDb } from "../src/itemtools/snapshot.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -109,8 +110,19 @@ test("the snapshot built from Postgres has the rows of the one built from SQLite
     await pdb.prepare("UPDATE comments SET body = 'Seen it twice' WHERE id = 'c1'").run();
     await pdb.prepare("UPDATE comments SET review_state = 'COMMENTED' WHERE id = 'c2'").run();
     assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 0, comments: 2, embeddings: 0 });
-    await pdb.prepare("UPDATE comments SET review_state = 'PENDING' WHERE id = 'c2'").run();
-    assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 0, comments: 1, embeddings: 0 });
+    // A transaction of another connection still open at that refresh's mark holds its horizon back, so the next refresh
+    // reads the draft review again: neither the file nor the public rows have it, which is no change.
+    const holder = new PgLib.Client({ connectionString: pg.target });
+    await holder.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_current_xact_id()");
+      await pdb.prepare("UPDATE comments SET review_state = 'PENDING' WHERE id = 'c2'").run();
+      assert.deepEqual((await writeSnapshotFromDb(pdb, file, 2)).changed, { items: 0, comments: 1, embeddings: 0 });
+      await holder.query("COMMIT");
+    } finally {
+      await holder.end();
+    }
     const fresh2 = join(dir, "fresh2", "items.db");
     assert.equal((await writeSnapshotFromDb(pdb, fresh2, 2)).rebuilt, true);
     assert.deepEqual(dump(file), dump(fresh2));

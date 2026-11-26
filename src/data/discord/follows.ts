@@ -40,6 +40,15 @@ export async function loadFollowsOfItems(db: Db, refs: Ref[]): Promise<Map<Ref, 
   return out;
 }
 
+/** The rows of targets started from a channel, or of the target itself, written after `since`, whose item is numbered one of `numbers`. */
+export async function loadChannelFollows(db: Db, f: { channelHash: string; targetHash: string; numbers: number[]; since: string }): Promise<FollowRow[]> {
+  if (!f.numbers.length) return [];
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("main.discord_follows").select(COLS).where((eb) => eb.or([eb("channel_hash", "=", f.channelHash), eb("target_hash", "=", f.targetHash)]))
+    .where("at", ">", f.since).where(kx.inList(db, "number", f.numbers, "bigint")), { label: "discord.loadChannelFollows" });
+  return rows.map(rowOf);
+}
+
 /** Upserts rows by (target, item): an item named again takes the newer command, sender and time. Rows older than `before` go. */
 export async function saveFollows(db: Db, rows: FollowRow[], before: string): Promise<void> {
   const q = queryDb(db);
@@ -97,6 +106,18 @@ export async function loadFollowPosts(db: Db): Promise<Map<string, FollowPost>> 
     const p: FollowPost = { targetHash: r.target_hash, repo: r.repo, number: Number(r.number), statusHash: r.status_hash, resultKey: r.result_key, resultHash: r.result_hash, linkHash: r.link_hash, sealed: r.sealed, at: r.at };
     return [followPostKey(p), p];
   }));
+}
+
+/** What the bot posted about each item of the targets. */
+export async function loadFollowPostsOf(db: Db, targetHashes: string[]): Promise<FollowPost[]> {
+  const q = queryDb(db);
+  const out: FollowPost[] = [];
+  for (const part of kx.chunks([...new Set(targetHashes)])) {
+    for (const r of await q.all(q.k.selectFrom("main.discord_follow_posts").select(POST_COLS).where(kx.inList(db, "target_hash", part)), { label: "discord.loadFollowPostsOf" })) {
+      out.push({ targetHash: r.target_hash, repo: r.repo, number: Number(r.number), statusHash: r.status_hash, resultKey: r.result_key, resultHash: r.result_hash, linkHash: r.link_hash, sealed: r.sealed, at: r.at });
+    }
+  }
+  return out;
 }
 
 export const followPostKey = (p: { targetHash: string; repo: string; number: number }): string => `${p.targetHash}\0${p.repo}\0${p.number}`;

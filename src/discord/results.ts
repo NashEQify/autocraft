@@ -33,12 +33,12 @@ import { partLine, statusLine, workflowHead, type StatusFacts } from "../prstatu
 import { commentStatuses } from "../public/status.ts";
 import { recommendationLine } from "../workflow/status.ts";
 import { ASKING_STATES, shownWorkflow, type ItemRef, type ItemWorkflow, type WorkflowState } from "../workflow/types.ts";
-import { legWaits } from "../workflow/waits.ts";
+import { legWaits, notPostedLines } from "../workflow/waits.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 import { MISSING_ACCESS, RestError, UNKNOWN_CHANNEL, UNKNOWN_MESSAGE, type DiscordRest, type EditBody } from "./rest.ts";
 import { parseResult, type ResultAsk, type ResultLine } from "./result-ask.ts";
-import { followsOf, sendToFollow, type Follow } from "./threads.ts";
+import { followsOf, resultAad as sealAad, sendToFollow, type Follow } from "./threads.ts";
 import { discordDetail, type DiscordDetail } from "./visibility.ts";
 
 /** Discord allows 2000 characters per message; a result is kept under this. */
@@ -109,7 +109,7 @@ export async function itemViews(db: Db, refs: readonly ItemRef[], seen?: Map<str
   if (!refs.length) return out;
   const [g, statuses] = await Promise.all([seen ?? glances(db, refs), commentStatuses(db, refs)]);
   const wfs = refs.flatMap((r) => g.get(shortKey(r))?.wf ?? []);
-  const [extras, waits] = await Promise.all([loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs)]);
+  const [extras, waits, unposted] = await Promise.all([loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs), notPostedLines(db, wfs)]);
   for (const ref of refs) {
     const key = shortKey(ref);
     const status = statuses.get(key), at = g.get(key);
@@ -122,7 +122,10 @@ export async function itemViews(db: Db, refs: readonly ItemRef[], seen?: Map<str
       status: { ...status, queue: undefined }, ...(pr ? { batch: { pr } } : {}),
       ...(wf ? { workflow: { wf, answered: a ? { by: a.login, at: a.at } : null, quiet: extras.quiet.has(key), wait: waits.get(wf.id) ?? null } } : {}),
     };
-    const line = facts.workflow ? workflowHead({ ...facts, workflow: facts.workflow }, { wait: false }) : statusLine(facts);
+    const head = facts.workflow ? workflowHead({ ...facts, workflow: facts.workflow }, { wait: false }) : statusLine(facts);
+    // A review the thread's result points to, held back from GitHub: the thread says so and why.
+    const notPosted = wf && !extras.quiet.has(key) ? unposted.get(wf.id) : undefined;
+    const line = notPosted ? `${head}\n${notPosted}` : head;
     const asking = !!wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) && status.step !== "Merged" && status.step !== "Closed";
     out.set(key, {
       ref, key, url: at.commentId ? `${status.url}#issuecomment-${at.commentId}` : status.url, status: line, detail,
@@ -359,4 +362,3 @@ export class ThreadResults {
   }
 }
 
-const sealAad = (p: { targetHash: string; repo: string; number: number }): string => `result:${p.targetHash}:${p.repo}#${p.number}`;

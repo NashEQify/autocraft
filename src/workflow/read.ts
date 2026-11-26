@@ -236,7 +236,9 @@ function noted(res: CommandResult, note: string): CommandResult {
  * Runs text the way every surface does: through runCommand. Text the parser could not read, from a sender who may send commands
  * on `read.own`, is read by a model first (see the file comment). `read` null: no reading on this path.
  */
-export async function runText(db: Db, actor: Actor, via: Surface, input: CommandInput, read: ReadText | null): Promise<CommandResult> {
+export async function runText(db: Db, actor: Actor, via: Surface, given: CommandInput, read: ReadText | null): Promise<CommandResult> {
+  // An ambiguous parse carries no items: on a surface with none of its own, the parser's reply goes on the items the text names.
+  const input = given.parsed.kind === "ambiguous" && !given.items.length && read?.named ? { ...given, items: [...read.own] } : given;
   if (input.parsed.kind !== "ambiguous" || !read || !actor.login || !await mayRead(db, actor, read.own)) return await runCommand(db, actor, via, input);
   const reading = await within(read.waitMs ?? READ_WAIT_MS, readCommand(db, actor.login, read));
   if (!reading) return await runCommand(db, actor, via, input);

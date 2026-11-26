@@ -3,6 +3,7 @@
 // what it did read, and nothing runs from it; resolve.ts then applies the item's state.
 //
 //   fix-up and merge, urgent         combined commands; a weight word anywhere (urgent, high, low, or weight <1-10>)
+//   fix and merge                    fix alone is fix-up
 //   fix 1 and 2, drop 3, then merge  an answer naming plan parts by number
 //   drop export dialog               a part named by words from its title (resolve.ts matches them)
 //   merge: photocraft#12 #15         a list of items after a colon; a bare number takes the repo before it
@@ -493,7 +494,9 @@ function readWords(src: string, marks: readonly { tok: string }[] = [], code: re
       return;
     }
     const c = commandOf(text) ?? commandOf(typoOf(text) ?? "");
-    if (c && c.word !== "drop" && c.word !== "fix" && c.word !== "autorepin") push({ word: c.word });
+    // `fix` with no part is the fix-up: it fixes every finding nobody dropped, which is what "fix them all" asks for too.
+    if (c?.word === "fix") push({ word: "fix-up" });
+    else if (c && c.word !== "drop" && c.word !== "autorepin") push({ word: c.word });
     else unknown.push(seg);
   };
   for (const raw of s.split(/\s*[,;\n]\s*|[.!]+\s+|\s+(?:and\s+then|then|and|&)\s+/i)) readSeg(raw);
@@ -543,6 +546,9 @@ const addItems = (into: ItemRef[], more: readonly ItemRef[]): ItemRef[] => {
   return into;
 };
 
+/** Text that ends where a plan part's number follows (`fix `, `drop 1 and `): a number after it is a part, not an item. */
+export const PART_BEFORE = /\b(?:drop|fix)(?:\s+(?:parts?|findings?|changes?))?(?:(?:\s*[,;]\s*|\s+and\s+|\s+)#?\d+)*(?:\s*[,;]\s*|\s+and\s+|\s+)$/i;
+
 /** Wraps the index of an item taken out of the text, so the reader can tell which words an item stood in. */
 const MARK = "\u0001";
 const MARK_RE = /\u0001(\d+)\u0001/g;
@@ -562,7 +568,7 @@ function pullItems(text: string, repo: string | undefined, mark = false): { text
     const tok = raw.replace(/[.)!?]+$/, "");
     let ref = refOf(tok);
     if (!ref && /^#\d+$/.test(tok)) {
-      if (!last || /\b(?:drop|fix)(?:\s+(?:parts?|findings?|changes?))?(?:(?:\s*[,;]\s*|\s+and\s+|\s+)#?\d+)*(?:\s*[,;]\s*|\s+and\s+|\s+)$/i.test(before)) return m;
+      if (!last || PART_BEFORE.test(before)) return m;
       ref = { repo: last, number: Number(tok.slice(1)) };
       if (!Number.isSafeInteger(ref.number) || ref.number < 1) return m;
     }

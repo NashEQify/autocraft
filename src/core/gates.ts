@@ -57,9 +57,20 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
 const endsAttempt = (f: PrFacts | ItemFacts): boolean =>
   "ghState" in f ? f.ghState !== "OPEN" : f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
 
-/** Who the implementation (and with it its PR's revisions) runs for, or who commanded the close; null for other work. Their command is the approval, in any repo. */
+/**
+ * The person a started item's work acts for (who last answered, approved or started its live workflow, never the automatic merge rule), while
+ * they count on the repo under the app identity; null otherwise. Their start is the approval of the writes that show the workflow's work: the
+ * Opus review post, and the item's PR status comment (src/prstatus statusDueIn).
+ */
+export function showsWorkFor(f: Pick<PrFacts, "workflow" | "standing">): string | null {
+  const s = f.standing?.work;
+  return f.workflow && s && s.standing === "yes" && !s.boxIdentity ? s.login : null;
+}
+
+/** Who the implementation (and with it its PR's revisions) runs for, who commanded the close, or whose started item the review post shows; null for other work. Their command is the approval, in any repo. */
 function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
   if (a.kind === "implement") return ("ghState" in f ? ownImplementation(f)?.queuedBy : f.implement.queuedBy) ?? null;
+  if (a.kind === "post-review") return showsWorkFor(f);
   return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
 }
 
@@ -135,7 +146,9 @@ export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permiss
   const r = f.repoFacts as Partial<Record<"commentApproved" | "ciApproved" | "labelsApproved", boolean>>;
   // An item (no PR facts) has no merge and no push of its own.
   const ok = { merge: undefined, push: undefined, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": undefined, "main-fix": undefined, status: undefined }[need];
-  return ok ? { ok: true, as: "app", by: null } : refuse("repo-approval", prefix, { need, repo: f.repo });
+  if (ok) return { ok: true, as: "app", by: null };
+  // A started item whose person does not count now: why their start is no approval says more than the repo's switch.
+  return (a.kind === "post-review" && f.workflow ? standingRefusal(f, a, true) : null) ?? refuse("repo-approval", prefix, { need, repo: f.repo });
 }
 
 /** Why the write is refused, or null. */

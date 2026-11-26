@@ -33,6 +33,7 @@ const SEEDS: Record<string, Seed> = {
       asked: ago(30), to: ["kiri-n"], rec: "Merge parts 1 and 3, and move the Hungarian dictionary (2) to an optional download in a follow-up issue?",
       unclear: null,
       confirm: `Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(190))}). Reply hold to halt.`,
+      notPosted: null,
     },
     events: [
       ev(1, 190, "kiri-n", "github", "started", `Reviewing, fixing what the review finds, reviewing again, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(190))}). Reply hold to halt.`),
@@ -51,6 +52,7 @@ const SEEDS: Record<string, Seed> = {
       ],
       rec: null, asked: null, to: [], unclear: null,
       confirm: `Reviewing, fixing what the review finds, reviewing again, then merging when CI is green, high (approved by ochre-fox, ${hhmm(ago(80))}). Reply hold to halt.`,
+      notPosted: null,
     },
     events: [ev(2, 80, "ochre-fox", "discord", "started", `Reviewing, fixing what the review finds, reviewing again, then merging when CI is green, high (approved by ochre-fox, ${hhmm(ago(80))}). Reply hold to halt.`)],
     breakers: [{ key: "cifix:photocraft", reason: "2 of the last 10 CI-fix pushes broke CI on photocraft", since: ago(35), canResume: false }],
@@ -65,6 +67,7 @@ const SEEDS: Record<string, Seed> = {
       asked: ago(30), to: ["ochre-fox"], rec: "Go on with the merge after this stop: the merge was refused: the branch protection of main asks for a second approving review, and the only reviewer with write access… Reply yes to merge it (after the pre-merge check and green CI).",
       unclear: null,
       confirm: `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply hold to halt.`,
+      notPosted: null,
     },
     events: [ev(5, 60, "ochre-fox", "github", "started", `Updating from main, then merging in the next batch when CI is green (started by ochre-fox, ${hhmm(ago(60))}). Reply hold to halt.`)],
   },
@@ -77,6 +80,7 @@ const SEEDS: Record<string, Seed> = {
       asked: ago(30), to: ["kiri-n"], rec: "Merge both changes as they are?",
       unclear: { by: "kiri-n", at: ago(20), line: "I understood “merge” but not “after the release”. Nothing runs until the instruction is clear." },
       confirm: `Reviewing, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(150))}). Reply hold to halt.`,
+      notPosted: "Not posted on GitHub: GitHub has not answered on the access of the person this item acts for",
     },
     events: [
       ev(3, 150, "kiri-n", "dashboard", "started", `Reviewing, then coming back with a recommendation (started by kiri-n, ${hhmm(ago(150))}). Reply hold to halt.`),

@@ -312,6 +312,7 @@ function Header({ m, d, status, state, next, onDuplicates, toggle }: { m: Mainta
             </span>
           </p>
         )}
+        {m.status?.notPosted && <p className="mt-1.5 rounded border border-warn/60 bg-warn/10 px-3 py-1.5 text-sm">{m.status.notPosted}</p>}
       </div>
     </header>
   );

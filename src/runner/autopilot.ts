@@ -745,7 +745,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // One status comment per PR, in repos with the PR status switch on: queued when a PR's status line differs from the posted one.
+    // One status comment per PR, in repos with the PR status switch on, and per item a person started or approved in any repo: queued
+    // when the item's status line differs from the posted one.
     // Every tracked repo, not only those in scope: comments already posted get their last Merged or Closed edit after the repo's Pipeline is switched off.
     name: "pr-status",
     perRepo: true,
@@ -754,9 +755,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      const [tracked, approved] = await db.together(() => Promise.all([ctx.scopes ? reposFor(ctx, "cleanup") : trackedNames(db), approvedRepos(db, "all", "prstatus")]));
-      const repos = tracked.filter((repo) => approved.has(repo));
-      const [retries, dueIn, waits] = await db.together(() => Promise.all([statusRetriesAt(db, repos, now), statusDueIn(db, repos, now), pipelineWriteWaits(db, "pr-status-comment", repos, now)]));
+      const [repos, approved] = await db.together(() => Promise.all([ctx.scopes ? reposFor(ctx, "cleanup") : trackedNames(db), approvedRepos(db, "all", "prstatus")]));
+      const [retries, dueIn, waits] = await db.together(() => Promise.all([statusRetriesAt(db, repos, now), statusDueIn(db, repos, now, approved), pipelineWriteWaits(db, "pr-status-comment", repos, now)]));
       for (const at of retries.values()) ctx.wake?.push(at);
       return repos.filter((repo) => {
         if (!dueIn.get(repo)?.length) return false;

@@ -40,7 +40,7 @@ export const COMMANDS: readonly CommandDef[] = [
   {
     word: "fix-up", usage: "fix-up", aliases: ["fixup", "fix up"], entry: "fixup",
     short: tk("Start at Fix-up: review, fix-up, review again."),
-    does: tk("Reviews the pull request, fixes what the review finds, and reviews the fixes."),
+    does: tk("Reviews the pull request, fixes what the review finds, and reviews the fixes. fix alone means the same."),
     back: tk("When the second review is done, with one recommendation. If the merge is approved: only at a blocker."),
     example: "fix-up and merge",
   },
@@ -68,7 +68,7 @@ export const COMMANDS: readonly CommandDef[] = [
   {
     word: "fix", usage: "fix <part>", aliases: [], entry: null, answer: true,
     short: tk("Fix only the named findings."),
-    does: tk("Runs the fix-up on the named findings or changes, by number or by words from the title, then reviews again."),
+    does: tk("Runs the fix-up on the named findings or changes, by number or by words from the title, then reviews again. With no part, fix is fix-up."),
     back: tk("As the plan said before."),
     example: "fix 1, drop 2, then merge",
   },

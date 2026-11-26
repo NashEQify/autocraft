@@ -7,7 +7,7 @@
 import { loadPremerge, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
 import { loadActions, loadLegs, loadLinks, type WorkflowAction } from "../data/workflow/index.ts";
 import { loadPlans } from "../data/planner/index.ts";
-import type { WaitCode } from "../core/codes.ts";
+import type { RefusalCode, WaitCode } from "../core/codes.ts";
 import type { Db } from "../db/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { t, tk } from "../i18n/index.ts";
@@ -105,3 +105,35 @@ const BY_OTHERS: Partial<Record<WaitCode, string>> = {
 };
 
 const HOLD_WORD: Record<RunnerHold, string> = { offline: tk("offline"), "usage-limit": tk("usage limit"), "cooling-off": tk("cooling off"), "not-ready": tk("not ready") };
+
+/** Why the review post of a started item may not run, by the refusal's code: the stored plan keeps the code only. */
+const NOT_POSTED: Partial<Record<RefusalCode, string>> = {
+  "repo-approval": tk("comments in {repo} are not approved, and the automatic merge rule started this item"),
+  "actor-gone": tk("the person this item acts for can no longer act on {repo}"),
+  "actor-unknown": tk("GitHub has not answered on the access of the person this item acts for"),
+  "box-identity": tk("AutoCraft writes as its own account; an operator switches it to its GitHub App"),
+};
+
+/**
+ * Per workflow id, the line saying the Opus review of the item's PR (an implement workflow's: its PR's) is not on GitHub, and why: the
+ * stored plan holds the review post refused. The others are absent. The item page, the Discord thread, the agent and the CLI show it
+ * beside the state line.
+ */
+export async function notPostedLines(db: Db, wfs: readonly Waiter[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (!wfs.length) return out;
+  const issues = wfs.filter((w) => w.kind !== "pr").map((w) => w.id);
+  const linked = new Map((await loadLinks(db, { workflowIds: issues })).map((l) => [l.workflowId, l.pr]));
+  const prs = wfs.flatMap((w) => { const pr = w.kind === "pr" ? w.number : linked.get(w.id); return pr == null ? [] : [{ w, repo: w.repo, number: pr }]; });
+  const plans = await loadPlans(db, prs.map(({ repo, number }) => ({ repo, number })));
+  for (const { w, repo, number } of prs) {
+    const code = plans.get(`${repo}#${number}`)?.actions.find((a) => a.kind === "post-review")?.refused;
+    if (!code) continue;
+    const why = NOT_POSTED[code] ? t(NOT_POSTED[code], { repo }) : t("the review post may not run ({code})", { code });
+    out.set(w.id, t("Not posted on GitHub: {why}", { why }));
+  }
+  return out;
+}
+
+/** notPostedLines() of one workflow. */
+export const notPostedLine = async (db: Db, wf: Waiter): Promise<string | null> => (await notPostedLines(db, [wf])).get(wf.id) ?? null;
