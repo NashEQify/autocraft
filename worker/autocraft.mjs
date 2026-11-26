@@ -3300,6 +3300,24 @@ const TRANSCRIPT_MAX = 16 * 1024 * 1024;
 
 /** @typedef {{ head: string[], tail: string[], omitted: number }} Events  the harness's event lines as transcript lines, `{"at","event"}` */
 
+/** @param {unknown} v @param {string} root @returns {unknown} */
+const unrootedValue = (v, root) => {
+  if (typeof v === "string") return v.includes(root) ? v.split(root).join("") : v;
+  if (Array.isArray(v)) return v.map((x) => unrootedValue(x, root));
+  if (!v || typeof v !== "object") return v;
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, unrootedValue(x, root)]));
+};
+
+/**
+ * An event line with the slot's root taken out of its string values: parsed, so the root's escaped form in the JSON text
+ * (a Windows path's doubled backslashes) goes too. Lines that name neither form are kept as they are.
+ * @param {string} l @param {string} root
+ */
+export function unrootedEvent(l, root) {
+  if (!l.includes(root) && !l.includes(JSON.stringify(root).slice(1, -1))) return l;
+  try { return JSON.stringify(unrootedValue(JSON.parse(l), root)); } catch { return l.split(root).join(""); }
+}
+
 /** How long the server takes a transcript after the submit (src/remote/protocol.ts TRANSCRIPT_WAIT_S). */
 const TRANSCRIPT_WAIT_MS = scaled(10 * 60_000);
 
@@ -3363,7 +3381,7 @@ function harness(c, b, beat, signal, adapter, root) {
     let headChars = 0, tailChars = 0;
     /** One event line for the transcript, the slot's root taken off. @param {string} l @param {string} at */
     const record = (l, at) => {
-      const line = `{"at":"${at}","event":${root ? l.split(root).join("") : l}}`;
+      const line = `{"at":"${at}","event":${root ? unrootedEvent(l, root) : l}}`;
       if (events.tail.length === 0 && headChars + line.length <= EVENTS_HEAD) { events.head.push(line); headChars += line.length; return; }
       events.tail.push(line); tailChars += line.length;
       while (tailChars > EVENTS_TAIL && events.tail.length > 1) { tailChars -= /** @type {string} */ (events.tail.shift()).length; events.omitted++; }

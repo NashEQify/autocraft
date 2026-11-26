@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { after, before, test } from "node:test";
 import { addLogin } from "../src/access.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
@@ -14,6 +14,7 @@ import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { bundleOf, claimCall, enqueueCall, submitCall, type Caller } from "../src/remote/calls.ts";
 import { saveStore, transcriptsStored } from "../src/transcripts/index.ts";
+import { prepareTranscript } from "../src/transcripts/prepare.ts";
 import { PROTOCOL_VERSION, ROUTES, type TaskBundle } from "../src/remote/protocol.ts";
 import type { AgentRunDetail, TranscriptView } from "../web/src/api/types.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -96,4 +97,13 @@ test("a submitted transcript is stored and read back whole by maintainers, never
   assert.equal(((await (await carol(`/api/agents/${runId}`)).json()) as AgentRunDetail).transcripts, undefined);
   assert.equal((await carol(`/api/agents/${runId}/transcripts/${run.transcripts![0]!.id}`)).status, 403);
   assert.equal((await carol(`/api/agents/${runId}/transcripts/${run.transcripts![0]!.id}/download`)).status, 403);
+});
+
+test("the claim root goes from string values also where the JSON text escapes it", () => {
+  const root = "C:\\Users\\bob\\slot-1";
+  const event = { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: `${root}\\repo\\src\\lib.rs` } }] } };
+  const gzipBase64 = gzipSync(JSON.stringify({ at: "2026-11-26T00:00:00Z", event })).toString("base64");
+  const stored = gunzipSync(prepareTranscript({ runId: 1, callId: 1, attempt: 0, outcome: "done", root, gzipBase64 }).body).toString("utf8");
+  assert.ok(stored.includes("repo\\\\src"), "the path below the root is kept");
+  assert.ok(!stored.includes("Users"), "the root is gone");
 });

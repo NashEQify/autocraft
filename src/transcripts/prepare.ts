@@ -32,6 +32,16 @@ function dropImages(v: unknown): unknown {
   return out;
 }
 
+/** `v` with `root` taken out of every string in it: parsed values, so escaped forms in the JSON text (a Windows path's doubled backslashes) are covered. */
+function unrooted(v: unknown, root: string): unknown {
+  if (typeof v === "string") return v.includes(root) ? v.split(root).join("") : v;
+  if (Array.isArray(v)) return v.map((x) => unrooted(x, root));
+  if (!v || typeof v !== "object") return v;
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v)) out[k] = unrooted(x, root);
+  return out;
+}
+
 /**
  * The stored form of a submitted transcript: a header line, then one `{at, event}` or `{at, omitted}` line per event,
  * with the claim's path root taken off, image data dropped and credentials hidden, as gzip JSONL. Throws for a transcript
@@ -44,14 +54,13 @@ export function prepareTranscript(t: PrepareInput): Prepared {
   }
   const lines: string[] = [JSON.stringify({ transcript: 1, runId: t.runId, callId: t.callId, attempt: t.attempt, outcome: t.outcome })];
   let tools = 0, lastTool: string | null = null, events = 0;
-  for (let line of raw.toString("utf8").split("\n")) {
+  for (const line of raw.toString("utf8").split("\n")) {
     if (!line.trim()) continue;
-    if (t.root) line = line.split(t.root).join("");
     let v: { at?: unknown; event?: unknown; omitted?: unknown };
     try { v = JSON.parse(line) as typeof v; } catch { continue; }
     if (!v || typeof v !== "object") continue;
     const at = typeof v.at === "string" ? v.at.slice(0, 40) : null;
-    const entry = typeof v.omitted === "number" ? { at, omitted: v.omitted } : { at, event: dropImages(v.event) };
+    const entry = typeof v.omitted === "number" ? { at, omitted: v.omitted } : { at, event: dropImages(t.root ? unrooted(v.event, t.root) : v.event) };
     const names = toolNames((entry as { event?: unknown }).event);
     if (names.length) { tools += names.length; lastTool = names.at(-1)!.slice(0, 200); }
     lines.push(scrub(JSON.stringify(entry)));
