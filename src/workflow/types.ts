@@ -47,6 +47,8 @@ export type PlanPart = {
 export type Recommendation = {
   /** One plain sentence; either written by the model step that produced it or built from a rule key. */
   text: string;
+  /** Why the automatic merge rule stopped, as a phrase ("the review is unsure"): set on the recommendation of a rule row (auto-stop.ts). */
+  stop?: string;
   /** What a yes runs. */
   parts: { fix: number[]; drop: number[] };
   merges: boolean;

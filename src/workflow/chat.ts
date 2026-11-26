@@ -3,6 +3,7 @@
 import { t, tk } from "../i18n/index.ts";
 import { askedLogins } from "./asked.ts";
 import { describe } from "./parse.ts";
+import { ruleStopLine } from "./status.ts";
 import { RULE_STARTER, type Entry, type ItemWorkflow, type Parsed, type PlanPart, type Recommendation } from "./types.ts";
 import { ENTRY_LABEL, weightWord } from "./vocab.ts";
 
@@ -18,9 +19,10 @@ export const conversationTitle = (entry: Entry | null | undefined): string => (e
 /** `asked`: who the question goes to (askedLogins); empty, with `rule`, for a row the automatic merge rule started. */
 export type RecommendedPayload = { workflowId: number; rec: Recommendation; parts: PlanPart[]; asked: string[]; rule?: true };
 
+/** The body is the recommendation's sentence; a rule row's, which asks nobody, is its state line: why it stopped and what AutoCraft would do. */
 export function recommendedMessage(w: Pick<ItemWorkflow, "id" | "startedBy" | "approvedBy" | "plan">, rec: Recommendation): { body: string; payload: RecommendedPayload } {
   const rule = w.startedBy === RULE_STARTER && w.approvedBy === null;
-  return { body: rec.text, payload: { workflowId: w.id, rec, parts: w.plan, asked: askedLogins(w), ...(rule ? { rule: true as const } : {}) } };
+  return { body: rule ? ruleStopLine(rec) : rec.text, payload: { workflowId: w.id, rec, parts: w.plan, asked: askedLogins(w), ...(rule ? { rule: true as const } : {}) } };
 }
 
 /** `merged`: the pull request the workflow worked on merged; `base`: the branch it merged into. */

@@ -12,6 +12,7 @@ import { STUCK_OPTIONS } from "../../implement/stuck.ts";
 import { loadMaintainItem } from "../../data/views/maintain-item.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { attributionLines, blockerLabel, listText, recommendationText, recordedStep, stateLine, stepLabel, stepsAt, stepsFor, currentStep, weightLabel, type Step, type StepName, type StepState } from "../../workflow/status.ts";
+import { openQuestion } from "../../workflow/asked.ts";
 import { isLive } from "../../workflow/store.ts";
 import type { StoredEvent } from "../../data/workflow/types.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow } from "../../workflow/types.ts";
@@ -67,9 +68,9 @@ export function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | 
   const accepted = [...mine].reverse().find((e) => ACCEPTED.has(e.kind) && e.line);
   const steps = stepsOf(wf, leg);
   const reason = wf.blocker === "other" && typeof wf.blockerParams?.reason === "string" && !veiled ? wf.blockerParams.reason : null;
-  const asked = openRecommendation(wf);
+  const open = openQuestion(wf);
   return {
-    headline: stateLine(wf, steps ? currentStep(steps) : undefined, undefined, wait),
+    headline: stateLine(wf, steps ? currentStep(steps) : undefined, undefined, wait, veiled),
     live: isLive(wf.state),
     held: wf.state === "stopped",
     entry: wf.entry,
@@ -79,8 +80,9 @@ export function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | 
     blocker: wf.state === "blocked" && wf.blocker ? (reason ? `${blockerLabel(wf.blocker)}: ${reason}` : blockerLabel(wf.blocker)) : null,
     steps: steps?.map((s) => ({ label: stepLabel(s), state: s.state })) ?? null,
     parts: wf.plan.map((p) => ({ n: p.n, title: veiled ? "" : p.title, source: p.source, file: veiled ? null : p.file ?? null, major: p.major === true, state: p.state })),
-    rec: asked && !veiled ? recommendationText(asked) : null,
-    asked: wf.rec ? wf.recAt : null,
+    rec: open && !veiled ? recommendationText(open.rec) : null,
+    asked: open ? wf.recAt : null,
+    to: open?.to ?? [],
     unclear: last?.kind === "ambiguous" ? { by: last.login, at: last.at, line: last.line ?? "" } : null,
     confirm: accepted?.line ?? null,
   };

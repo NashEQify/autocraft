@@ -180,9 +180,8 @@ const RULE_REASONS: readonly (readonly [(r: string) => boolean, () => string])[]
 /** Reasons a sentence names at most. */
 const RULE_REASONS_SHOWN = 3;
 
-/** The recommendation of a PR the automatic merge rule took up and stopped: the sentence first says why the rule does not merge it. */
+/** The recommendation of a PR the automatic merge rule took up and stopped, with why the rule does not merge it. */
 export function ruleStopped(rec: Recommendation, reasons: readonly string[]): Recommendation {
   const why = [...new Set(reasons.map((r) => RULE_REASONS.find(([is]) => is(r))?.[1]() ?? r))].slice(0, RULE_REASONS_SHOWN);
-  if (!why.length) return rec;
-  return { ...rec, text: t("The automatic merge rule stops here: {why}. {text}", { why: listText(why), text: rec.text }) };
+  return { ...rec, stop: why.length ? listText(why) : t("it needs a person's judgement") };
 }

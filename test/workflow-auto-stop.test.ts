@@ -1,5 +1,5 @@
-// A PR the automatic merge rule took up and stopped for a person's judgement comes back with a recommendation, like a started item, and
-// whoever answers takes it over; a wait that clears by itself makes no question.
+// A PR the automatic merge rule took up and stopped for a person's judgement comes back with a recommendation that asks nobody: its
+// state line says why it stopped and what AutoCraft would do, and whoever answers takes it over; a wait that clears by itself makes no question.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { decidePr } from "../src/core/decide.ts";
@@ -13,6 +13,8 @@ import { runCommand, type Actor } from "../src/workflow/apply.ts";
 import { findAutoStops, startAutoStops } from "../src/workflow/auto-stop.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
+import { askedLogins, openQuestion } from "../src/workflow/asked.ts";
+import { stateLine } from "../src/workflow/status.ts";
 import { RULE_STARTER } from "../src/workflow/types.ts";
 import { expectFlat } from "./helpers/query-count.ts";
 import { T0, untilQuiet, world, type World } from "./world-db.ts";
@@ -38,7 +40,7 @@ async function unsure(w: World, n: number, head?: string): Promise<void> {
 }
 const rows = async (w: World, n: number) => (await w.rows(`SELECT id FROM item_workflows WHERE number = ${n}`)).length;
 
-test("the automatic merge rule's unsure stop asks once, the answer makes the merge the answerer's, and a CI wait asks nothing", async () => {
+test("the automatic merge rule's unsure stop asks nobody and says why it stopped, the answer makes the merge the answerer's, and a CI wait asks nothing", async () => {
   const w = current = await (await (await world()).repo()).acting(MAINT);
   await w.db.run(w.db.k.updateTable("main.tracked_repos").set({ workflow: "new" }).where("name", "=", "app"));
   await unsure(w, 1);
@@ -55,7 +57,8 @@ test("the automatic merge rule's unsure stop asks once, the answer makes the mer
   await advanceWorkflows(w.db);
   const wf = (await liveWorkflow(w.db, "app", 1))!;
   assert.deepEqual([wf.state, wf.startedBy, wf.approvedBy, wf.recHead], ["recommending", RULE_STARTER, null, "sha1"]);
-  assert.match(wf.rec!.text, /^The automatic merge rule stops here: the review is unsure\. Merge it\./);
+  assert.equal(openQuestion(wf), null, "a rule row has no open question");
+  assert.match(stateLine(wf), /^Stopped: the review is unsure\. .*Merge it\./, "the state line has the reason and the recommendation");
   assert.equal(await liveWorkflow(w.db, "app", 2), null, "a CI wait is no question");
 
   await advanceWorkflows(w.db);
@@ -63,7 +66,9 @@ test("the automatic merge rule's unsure stop asks once, the answer makes the mer
 
   assert.equal((await say(w, "yes")).outcome, "run");
   await untilQuiet(w.db, [() => advanceWorkflows(w.db), () => advancePreapprovals(w.db)], 8);
-  assert.equal((await liveWorkflow(w.db, "app", 1))!.approvedBy, MAINT);
+  const taken = (await liveWorkflow(w.db, "app", 1))!;
+  assert.equal(taken.approvedBy, MAINT);
+  assert.deepEqual(askedLogins(taken), [MAINT], "the answerer is asked from now on");
   const may = mergeMay((await loadPrFact(w.db, "app", 1))!);
   assert.ok(may?.ok && may.as === "person" && may.by === MAINT, JSON.stringify(may));
 
