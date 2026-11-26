@@ -963,7 +963,7 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   picked_at INTEGER,
   pick_until INTEGER,                 -- the pick counts until then
   no_taker_since INTEGER,             -- while queued: since when no Task Runner may take it (src/remote/takers.ts); withdrawn after a while
-  bundle_hash TEXT,                   -- sha256 of the canonical bundle JSON: a resumed job adopts its earlier run's call with the same bundle
+  bundle_hash TEXT,                   -- the reuse key (src/remote/reuse-key.ts): a resumed job adopts its earlier run's call with the same key
   consumed_at INTEGER,                -- when the caller read the done reply; a done call not yet read can still be adopted
   base_stdin TEXT,                    -- the bundle's stdin as queued, once a lease rewrote it (a workspace session's resume note)
   refusals INTEGER NOT NULL DEFAULT 0, -- retries after a model's safety filter declined the call (submitCall): at most one, and none uses an attempt

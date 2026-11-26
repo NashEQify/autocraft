@@ -7,7 +7,8 @@ import { resumingJobs } from "../jobs/fragments.ts";
 import { loadJobs } from "../jobs/index.ts";
 import { adoptableCall } from "./fragments.ts";
 import { finishCalls } from "./calls-unlease.ts";
-import { dropQueueCache, bundleHash, judges, queuedMsAfter } from "./calls-shared.ts";
+import { dropQueueCache, judges, queuedMsAfter } from "./calls-shared.ts";
+import { reuseKey } from "../../remote/reuse-key.ts";
 import { loadItemAuthors } from "../mirror/authors.ts";
 import type { NewCall } from "./types.ts";
 
@@ -20,9 +21,9 @@ const refKey = (r: { repo: string; number: number }): string => `${r.repo}#${r.n
 const parentOf = (c: NewCall) => (eb: Eb) => (c.parentId === undefined ? eb("parent_id", "is", null) : eb("parent_id", "=", c.parentId));
 
 /**
- * In a resumed job: adopts a call of the job's earlier runs with the same prompt, version, bundle and parent that is still open or answered and
- * unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt, items and parent asked something else: the
- * resumed run will not adopt them, so they are withdrawn and free their Task Runner. At most 4 statements per call.
+ * In a resumed job: adopts a call of the job's earlier runs with the same prompt, version, reuse key (src/remote/reuse-key.ts) and parent that is
+ * still open or answered and unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt, items and parent
+ * asked something else: the queued ones are withdrawn; leased ones run on, since a later call of the run may still adopt them. At most 4 statements per call.
  */
 function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash: string, now: number): Promise<number | null> {
   const q = queryDb(db);
@@ -71,24 +72,24 @@ export async function enqueueCalls(db: Db, calls: NewCall[], now: number = Date.
   ]));
   const parentRow = new Map(parents.map((r) => [Number(r.id), r]));
   const ids: (number | null)[] = [];
-  const fresh: { c: NewCall; at: number }[] = [];
+  const fresh: { c: NewCall; at: number; hash: string }[] = [];
   for (const c of calls) {
     const job = c.job.jobId === null ? undefined : jobs.get(c.job.jobId);
-    const hash = bundleHash(c.bundle);
+    const hash = reuseKey(c.bundle, c.items);
     const adoptedId = job && Number(job.resumes) > 0 && job.started_at ? await adoptEarlier(db, c.job.jobId!, Date.parse(job.started_at), c, hash, now) : null;
     ids.push(adoptedId);
-    if (adoptedId === null) fresh.push({ c, at: ids.length - 1 });
+    if (adoptedId === null) fresh.push({ c, at: ids.length - 1, hash });
   }
   if (fresh.length) {
     await db.write(async () => {
-      const rows = fresh.map(({ c }) => {
+      const rows = fresh.map(({ c, hash }) => {
         const parent = c.parentId === undefined ? undefined : parentRow.get(c.parentId);
         const forLogin = c.forLogin ?? parent?.for_login ?? null;
         const boundSlot = forLogin !== null && (c.forLogin !== undefined ? c.boundSlot === true : Number(parent?.bound_slot) === 1);
         const names = judges(c.promptId) ? [...new Set(c.items.flatMap((i) => authors.get(refKey(i)) ?? []))] : [];
         return {
           job_id: c.job.jobId, step: c.job.step, stage: c.job.stage, prompt_id: c.promptId, prompt_version: c.promptVersion, tier: c.tier, effort: c.effort, asked_model: c.askedModel,
-          bundle: JSON.stringify(c.bundle), bundle_hash: bundleHash(c.bundle), state: "queued" as const, items: JSON.stringify(c.items), repo: c.job.repo, class: c.job.cls, level: c.level,
+          bundle: JSON.stringify(c.bundle), bundle_hash: hash, state: "queued" as const, items: JSON.stringify(c.items), repo: c.job.repo, class: c.job.cls, level: c.level,
           since: now, seen_at: now, queued_since: now, max_attempts: Math.max(1, c.maxAttempts), timeout_ms: c.bundle.timeoutSeconds * 1000, parent_id: c.parentId ?? null,
           sticky_login: parent?.user_login ?? null, reference_repo: c.referenceRepo ?? null, authors: JSON.stringify(names), for_login: forLogin, bound_slot: boundSlot ? 1 : 0,
         };
