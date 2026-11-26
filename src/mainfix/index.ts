@@ -198,6 +198,7 @@ async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDep
     log(`  ${repo}: nothing to do: ${reading.why}`);
     return false;
   }
+  if (reading.kind === "unread") { log(`  ${repo}: ${reading.why}; read again at the next run`); return false; }
   const failure = reading.failure;
   const verdicts = await deps.classify(db, inputOf(repo, failure));
   if (!verdicts) { log(`  ${repo}: no usable classification; tried again at the next run`); return false; }

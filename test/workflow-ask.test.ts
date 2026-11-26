@@ -554,34 +554,15 @@ test("a merge refused for good is asked about, and a yes tries it again", async 
   assert.ok((await actions(w)).includes("merge"));
 });
 
-test("CI fixes that failed twice are the contributor's first, and a question once they were asked before", async () => {
+test("CI fixes that failed twice on a PR approved for merge come back to a person, and the contributor is not asked", async () => {
   const w = await started("review and merge");
-  const failed = async (head: string) => {
-    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: "test", state: "failure" }]) }).where("number", "=", 1));
-    for (const attempt of [1, 2]) await fix(head, "rejected", attempt);
-  };
-  const fix = (head: string, state: string, attempt: number) =>
-    w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 1, head, kind: "test", state, attempt, created_at: new Date(Date.now() + 1000).toISOString() }));
-  await failed("sha1");
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure", checks: JSON.stringify([{ name: "test", state: "failure" }]) }).where("number", "=", 1));
+  for (const attempt of [1, 2]) await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 1, head: "sha1", kind: "test", state: "rejected", reason: "the patch check refused it", attempt, created_at: new Date(Date.now() + 1000).toISOString() }));
   await settle(w);
-  assert.deepEqual(await shown(w), ["running", null, MAINT]);
-  assert.deepEqual((await w.prPlan(1)).actions.filter((a) => a.kind === "cifix").map((a) => a.params?.bucket), ["ask"]);
-  await fix("sha1", "asked", 3);
-  await settle(w);
-  assert.equal((await wf(w)).state, "running");
-  const p = await w.prPlan(1);
-  assert.equal(p.waitCode, "ci-contributor");
-  await w.db.run(w.db.k.insertInto("main.item_plans").values({ repo: "app", number: 1, kind: "pr", head: "sha1", state: p.state, actions: "[]", wait: p.wait, reasons: "[]", note: null, view: JSON.stringify({ waitKind: p.waitKind, waitCode: p.waitCode }), planned_at: T0 }));
-  assert.match((await legWait(w.db, await wf(w)))!, /contributor/);
-
-  // A push of ours, whose CI fix fails as well: they were asked already.
-  await w.db.run(w.db.k.insertInto("main.push_outcomes").values({ at: new Date().toISOString(), stage: "conflict", action: "conflict-push", repo: "app", number: 1, from_oid: "sha1", to_oid: "sha1b", before_res: "unknown" }));
-  await w.synced(1, "sha1b");
-  await w.review(1, { head: "sha1b" });
-  await failed("sha1b");
-  await advanceWorkflows(w.db);
+  assert.ok(!(await w.prPlan(1)).actions.some((a) => a.kind === "cifix"));
   const x = await wf(w);
-  assert.deepEqual([x.state, x.blocker], ["blocked", "failed-twice"]);
+  // The question names the failing check and the CI fix's last try.
+  assert.deepEqual([x.state, /`test`/.test(x.rec?.text ?? ""), /patch check refused it/.test(x.rec?.text ?? "")], ["blocked", true, true]);
 });
 
 test("an implementation that ended without a pull request is asked about, and a yes implements the issue again", async () => {

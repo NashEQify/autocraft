@@ -317,7 +317,7 @@ export function factsOf(w: PrRows): PrFacts {
   if (w.diffPending) f.diffPending = { lastRead: NOW - 600_000 };
   f.post = { postable: true, posted: w.posted ? { head: qh, at: at("10:01"), opusAt: at("10:00") } : null };
   if (w.conflictsWithStatement) f.statementConflicts = [{ id: 3, where: "app", text: "t", reason: "r" }];
-  const cifixOf = (h: string): NonNullable<PrFacts["cifix"]> => ({ ...cifixAt(w.patches.cifixes, h, NOW, w.tasks), checksAt: at("11:00") });
+  const cifixOf = (h: string): NonNullable<PrFacts["cifix"]> => ({ ...cifixAt(w.patches.cifixes, h, NOW, w.tasks), checksAt: at("11:00"), running: false, failing: [] });
   const redNow = w.checks.head === head && w.checks.overall === "failure";
   if (!take && open && head !== qh && f.reviewHold?.kind === "ci" && f.reviewHold.red && redNow) { f.ci = "failure"; f.gateRed = true; f.cifix = cifixOf(head); }
   if (!take) return f;

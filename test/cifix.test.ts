@@ -9,7 +9,7 @@ import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
 import { FORMAT_ARTIFACT, gitFormatDiff, runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { formattingOnly, guardPatch } from "../src/cifix/guard.ts";
 import { parseFailedLog } from "../src/cifix/logs.ts";
-import { triage } from "../src/cifix/triage.ts";
+import { triage, unrelatedTests } from "../src/cifix/triage.ts";
 import type { CifixPr, CiFailure } from "../src/cifix/types.ts";
 import { REPO_PATH } from "../src/sandbox/command.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
@@ -100,6 +100,31 @@ describe("triage", () => {
     const steps = parseFailedLog(text);
     assert.deepEqual(steps.map((s) => [s.job, s.step, s.tail]), [["test", "cargo test", "error: boom\nmore\n"], ["fmt", "check", "Diff in x:1:\n"]]);
     assert.equal(parseFailedLog(`j\ts\t${"x".repeat(9000)}\n`)[0]!.tail.length, 4000);
+  });
+
+  test("a job log gh cannot split into steps is cut to its failed step, and failed tests outside the PR's files look flaky", () => {
+    const job = "gate / gate (ubuntu-24.04)";
+    const lines = [
+      "##[start-action display=Gate;id=run]", "##[group]Run sh gate.sh", "test result: ok. 3 passed; 0 failed",
+      "test frame_gizmo::warp_toolbar::tests::keeps_a_warp ... FAILED", "", "failures:", "", "---- frame_gizmo::warp_toolbar::tests::keeps_a_warp stdout ----",
+      "thread 'frame_gizmo::warp_toolbar::tests::keeps_a_warp' panicked at /home/runner/.cargo/git/checkouts/libs/crates/ui/src/frame.rs:435:5:",
+      "   13: keeps_a_warp", "             at ./src/frame_gizmo/warp_toolbar/mod.rs:256:77", "", "failures:", "    frame_gizmo::warp_toolbar::tests::keeps_a_warp", "",
+      "test result: FAILED. 487 passed; 1 failed", "\u001b[1merror\u001b[0m: test failed, to rerun pass `-p ui-egui --lib`", "error: ci failed at `test`",
+      "##[error]Process completed with exit code 1.", "Post job cleanup.", ...Array.from({ length: 300 }, (_, i) => `[command]/usr/bin/git config --local cleanup ${i}`),
+    ];
+    const text = lines.map((l, i) => `${job}\tUNKNOWN STEP\t2026-11-26T07:50:${String(i % 60).padStart(2, "0")}.0000000Z ${l}`).join("\n");
+    const steps = parseFailedLog(text);
+    assert.equal(steps.length, 1);
+    assert.equal(steps[0]!.step, "Gate");
+    assert.ok(steps[0]!.tail.includes("panicked at") && steps[0]!.tail.trimEnd().endsWith("exit code 1.") && !steps[0]!.tail.includes("cleanup"));
+    const f: CiFailure = { head: "h", checks: [{ name: job, conclusion: "failure", runId: 1, steps }] };
+    assert.equal(triage(f).kind, "code");
+    assert.deepEqual(unrelatedTests(f, ["crates/ui-egui/src/autosave_name.rs"]), ["frame_gizmo::warp_toolbar::tests::keeps_a_warp"]);
+    // The failing test's module, or a backtrace line in a changed file, ties it to the change; so does a compiler error next to it.
+    assert.equal(unrelatedTests(f, ["crates/ui-egui/src/frame_gizmo/warp_toolbar/mod.rs"]), null);
+    assert.equal(unrelatedTests(f, ["crates/ui/src/frame.rs"]), null);
+    const built: CiFailure = { head: "h", checks: [{ name: job, conclusion: "failure", runId: 1, steps: [{ ...steps[0]!, tail: `error[E0425]: cannot find value\n${steps[0]!.tail}` }] }] };
+    assert.equal(unrelatedTests(built, ["crates/ui-egui/src/autosave_name.rs"]), null);
   });
 });
 

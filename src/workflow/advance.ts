@@ -20,6 +20,7 @@ import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
+import { CIFIX_NO_LOG_REASON } from "../core/rules.ts";
 import type { StopCode } from "../core/codes.ts";
 import { conflictPath, decidePr } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
@@ -104,7 +105,9 @@ function readAt(pass: Pass, ref: string, r: ReviewRow): string {
  */
 function failures(pass: Pass, ref: string, since: string, head: string, facts: PrFacts | undefined): { step: string; count: number }[] {
   const p = pass.patches.get(ref), f = facts?.head === head ? facts : undefined;
-  const count = (rows: { state: string; createdAt: string }[]): number => rows.filter((r) => FAILED_TRY.includes(r.state) && r.createdAt > since).length;
+  // A CI fix row of older code that found no failure log to read was no try.
+  const count = (rows: { state: string; createdAt: string; reason?: string | null }[]): number =>
+    rows.filter((r) => FAILED_TRY.includes(r.state) && r.createdAt > since && !(r.state === "failed" && r.reason === CIFIX_NO_LOG_REASON)).length;
   const asked = (rows: { state: string; createdAt: string; at: string }[]): boolean => rows.some((r) => r.state === "asked" && r.createdAt > since && r.at !== head);
   const of = (step: string, rows: { state: string; createdAt: string; at: string }[], theirs: boolean) => ({ step, count: theirs && !asked(rows) ? 0 : count(rows) });
   return [
@@ -481,7 +484,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   const says = review ?? (needed && read?.head === head && read.reviewHold?.kind === "failed" && read.reviewHold.until === undefined ? stored : null);
   const plan: PlanPart[] = says ? planOf(says.fixes, w.plan) : w.plan;
   if (!sameJson(plan, w.plan)) patch.plan = plan;
-  const view: ReviewView | null = says ? { verdict: says.verdict, sure: says.sure, rec: says.workflow?.recommendation ?? null } : null;
+  const view: ReviewView | null = says ? { verdict: says.verdict, sure: says.sure, rec: says.workflow?.recommendation ?? null, finding: says.public_summary } : null;
 
   // The step: the merge leg's state for the merge part, else where the review and its fixes are.
   const leg = legRow?.state ?? null;
@@ -531,6 +534,11 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     thresholds: pass.thresholds,
   });
   if (found) {
+    // A CI fix that failed twice names what fails and what it tried last.
+    if (found.blocker === "failed-twice" && found.params.step === "CI fix" && f?.head === head && f.cifix) {
+      if (f.cifix.failing.length) found.params.failing = f.cifix.failing.slice(0, 3);
+      if (f.cifix.lastTry) found.params.last = f.cifix.lastTry;
+    }
     // A pre-merge review's findings become plan parts the recommendation fixes; nothing merges past them as they are.
     let blockPlan = plan;
     if (ended && found.params.reason === ended.reason && premergeStop(ended)) {

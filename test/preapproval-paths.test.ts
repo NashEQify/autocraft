@@ -1,10 +1,13 @@
 // Who makes the next fix of an approved PR (src/preapproval/paths.ts): the merge leg waits for our own steps and for a contributor who was or
-// is asked, and stops for a person otherwise.
+// is asked, and stops for a person otherwise. Red CI the CI fix gives up on stops for the approver.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decidePr } from "../src/core/decide.ts";
 import { fixPath, redCiPath, type FixPath } from "../src/preapproval/paths.ts";
-import { prFacts } from "./world.ts";
+import { CIFIX_ASK_REASON, CIFIX_NO_LOG_REASON } from "../src/core/rules.ts";
+import { cifixAt } from "../src/data/changes/pure.ts";
+import type { CifixRow } from "../src/data/changes/types.ts";
+import { HEAD, prFacts } from "./world.ts";
 
 type Over = Parameters<typeof prFacts>[0];
 const NO_COMMENT = { repoFacts: { commentApproved: false } } as const;
@@ -20,16 +23,18 @@ const CI: [string, Over, FixPath][] = [
   ["the CI fix can try", red(), "fix"],
   ["a formatter run", red({ states: ["formatting"], formattingTask: 4, formatterEnded: false }), "fix"],
   ["a push under way", red({ states: ["pushing"] }), "fix"],
+  ["a required check still runs: the CI fix waits for the run to end", red({ running: true }), "fix"],
+  ["the failure log could not be read yet: read again after a backoff", red({ readAgainAt: Date.parse("2026-11-04T13:00:00Z") }), "fix"],
   ["a rerun waits for approval", red({ infraRuns: [7] }, { repoFacts: { ciApproved: false } }), null],
-  ["the tries at the head are used: the contributor is asked next", red({ tries: 2, states: ["failed", "failed"] }), "contributor"],
-  ["the pushes of the PR are used: the contributor is asked next", red({ totalPushes: 2 }), "contributor"],
-  ["the contributor was asked", red({ states: ["asked"] }), "contributor"],
-  ["the ask did not reach GitHub and is posted again", red(LATER), "contributor"],
-  ["the ask never reached GitHub", red(FINAL), null],
-  ["the ask failed", red({ states: ["comment-failed"] }), null],
-  ["nobody can be asked: no comment approval", red({ tries: 2, states: ["failed", "failed"] }, NO_COMMENT), null],
-  ["nobody can be asked: a quiet PR", red({ tries: 2, states: ["failed", "failed"] }, { quiet: true }), null],
-  ["nobody to ask: a PR of our own", red({ states: ["asked"] }, { authorIsPipeline: true }), null],
+  // A person approved the merge: what the CI fix gives up on is theirs, never the contributor's.
+  ["the tries at the head are used: the approver is asked", red({ tries: 2, states: ["failed", "failed"] }), null],
+  ["the pushes of the PR are used: the approver is asked", red({ totalPushes: 2 }), null],
+  ["the contributor was asked on an approved PR: the CI fix tries again", red({ states: ["asked"] }), "fix"],
+  ["a patch posted as a comment waits for the contributor", red({ states: ["asked"], askedPatch: true }), "contributor"],
+  ["the patch comment did not reach GitHub and is posted again", red(LATER), "contributor"],
+  ["the patch comment never reached GitHub", red(FINAL), null],
+  ["the comment failed", red({ states: ["comment-failed"] }), null],
+  ["nobody to ask: a PR of our own", red({ states: ["asked"], askedPatch: true }, { authorIsPipeline: true }), null],
   ["our own push broke it and the CI fix gave up", red({ tries: 2, states: ["failed", "failed"] }, { brokeByUs: true }), null],
   ["the push was refused", red({ states: ["push-denied"] }), null],
   ["nothing to fix", red({ states: ["skipped"] }), null],
@@ -52,7 +57,7 @@ const FIX: [string, Over, FixPath][] = [
   ["nobody to ask: a PR of our own", takefix({ recorded: ["asked"] }, { ...CLOSED, authorIsPipeline: true }), null],
 ];
 
-test("an approved PR waits for the contributor who was or is asked, and stops when nobody can be", () => {
+test("an approved PR waits for our own steps and for a contributor who has a patch to apply, and stops for a person otherwise", () => {
   for (const [rows, path] of [[CI, redCiPath], [FIX, fixPath]] as const) {
     for (const [name, over, want] of rows) {
       const f = prFacts(over);
@@ -62,4 +67,15 @@ test("an approved PR waits for the contributor who was or is asked, and stops wh
       if (decidePr(f).waitKind === "contributor" && !f.quiet && !f.authorIsPipeline) assert.equal(want, "contributor", name);
     }
   }
+});
+
+test("an approved PR whose CI fix found no log yet and asked the contributor is picked up by the CI fix again", () => {
+  const row = (id: number, state: string, reason: string | null): CifixRow => ({ id, repo: "photocraft", number: 7, createdAt: `2026-11-04T10:0${id}:00.000Z`, head: HEAD, toHead: null, kind: "code", state, reason, files: [], attempt: id, taskId: null, lintTask: null, runs: null });
+  const rows = [row(1, "failed", CIFIX_NO_LOG_REASON), row(2, "failed", CIFIX_NO_LOG_REASON), row(3, "asked", CIFIX_ASK_REASON)];
+  const cifix = { ...cifixAt(rows, HEAD, Date.parse("2026-11-04T11:00:00Z"), new Map()), checksAt: "2026-11-04T11:00:00.000Z", running: false, failing: ["gate / gate (ubuntu-24.04)"] };
+  const f = prFacts({ ci: "failure", cifix });
+  assert.equal(redCiPath(f), "fix");
+  assert.equal(decidePr(f).actions.find((a) => a.kind === "cifix")?.params?.bucket, "work");
+  // Nobody approved the merge: the ask stands, and the PR waits for its contributor.
+  assert.notEqual(decidePr(prFacts({ ci: "failure", cifix, workflow: { entry: "fixup", approved: false, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } })).actions.find((a) => a.kind === "cifix")?.params?.bucket, "work");
 });

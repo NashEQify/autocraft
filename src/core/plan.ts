@@ -308,6 +308,16 @@ export type PrFacts = {
     checksAt: string | null;
     /** Comments at the head that never reached GitHub, as on `fixup`. */
     unsent?: UnsentAsk;
+    /** The reason of the head's latest try (or of the cap), or null. */
+    lastTry: string | null;
+    /** A patch was posted as a comment at the head (an `asked` row that is not the plain ask to the contributor). */
+    askedPatch: boolean;
+    /** Reads of the head's failure log that found none to read yet, and when the next read is due (ms) while it waits. */
+    unreads: number; readAgainAt?: number;
+    /** A required check at the head has not finished yet: its run's log cannot be read and its failed jobs cannot be rerun before it ends. */
+    running: boolean;
+    /** The required checks that fail at the head. */
+    failing: string[];
   } | null;
   /** The pipeline merged the PR: when, why what landed is reviewed (null: it merged as a person approved it), the time merges are reviewed from, and what the stored post-merge review looks like. */
   postmerge: { mergedAt: string; head: string | null; why: LandedWhy | null; since: string; review: { at: string; error: string | null } | null } | null;

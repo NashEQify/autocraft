@@ -71,6 +71,12 @@ export type UnsentAsk = { until: number } | "final";
 export type CifixFacts = {
   states: string[]; tries: number; rerunAt: string | null; infraRuns: number[] | null; formattingTask: number | null; formatterEnded: boolean;
   totalPushes: number; totalTries: number; skipReason: string | null; unsent?: UnsentAsk;
+  /** The reason of the head's latest try (or of the cap), or null. */
+  lastTry: string | null;
+  /** A patch was posted as a comment at the head (an `asked` row that is not the plain ask to the contributor). */
+  askedPatch: boolean;
+  /** Reads of the head's failure log that found none to read yet (`unread` rows), and when the next read is due (ms) while it waits. */
+  unreads: number; readAgainAt?: number;
 };
 export type FixupAtHead = { recorded: string[]; unsent?: UnsentAsk };
 export type ConflictBucket = "merge" | "ask" | "ask-retry" | "asked" | "held" | "unapproved" | "linting" | "capped" | "done";

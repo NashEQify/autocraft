@@ -100,6 +100,15 @@ export const CIFIX_TRY_STATES = ["formatting", "linting", "superseded", "pushing
 export const CIFIX_PUSH_STATES = ["pushing", "pushed"];
 /** States that end the CI fix step's work at a head. */
 export const CIFIX_FINAL_STATES = ["pushed", "pushing", "asked", "push-denied", "cannot-push", "skipped", "comment-failed"];
+/** The reason of the `asked` row that hands red CI to the contributor (an `asked` row with a posted patch has another). */
+export const CIFIX_ASK_REASON = "the CI fix is left to the contributor";
+/** The reason of a `failed` row older code wrote when the failure log could not be read; such a row is no try (it is `unread` now). */
+export const CIFIX_NO_LOG_REASON = "no failure log";
+/**
+ * A failure log that cannot be read yet (the run still goes on, GitHub has no log to download yet) is recorded as `unread`, which is
+ * no try, and read again after these delays; an unreadable log past them is a failed try.
+ */
+export const CIFIX_UNREAD_DELAYS_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000];
 
 /**
  * An ask comment that never reached GitHub (the app lane got no token, so no request went out) is recorded as
@@ -107,10 +116,10 @@ export const CIFIX_FINAL_STATES = ["pushed", "pushing", "asked", "push-denied", 
  */
 export const COMMENT_UNSENT_DELAYS_MS = [10 * 60_000, 60 * 60_000];
 /** Where a head's unsent ask comments (`ats`: their rows' times, ISO) leave the next ask: due (null), due at `until` (ms), or final. */
-export function unsentAsk(ats: readonly string[], nowMs: number): { until: number } | "final" | null {
+export function unsentAsk(ats: readonly string[], nowMs: number, delays: readonly number[] = COMMENT_UNSENT_DELAYS_MS): { until: number } | "final" | null {
   if (ats.length === 0) return null;
-  if (ats.length > COMMENT_UNSENT_DELAYS_MS.length) return "final";
-  const until = Math.max(...ats.map((a) => Date.parse(a))) + COMMENT_UNSENT_DELAYS_MS[ats.length - 1]!;
+  if (ats.length > delays.length) return "final";
+  const until = Math.max(...ats.map((a) => Date.parse(a))) + delays[ats.length - 1]!;
   return until > nowMs ? { until } : null;
 }
 
