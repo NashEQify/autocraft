@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.5.2";
+export const HELPER_VERSION = "1.5.3";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -2861,14 +2861,21 @@ async function gitTree(m) {
     utimesSync(bare, now, now);
     const has = async () => (await run("git", ["-C", bare, "cat-file", "-e", `${m.sha}^{commit}`])).code === 0;
     if (await has()) return;
-    const bySha = await run("git", ["-C", bare, "fetch", "-q", "--depth", "1", "origin", m.sha]);
+    const fetchSha = () => run("git", ["-C", bare, "fetch", "-q", "--depth", "1", "origin", m.sha]);
+    let bySha = await fetchSha();
+    // A gc that an older helper left running detached rewrites `shallow` under a fetch; it finishes within seconds.
+    if (bySha.code !== 0 && bySha.stderr.includes("shallow file has changed")) {
+      await new Promise((r) => setTimeout(r, 5000));
+      bySha = await fetchSha();
+    }
     if (bySha.code !== 0 && m.ref) await run("git", ["-C", bare, "fetch", "-q", "--depth", "1", "origin", m.ref]);
     if (!(await has())) throw new Error(`could not fetch ${m.owner}/${m.repo}@${m.sha.slice(0, 12)}: ${bySha.stderr.trim().slice(0, 200)}`);
-    // Each fetch adds a pack; `gc --auto` packs them once enough piled up, checked at most once a day per repo.
+    // Each fetch adds a pack; `gc --auto` packs them once enough piled up, checked at most once a day per repo. It runs in the
+    // foreground: detached, it would outlive the lock and rewrite `shallow` under the next fetch.
     const stamp = join(bare, "autocraft-gc");
     let gcAt = 0;
     try { gcAt = statSync(stamp).mtimeMs; } catch { /* never */ }
-    if (Date.now() - gcAt > GC_EVERY_MS) { await run("git", ["-C", bare, "gc", "--auto", "--quiet"]); writeFileSync(stamp, ""); }
+    if (Date.now() - gcAt > GC_EVERY_MS) { await run("git", ["-C", bare, "-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"]); writeFileSync(stamp, ""); }
   }));
   return cachedTree(tree, (tmp) => untar(tmp, (stdin) => new Promise((resolve, reject) => {
     const a = spawn("git", ["-C", bare, "archive", "--format=tar", m.sha], { env: GIT_ENV, stdio: ["ignore", "pipe", "ignore"] });
