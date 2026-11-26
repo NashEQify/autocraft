@@ -166,8 +166,9 @@ export async function repoApprovals(db: Db, repo: string): Promise<RepoApprovals
 /**
  * Lets a repo-level write through (no item behind it): the repo approval it needs (null: none) and, for the pipeline's own writes, the global switch.
  * `members`: the verdicts of the items the write serves: the merge's (src/merge/approval.ts) of the PRs a batch carries, or the
- * implementation's. A "merge" or "fix-issue" write passes without the repo's approval when every one of them passes, so a batch of PRs
- * people approved one by one, or an issue a person queued, needs no repo switch.
+ * implementation's, or whether a person started or approved each item whose status comment it writes. A "merge", "fix-issue" or "status"
+ * write passes without the repo's approval when every one of them passes, so a batch of PRs people approved one by one, an issue a person
+ * queued, or the status comments of items people started, need no repo switch.
  */
 export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, login?: string, o: { members?: readonly { ok: boolean }[] } = {}): Promise<GuardedRepo | Refused> {
   const why = repoPermission(await repoApprovals(db, repo), need, by, repo, o.members);

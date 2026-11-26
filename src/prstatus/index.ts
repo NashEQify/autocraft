@@ -3,7 +3,8 @@
 // an edit. The line comes from the public status layer (src/public/status.ts), so it never carries hold reasons or review
 // text; a security fix gets the same line as any PR. Places in the queue past QUEUE_EXACT show as one bucket, so a merge
 // or a new batch edits only the PRs near the front. Writes go through src/github/write.ts as bulk writes (half the pacing
-// budget), under the repo's PR status switch (src/prstatus/approval.ts) and the step's daily limit. No timer: the planner
+// budget), under the repo's PR status switch (src/prstatus/approval.ts) and the step's daily limit. The comment of an item a person
+// started or approved needs no switch: their start is its approval (src/core/gates.ts showsWorkFor), under the app identity. No timer: the planner
 // queues the step when a PR's line differs from the one posted; a PR whose writes keep failing waits out a backoff.
 //
 // Every item a person started, issue or PR, gets the comment as soon as it starts, built from the workflow's lines (src/workflow/status.ts): where it stands, who started,
@@ -26,7 +27,7 @@ import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
 import { freshConfig } from "../data/control/index.ts";
-import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, type StatusRow } from "../data/workflow/index.ts";
+import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, workflowActors, type StatusRow } from "../data/workflow/index.ts";
 import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
 import { attributionLines, currentStep, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
 import { heldWork, type ItemWorkflow, type PlanPart } from "../workflow/types.ts";
@@ -144,8 +145,8 @@ export function commentBody(repo: string, number: number, line: string, history:
 
 
 type Stored = StatusRow;
-/** `released`: the comment of a held item that nobody had started, and that nobody holds any more. */
-export type Due = { number: number; facts: StatusFacts; line: string; prev: Stored | null; released?: true };
+/** `released`: the comment of a held item that nobody had started, and that nobody holds any more. `commandedBy`: the person who started or approved the item's workflow, whose start is the comment's approval (under the app identity). */
+export type Due = { number: number; facts: StatusFacts; line: string; prev: Stored | null; released?: true; commandedBy?: string };
 
 /** A started or held item's line: its whole comment text, in paragraphs. */
 const isWorkflowText = (line: string | null | undefined): boolean => !!line?.includes("\n\n");
@@ -170,15 +171,20 @@ const retryAt = (failures: number, now: number): string =>
  * The PRs of each of `repos` whose comment is due: an open PR in the pipeline's scope past triage with no comment yet, or a PR
  * whose posted line differs from its line now. Out of scope (the repo's Pipeline off, a person ended the item) a posted
  * comment still gets its Merged or Closed edit, and that of an item whose hold left nothing to go on with says it is not held any more. Batch PRs get none; a PR waiting out a failure backoff is left out; a member
- * of a batch whose PR has not opened yet keeps its line.
+ * of a batch whose PR has not opened yet keeps its line. `approved`: the repos with the PR status switch on (all of `repos` when absent);
+ * in the others only the items a person started or approved get their comment, under the app identity.
  */
-export async function statusDueIn(db: Db, repos: readonly string[], now: number = Date.now()): Promise<Map<string, Due[]>> {
-  const inputs = await loadStatusInputs(db, repos);
+export async function statusDueIn(db: Db, repos: readonly string[], now: number = Date.now(), approved?: ReadonlySet<string>): Promise<Map<string, Due[]>> {
+  const switched = approved ? repos.filter((r) => approved.has(r)) : repos;
+  const [inputs, app] = await db.together(() => Promise.all([loadStatusInputs(db, repos, switched), switched.length < repos.length ? githubIdentity(db).then((i) => i === "app") : false]));
   const refs: { repo: string; number: number }[] = [];
   const prevOf = new Map<string, Stored>();
+  const commander = (w: { wf: ItemWorkflow } | undefined): string | null => (w && app ? workflowActors(w.wf, null)[0] ?? null : null);
   for (const [repo, { stored, inScope, started }] of inputs) {
+    const on = !approved || approved.has(repo);
     for (const r of stored) prevOf.set(`${repo}#${r.number}`, r);
     for (const n of new Set([...inScope, ...[...started].filter(([, w]) => w.open).map(([n]) => n), ...stored.map((r) => r.number)])) {
+      if (!on && commander(started.get(n)) === null) continue;
       const at = prevOf.get(`${repo}#${n}`)?.retry_at;
       if (!at || Date.parse(at) <= now) refs.push({ repo, number: n });
     }
@@ -209,12 +215,13 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
     // A started item's line is its whole comment text, so any change edits it; once it ended, the final line is the same as any PR's.
     const line = facts.workflow && !ended ? workflowLines({ ...facts, workflow: facts.workflow }).join("\n\n") : statusLine(facts);
     const first = facts.workflow ? !ended : !NO_FIRST_POST.has(status.step);
-    if (prev?.line != null ? prev.line !== line : first) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts, line, prev });
+    const by = commander(w);
+    if (prev?.line != null ? prev.line !== line : first) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts, line, prev, ...(by ? { commandedBy: by } : {}) });
   }
   return out;
 }
 
-export const statusDue = async (db: Db, repo: string, now: number = Date.now()): Promise<Due[]> => (await statusDueIn(db, [repo], now)).get(repo) ?? [];
+export const statusDue = async (db: Db, repo: string, now: number = Date.now(), approved?: ReadonlySet<string>): Promise<Due[]> => (await statusDueIn(db, [repo], now, approved)).get(repo) ?? [];
 
 /** The earliest end of a failure backoff of each repo's comments after `now`. */
 export async function statusRetriesAt(db: Db, repos: readonly string[], now: number = Date.now()): Promise<Map<string, number>> {
@@ -265,7 +272,7 @@ const commentIdOf = (stdout: string): string | null => /#issuecomment-(\d+)/.exe
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
 const notFound = (r: { stderr: string; stdout: string }): boolean => /404|not found/i.test(`${r.stderr} ${r.stdout}`);
 
-export type PrStatusParams = { repo: string; by: By; runId: string; limit: number; log?: (line: string) => void; querier?: Querier; exec?: Exec; now?: () => Date; base?: string | null };
+export type PrStatusParams = { repo: string; by: By; runId: string; limit: number; log?: (line: string) => void; querier?: Querier; exec?: Exec; now?: () => Date; base?: string | null; /** Replaces the installation-token minter (tests). */ mint?: Writer["mint"] };
 export type PrStatusResult = { posted: string[]; edited: string[]; gone: string[]; failed: string[]; due: number; paced: boolean };
 
 /**
@@ -276,15 +283,23 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
   const log = p.log ?? (() => {});
   const out: PrStatusResult = { posted: [], edited: [], gone: [], failed: [], due: 0, paced: false };
   const now = p.now ?? (() => new Date());
-  if (!(await statusDue(db, p.repo, now().getTime())).length) return out;
-  const g = await guardRepo(db, p.repo, "status", p.by);
-  if ("refused" in g) { log(g.refused); return out; }
+  // Without the repo's switch only the comments of items a person started or approved are due: their starts are the approval (members).
+  const repoGrant = await guardRepo(db, p.repo, "status", p.by);
+  const only = "refused" in repoGrant ? new Set<string>() : undefined;
+  const dueNow = async (): Promise<Due[]> => await statusDue(db, p.repo, now().getTime(), only);
+  const first = await dueNow();
+  if (!first.length) { if ("refused" in repoGrant) log(repoGrant.refused); return out; }
+  const grant = async (due: readonly Due[]) => ("refused" in repoGrant ? await guardRepo(db, p.repo, "status", p.by, undefined, { members: due.map((d) => ({ ok: d.commandedBy !== undefined })) }) : repoGrant);
+  const g0 = await grant(first);
+  if ("refused" in g0) { log(g0.refused); return out; }
   const release = await leaseItem(db, `pr-status:${p.repo}`, log);
   if (!release) return out;
   try {
-    const due = await statusDue(db, p.repo, now().getTime());
+    const due = await dueNow();
     out.due = due.length;
-    const w: Writer = { db, login: ACTOR };
+    const g = due.length ? await grant(due) : g0;
+    if ("refused" in g) { log(g.refused); return out; }
+    const w: Writer = { db, login: ACTOR, ...(p.mint ? { mint: p.mint } : {}) };
     const q = p.querier ?? new Client(500), run = p.exec ?? realExec;
     const base = (p.base === undefined ? envVar("BASE_URL") ?? null : p.base)?.replace(/\/+$/, "") || null;
     const me = await writerLogin(db), ours = await ownLoginTest(db, p.repo), slug = shownMention(appSlug(), await mentionName(db));

@@ -37,11 +37,11 @@ export function mergePermission(f: PrFacts): Permission {
 export const pushPermission = (f: PrFacts, kind: PushKind, operatorFix = false): Permission => ofMay(pushMayOf(f, kind, operatorFix), "app");
 
 /**
- * Why a repo-level write is refused, or null. `members`: the verdicts of the items the write serves; a "merge" or "fix-issue" write passes
- * without the repo's approval when every one of them passes.
+ * Why a repo-level write is refused, or null. `members`: the verdicts of the items the write serves; a "merge", "fix-issue" or "status" write
+ * passes without the repo's approval when every one of them passes.
  */
 export function repoPermission(a: RepoApprovals, need: RepoNeed, by: By, repo: string, members: readonly { ok: boolean }[] = []): Refusal | null {
-  const approved = (need === "merge" || need === "fix-issue") && members.length > 0 && members.every((m) => m.ok);
+  const approved = (need === "merge" || need === "fix-issue" || need === "status") && members.length > 0 && members.every((m) => m.ok);
   const why = gateRepo(a, approved ? null : need, by, repo);
   return why === null ? null : by === "pipeline" && !a.pipelineOn ? refusal("pipeline-off", why) : refusal("repo-approval", why, { need, repo });
 }

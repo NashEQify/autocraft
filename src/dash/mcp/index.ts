@@ -26,7 +26,7 @@ import { parse } from "../../workflow/parse.ts";
 import { runText } from "../../workflow/read.ts";
 import { attributionLines, recommendationLine, stateLine, weightLabel } from "../../workflow/status.ts";
 import { eventsOf } from "../../workflow/store.ts";
-import { legWait } from "../../workflow/waits.ts";
+import { legWait, notPostedLine } from "../../workflow/waits.ts";
 import { home } from "../api/maintain.ts";
 import { loadItems } from "../../data/mirror/index.ts";
 import { loadLegPass, loadPrWorkflows } from "../../data/workflow/index.ts";
@@ -319,18 +319,19 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   if (role !== "operator" && role !== "maintainer" && quiet.has(ref)) {
     return show(`${ref}: ${it.state}`, "item", { item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)), workflow: null, latestCommands: [] });
   }
-  const wait = wf ? await legWait(env.db, wf) : null;
+  const [wait, notPosted] = wf ? await Promise.all([legWait(env.db, wf), notPostedLine(env.db, wf)]) : [null, null];
   const events = (on ? await eventsOf(env.db, wf!.repo, wf!.number) : said).slice(-10);
   const data = {
     item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)),
     workflow: wf ? {
       ...(on ? { item: on } : {}),
-      state: stateLine(wf, undefined, undefined, wait), recommendation: recommendationLine(wf.rec), ...(wf.rec && wf.recAt ? { asked: wf.recAt } : {}), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
+      state: stateLine(wf, undefined, undefined, wait), ...(notPosted ? { notPosted } : {}), recommendation: recommendationLine(wf.rec), ...(wf.rec && wf.recAt ? { asked: wf.recAt } : {}), weight: weightLabel(wf.weight), attribution: attributionLines(wf),
       plan: wf.plan.map((p) => ({ n: p.n, title: p.title, state: p.state, major: p.major ?? false })),
     } : null,
     latestCommands: events.map((e) => ({ login: e.login, via: e.via, kind: e.kind, at: e.at, reply: e.line })),
   };
-  const header = wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`;
+  const header = (wf?.rec ? `${ref} waits for an answer. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`)
+    + (notPosted ? ` ${notPosted}.` : "");
   return show(on ? `${t("{ref} is part of the work on {on}.", { ref, on })} ${header}` : header, "item", data);
 }
 

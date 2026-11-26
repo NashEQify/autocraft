@@ -15,7 +15,7 @@ import { attributionLines, blockerLabel, listText, recommendationText, recordedS
 import { isLive } from "../../workflow/store.ts";
 import type { StoredEvent } from "../../data/workflow/types.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow } from "../../workflow/types.ts";
-import { legWait } from "../../workflow/waits.ts";
+import { legWait, notPostedLine } from "../../workflow/waits.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -60,7 +60,7 @@ export function stepsOf(wf: ItemWorkflow, leg: string | null): Step[] | null {
 }
 
 /** The status block of the item's latest workflow. */
-function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, veiled: boolean, wait: string | null): MaintainItemStatus {
+function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, veiled: boolean, wait: string | null, notPosted: string | null): MaintainItemStatus {
   const mine = events.filter((e) => e.workflowId === wf.id || (e.workflowId === null && e.at >= wf.startedAt));
   const last = mine[mine.length - 1];
   const answered = [...mine].reverse().find((e) => e.kind === "answered");
@@ -83,6 +83,7 @@ function statusOf(wf: ItemWorkflow, events: StoredEvent[], leg: string | null, v
     asked: wf.rec ? wf.recAt : null,
     unclear: last?.kind === "ambiguous" ? { by: last.login, at: last.at, line: last.line ?? "" } : null,
     confirm: accepted?.line ?? null,
+    notPosted: veiled ? null : notPosted,
   };
 }
 
@@ -109,7 +110,7 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const leg = wf && facts.leg?.workflow_id === wf.id ? facts.leg.state : null;
   return {
     repo, number: n, kind: facts.kind, canAct: may,
-    status: wf ? statusOf(wf, events, leg, facts.quiet, await legWait(db, wf)) : null,
+    status: wf ? statusOf(wf, events, leg, facts.quiet, await legWait(db, wf), await notPostedLine(db, wf)) : null,
     events: shown,
     duplicates: facts.duplicates.map((d): MaintainDuplicate => ({ repo, number: d.other, kind: d.shown?.kind === "issue" ? "issue" : "pr", state: d.shown?.state ?? "open", title: d.shown?.title ?? "", canonical: d.canonical }))
       .sort((a, b) => a.number - b.number),

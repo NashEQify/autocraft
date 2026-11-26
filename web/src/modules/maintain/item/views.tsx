@@ -199,6 +199,7 @@ function StatusCard({ m, d }: { m: MaintainItem; d: ItemPageData }) {
         ))}
         {s && s.live && !s.approved && <p className="text-sm text-ink/80">{t("Not approved for merge")}</p>}
       </div>
+      {s?.notPosted && <p className="rounded border border-warn/60 bg-warn/10 px-3 py-2 text-sm">{s.notPosted}</p>}
       {s?.blocker && (
         <p className="rounded border border-bad/50 bg-bad/10 px-3 py-2 text-sm">
           <span className="font-semibold">{t("Blocker:")}</span> {s.blocker}
