@@ -793,10 +793,8 @@ const POLL_TOPICS = ["remote-calls", "remote-queue", "remote-helpers", "workspac
  */
 class CallPoller {
   readonly #db: Db;
-  /** The last full poll of each held call, and the POLL_TOPICS counters read with it. */
-  #polls = new Map<number, runners.CallPoll>();
-  #stamp = "";
-  #readAt = 0;
+  /** The last full poll of each held call, with the POLL_TOPICS counters read with it and when it was read. */
+  #polls = new Map<number, { poll: runners.CallPoll; stamp: string; at: number }>();
   #waiting = new Map<number, { resolve: (p: Polled) => void; reject: (e: unknown) => void }[]>();
   /** Calls awaited now, with how many awaits hold each and what else they wait for. */
   #held = new Map<number, Held & { n: number }>();
@@ -856,9 +854,13 @@ class CallPoller {
           console.error(`the liveness of this process's model calls is not stored: ${(e as Error).message}`);
         }
       }
-      if (now - this.#readAt < SEEN_EVERY_MS && ids.every((id) => this.#polls.has(id)) && await this.#stampOf() === this.#stamp) {
-        for (const id of ids) for (const w of batch.get(id)!) w.resolve({ ...this.#polls.get(id)!, checks: false, tools: false });
-        return;
+      const cached = ids.map((id) => this.#polls.get(id));
+      if (cached.every((c) => c && now - c.at < SEEN_EVERY_MS)) {
+        const stamp = await this.#stampOf();
+        if (cached.every((c) => c!.stamp === stamp)) {
+          ids.forEach((id, i) => { for (const w of batch.get(id)!) w.resolve({ ...cached[i]!.poll, checks: false, tools: false }); });
+          return;
+        }
       }
       const held = ids.map((id) => ({ callId: id, ...this.#held.get(id) }));
       const workspaces = held.flatMap((h) => (h.workspaceId != null ? [{ callId: h.callId, workspaceId: h.workspaceId }] : []));
@@ -866,9 +868,12 @@ class CallPoller {
       const [stamp, polls, checks, tools] = await db.together(() => Promise.all([
         this.#stampOf(), runners.loadCallPolls(db, ids, now), runners.loadRequestedChecks(db, held.filter((h) => h.checks).map((h) => h.callId)), loadQueuedWorkspaces(db, workspaces),
       ]));
-      this.#stamp = stamp;
-      this.#readAt = now;
-      for (const id of ids) if (this.#held.has(id)) this.#polls.set(id, polls.get(id)!);
+      // A done call's poll carries the reply this wave takes, so it is never served again from here.
+      for (const id of ids) {
+        const poll = polls.get(id)!;
+        if (this.#held.has(id) && poll.call?.state !== "done") this.#polls.set(id, { poll, stamp, at: now });
+        else this.#polls.delete(id);
+      }
       const asked = new Set(workspaces.filter((w) => tools.has(w.workspaceId)).map((w) => w.callId));
       const resolve = (id: number, p: runners.CallPoll): void => { for (const w of batch.get(id)!) w.resolve({ ...p, checks: checks.has(id), tools: asked.has(id) }); };
       const ended = ids.filter((id) => polls.get(id)!.lost || polls.get(id)!.gone);
