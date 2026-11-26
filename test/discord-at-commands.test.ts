@@ -181,3 +181,28 @@ test("`status` in reply to a message that links a pull request answers with that
   assert.ok(shown.includes("texturecraft#775"), shown);
   assert.ok(![763, 764, 765].some((n) => shown.includes(`#${n}`)), shown);
 });
+
+test("`fix and merge <item>` to the bot's role starts the fix-up with the merge approved, as it does to the bot", async () => {
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "texturecraft" }]).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values([{ name: "texturecraft", owner: "storytold", visibility: "public" }]).onConflict((oc) => oc.doNothing()));
+  for (const n of [850, 851]) {
+    await db.run(db.k.insertInto("items").values({ repo: "texturecraft", number: n, kind: "pr", state: "OPEN", title: `Change ${n}`, body: "", head_oid: `sha${n}`, url: `https://github.com/storytold/texturecraft/pull/${n}` }));
+  }
+  // No Task Runner reads the text: the parser alone must read it.
+  const own = new Pings({ db, keys, rest, search: {} as Search, log: (l) => assert.fail(l), commands: new AtCommands({ db, keys, rest, log: (l) => assert.fail(l), read: { translate: async () => null }, permission: async () => ({ kind: "ok", permission: "write" }) }) });
+  await own.dispatch("READY", { user: { id: "100" } });
+  await own.dispatch("GUILD_CREATE", { id: "g1", roles: [{ id: "1569325571970965618", tags: { bot_id: "100" } }] });
+  const outcome: string[] = [];
+  for (const [id, n, content] of [["fm-role", 850, "<@&1569325571970965618> fix and merge texturecraft#850"], ["fm-user", 851, "<@100> fix and merge texturecraft#851"]] as const) {
+    const m = { id, channel_id: "c1", guild_id: "g1", content, type: 0, author: { id: "u70" } };
+    await handleDispatch(db, keys, "MESSAGE_CREATE", m);
+    const sent = rest.sent.length;
+    await own.dispatch("MESSAGE_CREATE", m);
+    await own.idle();
+    const wf = await db.get(db.k.selectFrom("main.item_workflows").select(["entry", "approved_by"]).where("repo", "=", "texturecraft").where("number", "=", n));
+    const reply = rest.sent.slice(sent).map((s) => s.body.content ?? "").join("\n").replaceAll(String(n), "N");
+    outcome.push(JSON.stringify([wf?.entry, wf?.approved_by, reply]));
+  }
+  assert.deepEqual(JSON.parse(outcome[0]!).slice(0, 2), ["fixup", "nora"]);
+  assert.equal(outcome[1], outcome[0]);
+});
