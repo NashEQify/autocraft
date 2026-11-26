@@ -414,6 +414,8 @@ const BASE_INDEXES = [
 // Columns of the module state that moved out of settings and of the set-based loaders (src/data/<module>). Old keys stay
 // next to the new ones: a re-keyed table keeps its old key columns until the code that reads them is gone.
 const STATE_COLUMNS: [table: string, column: string, type: string][] = [
+  // How a Discord link was made: code (dashboard link code) or verify (the public /verify pages).
+  ["discord_links", "source", "TEXT NOT NULL DEFAULT 'code'"],
   // Statements, round trips and database time of a job, and the effects (GitHub writes, model calls, builds) it made.
   ["jobs", "db_statements", "INTEGER"],
   ["jobs", "db_round_trips", "INTEGER"],

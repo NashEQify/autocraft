@@ -28,6 +28,7 @@ class FakeRest implements DiscordRest {
   async pinMessage() {}
   async addMemberRole(guild: string, user: string, role: string) { this.roles.push({ guild, user, role }); }
   async memberRoles() { return [] as string[]; }
+  async guildRole() { return { permissions: "0", managed: false }; }
   async interactionCallback(_i: string, _t: string, _type: number, _data?: CallbackData) {}
   async editInteractionResponse(_a: string, _t: string, body: EditBody) { this.edits.push(body); }
   async overwriteGuildCommands(_a: string, _g: string, _c: CommandDef[]) {}
@@ -35,7 +36,7 @@ class FakeRest implements DiscordRest {
 
 const rest = new FakeRest();
 const ix = new Interactions(rest, (l) => assert.fail(l));
-installRolePanel(ix, { db, keys, rest, log: (l) => assert.fail(l), check: async (_db, login) => ({ merged: login === "merger", via: "search" }) });
+installRolePanel(ix, { db, keys, rest, log: (l) => assert.fail(l), check: async (_db, who) => ({ merged: who.login === "merger", via: "search" }) });
 
 const GUILD = "100000000000000001", CHANNEL = "100000000000000002", ROLE = "100000000000000003";
 await saveChannels(db, [{ channelId: CHANNEL, guildId: GUILD, guildName: "Server", name: "contributor-role" }]);

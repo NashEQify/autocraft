@@ -23,7 +23,8 @@ import { esc, plainPage } from "./util.ts";
 
 export const VERIFY_PATH = "/verify";
 export const VERIFY_STATUS_PATH = "/verify/status";
-const START_PATH = "/verify/discord";
+export const VERIFY_START_PATH = "/verify/discord";
+const START_PATH = VERIFY_START_PATH;
 const DISCORD_CALLBACK_PATH = "/verify/discord/callback";
 const GITHUB_CALLBACK_PATH = "/verify/callback";
 const DONE_PATH = "/verify/done";
@@ -51,7 +52,7 @@ export function discordOAuth(clientId: string, clientSecret: string, f: typeof f
     body: new URLSearchParams(body).toString(), signal: AbortSignal.timeout(10_000),
   });
   return {
-    authorizeUrl: (state, redirectUri) => `https://discord.com/oauth2/authorize?${new URLSearchParams({ response_type: "code", client_id: clientId, scope: "identify", redirect_uri: redirectUri, state, prompt: "none" })}`,
+    authorizeUrl: (state, redirectUri) => `https://discord.com/oauth2/authorize?${new URLSearchParams({ response_type: "code", client_id: clientId, scope: "identify", redirect_uri: redirectUri, state })}`,
     async userId(code, redirectUri) {
       const tr = await f(`${DISCORD_API}/oauth2/token`, form({ grant_type: "authorization_code", code, redirect_uri: redirectUri }));
       if (!tr.ok) return null;
@@ -116,9 +117,14 @@ function resultTexts(login: string): Record<string, string> {
     forbidden: t("AutoCraft can't give the contributor role yet. A server admin needs to let it manage that role."),
     failed: t("Discord did not accept the change. Try again in a few minutes."),
     off: t("The contributor role is not set up on this server."),
+    "unsafe-role": t("The contributor role is not set up on this server."),
     pending: t("Your request is in: the role will appear in Discord shortly."),
   };
 }
+
+/** The start page's form posts here and is redirected to Discord: form-action must name Discord, or the browser stops the redirect. */
+const startCsp = (nonce: string): string =>
+  `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src data:; form-action 'self' https://discord.com; base-uri 'none'; frame-ancestors 'none'`;
 
 export function verifyStartPage(nonce: string): string {
   return page(nonce, t("Contributor role"), `<p>${esc(t("Have a merged pull request in one of our repositories? Get the contributor role on our Discord server."))}</p>
@@ -148,8 +154,16 @@ export function verifyUncheckedPage(nonce: string): string {
   return page(nonce, t("Contributor role"), `<p>${esc(t("GitHub could not be checked just now. Try again in a few minutes."))}</p><p><a href="${VERIFY_PATH}">${esc(t("Start again"))}</a></p>`);
 }
 
-/** Answers every path under /verify (isVerifyPath). `ip` limits are the caller's. */
-export async function verifyRoute(d: VerifyDeps, method: string, url: URL, cookies: Map<string, string>, nonce: string, contact: () => Promise<string>): Promise<VerifyOut> {
+export type VerifyRequest = {
+  method: string; url: URL; cookies: Map<string, string>; nonce: string;
+  /** False for a POST another site sent (the server's sameOrigin check). */
+  sameOrigin: boolean;
+  contact: () => Promise<string>;
+};
+
+/** Answers every path under /verify (isVerifyPath). Address limits are the caller's. */
+export async function verifyRoute(d: VerifyDeps, req: VerifyRequest): Promise<VerifyOut> {
+  const { method, url, cookies, nonce, contact } = req;
   const now = (d.now ?? Date.now)();
   const iso = new Date(now).toISOString();
   const path = url.pathname;
@@ -163,8 +177,9 @@ export async function verifyRoute(d: VerifyDeps, method: string, url: URL, cooki
   }
   const discord = d.discord(), github = d.github(), keys = d.keys();
   const off = (): VerifyOut => ({ r: textPage(nonce, 503, t("Contributor role"), t("Contributor verification is not set up on this AutoCraft instance.")) });
-  if (method === "GET" && path === VERIFY_PATH) return discord && github && keys && d.baseUrl ? { r: { html: verifyStartPage(nonce) } } : off();
+  if (method === "GET" && path === VERIFY_PATH) return discord && github && keys && d.baseUrl ? { r: { html: verifyStartPage(nonce), headers: { "content-security-policy": startCsp(nonce) } } } : off();
   if (method === "POST" && path === START_PATH) {
+    if (!req.sameOrigin) return { r: textPage(nonce, 403, t("Refused"), t("This form was sent from another site."), true) };
     if (!discord || !github || !keys || !d.baseUrl) return off();
     const id = randomToken(32), state = randomToken(24);
     await startVerifyFlow(d.db, { flowHash: sha256hex(id), stateHash: sha256hex(state), expiresAt: new Date(now + FLOW_MS).toISOString() }, iso);
@@ -182,7 +197,7 @@ export async function verifyRoute(d: VerifyDeps, method: string, url: URL, cooki
         const userId = await discord.userId(code, `${d.baseUrl}${DISCORD_CALLBACK_PATH}`);
         if (!userId) return { r: textPage(nonce, 400, t("Sign-in failed"), t("Discord did not accept the sign-in."), true), cookies: [clearCookie] };
         const next = randomToken(24), verifier = randomToken(32);
-        await verifyFlowToGithub(d.db, flowHash, { userSealed: keys.sealText(userId, `discord_verify_flows:${flowHash}`), stateHash: sha256hex(next), verifier });
+        await verifyFlowToGithub(d.db, flowHash, { userSealed: keys.sealText(userId, `discord_verify_flows:${flowHash}`), userHash: keys.hash("author", userId), stateHash: sha256hex(next), verifier });
         return { r: { redirect: await github.authorizeUrl(next, pkceChallenge(verifier), `${d.baseUrl}${GITHUB_CALLBACK_PATH}`) } };
       }
       const userId = flow.userSealed ? keys.openText(flow.userSealed, `discord_verify_flows:${flowHash}`) : null;
@@ -190,12 +205,12 @@ export async function verifyRoute(d: VerifyDeps, method: string, url: URL, cooki
       const who = tokens ? await github.identity(tokens.access).finally(() => void github.revoke(tokens.access).catch(() => {})) : null;
       if (!userId || !who || !LOGIN.test(who.login)) return { r: textPage(nonce, 400, t("Sign-in failed"), t("GitHub did not accept the sign-in."), true), cookies: [clearCookie] };
       const user = keys.hash("author", userId);
-      const m = await d.check(d.db, who.login);
+      const m = await d.check(d.db, { login: who.login, id: who.id });
       const outcome = m.merged === null ? "unchecked" : m.merged ? "requested" : "no-merge";
       const grantId = outcome === "requested" ? randomToken(16) : null;
       await d.db.write(async () => {
         await linkProven(d.db, user, who.login, iso);
-        await finishVerifyFlow(d.db, flowHash, { login: who.login, step: outcome, grant: grantId ? { id: grantId, userSealed: keys.sealText(userId, `discord_role_grants:${grantId}`) } : null }, iso);
+        await finishVerifyFlow(d.db, flowHash, { login: who.login, step: outcome, grant: grantId ? { id: grantId, userSealed: keys.sealText(userId, `discord_role_grants:${grantId}`), userHash: user } : null }, iso);
         // The runner records the role result of a request; the others end here.
         if (outcome !== "requested") await audit(d.db, who.login, "discord-role-verify", who.login, { result: outcome, user, via: m.via, from: "web" });
       });

@@ -28,7 +28,7 @@ import { installRolePanel, roleConfig, RoleConfigError, rolePanelState, setRoleC
 import { DiscordConfigError, readKeyFile, readTokenFile, type DiscordKeys } from "./keys.ts";
 import { forgetAuthor, forgetMessages, handleDispatch, setStatus } from "./store.ts";
 import { forgetFollowsOf } from "./threads.ts";
-import { listChannelBriefs, markWatched, removeChannelTree, saveCategories, saveChannels, setViewable, type CategoryRow, type ChannelReport } from "../data/discord/index.ts";
+import { forgetVerifyRows, listChannelBriefs, markWatched, removeChannelTree, saveCategories, saveChannels, setViewable, type CategoryRow, type ChannelReport } from "../data/discord/index.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -204,7 +204,8 @@ async function discord(args: string[]): Promise<void> {
       const follows = await forgetFollowsOf(db, keys, id);
       const links = await forgetLink(db, keys, id);
       const signedIn = await forgetReporter(db, keys.hash("author", id));
-      await audit(db, "cli", "discord-forget", "user", { rows: n, follows, links, signedIn });
+      const verify = await forgetVerifyRows(db, keys.hash("author", id));
+      await audit(db, "cli", "discord-forget", "user", { rows: n, follows, links, signedIn, verify });
       console.log(`deleted ${n} mention ${n === 1 ? "row" : "rows"}, ${follows} thread ${follows === 1 ? "row" : "rows"} and ${links} ${links === 1 ? "link" : "links"}${signedIn ? " and the GitHub sign-in" : ""}`);
     }
   } else if (sub === "channels") {

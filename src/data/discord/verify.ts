@@ -24,7 +24,10 @@ export async function startVerifyFlow(db: Db, row: { flowHash: string; stateHash
   const q = queryDb(db);
   const old = new Date(Date.parse(now) - KEEP_MS).toISOString();
   await db.write(async () => {
-    await q.run(q.k.deleteFrom("main.discord_verify_flows").where("expires_at", "<", old));
+    await q.run(q.k.deleteFrom("main.discord_verify_flows").where((eb) => eb.or([
+      eb("expires_at", "<", old),
+      eb.and([eb("step", "in", ["discord", "github"]), eb("expires_at", "<", now)]),
+    ])));
     await q.run(q.k.deleteFrom("main.discord_role_grants").where("result", "is not", null).where("done_at", "<", old));
     await q.run(q.k.insertInto("main.discord_verify_flows").values({ flow_hash: row.flowHash, step: "discord", state_hash: row.stateHash, expires_at: row.expiresAt }));
   });
@@ -46,16 +49,16 @@ export async function takeVerifyState(db: Db, flowHash: string, step: "discord" 
 }
 
 /** Moves a flow to the GitHub step with the proven Discord user and the GitHub authorization's state and verifier. */
-export async function verifyFlowToGithub(db: Db, flowHash: string, f: { userSealed: string; stateHash: string; verifier: string }): Promise<void> {
+export async function verifyFlowToGithub(db: Db, flowHash: string, f: { userSealed: string; userHash: string; stateHash: string; verifier: string }): Promise<void> {
   const q = queryDb(db);
-  await q.run(q.k.updateTable("main.discord_verify_flows").set({ step: "github", user_sealed: f.userSealed, state_hash: f.stateHash, verifier: f.verifier }).where("flow_hash", "=", flowHash));
+  await q.run(q.k.updateTable("main.discord_verify_flows").set({ step: "github", user_sealed: f.userSealed, user_hash: f.userHash, state_hash: f.stateHash, verifier: f.verifier }).where("flow_hash", "=", flowHash));
 }
 
 /** Ends a flow with the login GitHub proved and its outcome, inserting the role request when there is one; one `db.write`. */
-export async function finishVerifyFlow(db: Db, flowHash: string, f: { login: string; step: "requested" | "no-merge" | "unchecked"; grant: { id: string; userSealed: string } | null }, now: string): Promise<void> {
+export async function finishVerifyFlow(db: Db, flowHash: string, f: { login: string; step: "requested" | "no-merge" | "unchecked"; grant: { id: string; userSealed: string; userHash: string } | null }, now: string): Promise<void> {
   const q = queryDb(db);
   await db.write(async () => {
-    if (f.grant) await q.run(q.k.insertInto("main.discord_role_grants").values({ id: f.grant.id, user_sealed: f.grant.userSealed, login: f.login, requested_at: now }));
+    if (f.grant) await q.run(q.k.insertInto("main.discord_role_grants").values({ id: f.grant.id, user_sealed: f.grant.userSealed, user_hash: f.grant.userHash, login: f.login, requested_at: now }));
     await q.run(q.k.updateTable("main.discord_verify_flows").set({ step: f.step, login: f.login, grant_id: f.grant?.id ?? null, state_hash: null, verifier: null }).where("flow_hash", "=", flowHash));
   });
 }
@@ -87,4 +90,20 @@ export async function listOpenRoleGrants(db: Db, limit = 20): Promise<RoleGrant[
 export async function finishRoleGrant(db: Db, id: string, result: string, now: string): Promise<boolean> {
   const q = queryDb(db);
   return Number((await q.run(q.k.updateTable("main.discord_role_grants").set({ result, done_at: now }).where("id", "=", id).where("result", "is", null))).changes) > 0;
+}
+
+/** Deletes open requests older than `before` (a runner that was away that long answers them no more); returns how many. */
+export async function pruneOpenRoleGrants(db: Db, before: string): Promise<number> {
+  const q = queryDb(db);
+  return Number((await q.run(q.k.deleteFrom("main.discord_role_grants").where("result", "is", null).where("requested_at", "<", before))).changes);
+}
+
+/** Part of an unlink or deletion request: the Discord user's flows and role requests; returns how many rows. */
+export async function forgetVerifyRows(db: Db, userHash: string): Promise<number> {
+  const q = queryDb(db);
+  return await db.write(async () => {
+    const a = await q.run(q.k.deleteFrom("main.discord_verify_flows").where("user_hash", "=", userHash));
+    const b = await q.run(q.k.deleteFrom("main.discord_role_grants").where("user_hash", "=", userHash));
+    return Number(a.changes) + Number(b.changes);
+  });
 }

@@ -155,6 +155,13 @@ export class RestClient implements DiscordRest {
     }
   }
 
+  /** One guild role's permission bits and whether an integration manages it; null when the guild has no such role. */
+  async guildRole(guildId: string, roleId: string): Promise<{ permissions: string; managed: boolean } | null> {
+    const roles = (await this.#queue("GET", `/guilds/${guildId}/roles`, undefined, true)) as { id?: unknown; permissions?: unknown; managed?: unknown }[] | undefined;
+    const r = (roles ?? []).find((x) => x.id === roleId);
+    return r ? { permissions: typeof r.permissions === "string" ? r.permissions : "0", managed: r.managed === true } : null;
+  }
+
   async overwriteGuildCommands(applicationId: string, guildId: string, commands: CommandDef[]): Promise<void> {
     await this.#queue("PUT", `/applications/${applicationId}/guilds/${guildId}/commands`, commands, true);
   }

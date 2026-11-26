@@ -5,6 +5,7 @@ import { publicRepoNames, publicStats, publicStatus, type PublicStats, type Publ
 import type { Call, Interactions } from "./interactions.ts";
 import type { DiscordKeys } from "./keys.ts";
 import { forgetReporter } from "./file-issue.ts";
+import { forgetVerifyRows } from "../data/discord/index.ts";
 import { forgetLink, loginOf, mayCommand, redeemLinkCode } from "./links.ts";
 import { t } from "../i18n/index.ts";
 import type { ReadDeps } from "../workflow/read.ts";
@@ -110,8 +111,9 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
   ix.command("autocraft unlink", null, async (call) => {
     const n = call.userId ? await forgetLink(db, keys, call.userId) : 0;
     const signedIn = call.userId ? await forgetReporter(db, keys.hash("author", call.userId)) : false;
-    if (n || signedIn) await audit(db, "discord", "discord-unlink", null, { by: "discord", link: n > 0, signedIn });
-    await call.edit({ content: n || signedIn ? "Unlinked." : "This Discord account is not linked." });
+    const verify = call.userId ? await forgetVerifyRows(db, keys.hash("author", call.userId)) : 0;
+    if (n || signedIn || verify) await audit(db, "discord", "discord-unlink", null, { by: "discord", link: n > 0, signedIn, verify });
+    await call.edit({ content: n || signedIn || verify ? "Unlinked." : "This Discord account is not linked." });
   });
   ix.command("autocraft stats", null, async (call: Call) => {
     if (!mayRead(call)) return void (await call.edit({ content: TOO_MANY }));
@@ -127,7 +129,7 @@ export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: D
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     const login = await loginOf(db, keys, call.userId);
     if (!login) return void (await call.edit({ content: t("Link your account first with /autocraft link.") }));
-    if (!await mayCommand(db, login)) return void (await call.edit({ content: t("Commands need an AutoCraft login with write access. Nothing ran.") }));
+    if (!await mayCommand(db, keys, call.userId, login)) return void (await call.edit({ content: t("Commands need an AutoCraft login with write access. Nothing ran.") }));
     // Discord has no item the text was written on, so the items come from the list in the text.
     const result = await runDo(db, keys, prepareDo(call.option("text") ?? ""), { userId: call.userId, login }, deps.read);
     await call.edit({ content: result.lines.join("\n").slice(0, 1990) || t("Nothing ran.") });

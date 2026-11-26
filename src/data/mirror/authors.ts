@@ -145,3 +145,13 @@ export async function loadAuthorHistory(db: Db, o: { logins?: string[]; repo?: s
     .orderBy("t.author").orderBy("t.author_id", (x) => x.asc().nullsFirst()));
   return rows.map((r) => ({ login: r.login!, author_id: r.author_id === null ? null : Number(r.author_id), merged: Number(r.merged), closed: Number(r.closed), open: Number(r.open), lastMerge: r.last_merge, repos: r.repos ? String(r.repos).split(",") : [] }));
 }
+
+/** Merged PRs by the GitHub account `authorId` in repos of `owner` (case-insensitive). One statement. */
+export async function countMergedByAccount(db: Db, owner: string, authorId: number): Promise<number> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("items as i").innerJoin("repos as r", "r.name", "i.repo")
+    .select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("i.kind", "=", "pr").where("i.state", "=", "MERGED").where("i.author_id", "=", authorId)
+    .where((eb) => eb(eb.fn("lower", ["r.owner"]), "=", owner.toLowerCase())), { label: "mirror.countMergedByAccount" });
+  return Number(r?.n ?? 0);
+}

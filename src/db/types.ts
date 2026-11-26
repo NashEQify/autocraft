@@ -674,6 +674,7 @@ export interface DiscordLinks {
   user_hash: string;
   login: string;
   linked_at: string;
+  source: Generated<string>;
 }
 
 export interface DiscordMentions {
@@ -695,6 +696,7 @@ export interface DiscordReplies {
 export interface DiscordRoleGrants {
   id: string;
   user_sealed: string;
+  user_hash: string;
   login: string;
   requested_at: string;
   result: string | null;
@@ -714,6 +716,7 @@ export interface DiscordVerifyFlows {
   state_hash: string | null;
   verifier: string | null;
   user_sealed: string | null;
+  user_hash: string | null;
   login: string | null;
   grant_id: string | null;
   expires_at: string;
@@ -3058,12 +3061,12 @@ export const COLUMNS = {
   discord_follows: ["target_hash", "repo", "number", "kind", "channel_hash", "sealed", "command", "login", "at"],
   discord_hidden_repos: ["name", "hidden_by", "hidden_at"],
   discord_link_codes: ["code_hash", "login", "expires_at"],
-  discord_links: ["user_hash", "login", "linked_at"],
+  discord_links: ["user_hash", "login", "linked_at", "source"],
   discord_mentions: ["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"],
   discord_replies: ["ping_hash", "quoted_hash", "channel_hash", "sealed"],
-  discord_role_grants: ["id", "user_sealed", "login", "requested_at", "result", "done_at"],
+  discord_role_grants: ["id", "user_sealed", "user_hash", "login", "requested_at", "result", "done_at"],
   discord_status: ["id", "state", "detail", "at"],
-  discord_verify_flows: ["flow_hash", "step", "state_hash", "verifier", "user_sealed", "login", "grant_id", "expires_at"],
+  discord_verify_flows: ["flow_hash", "step", "state_hash", "verifier", "user_sealed", "user_hash", "login", "grant_id", "expires_at"],
   download_deltas: ["asset_id", "t", "span", "delta"],
   dupe_carries: ["decision_id", "repo", "number", "state", "attempts", "outcome", "to_head", "from_head", "updated_at"],
   dupe_comparisons: ["repo", "key", "kind", "members", "hash", "kept", "source", "model", "reason", "result", "error", "attempts", "at", "heads", "summary", "why", "sizes"],

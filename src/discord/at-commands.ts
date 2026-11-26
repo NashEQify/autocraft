@@ -153,7 +153,7 @@ export class AtCommands {
     const userId = m.author!.id;
     const login = await loginOf(db, keys, userId);
     if (!login) return await this.#refuse(m, t("Link your Discord account with /autocraft link to send commands. Nothing ran."));
-    if (!await mayCommand(db, login)) return await this.#refuse(m, t("Commands need an AutoCraft login with write access. Nothing ran."));
+    if (!await mayCommand(db, keys, userId, login)) return await this.#refuse(m, t("Commands need an AutoCraft login with write access. Nothing ran."));
     const tracked = await loadTrackedRepos(db);
     const denied: string[] = [];
     for (const repo of new Set(targetsOf(d).map((i) => i.repo.split("/").pop()!))) {

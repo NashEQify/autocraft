@@ -16,11 +16,10 @@ import { loginOf } from "./links.ts";
 import { RestError, type MessageBody } from "./rest.ts";
 import { WindowLimits } from "./window-limit.ts";
 import { deleteSetting, setting, settings, writeSetting } from "../data/control/index.ts";
-import { finishRoleGrant, listOpenRoleGrants, loadChannelGuilds, type RoleGrant } from "../data/discord/index.ts";
-import { loadAuthorHistory } from "../data/mirror/index.ts";
+import { finishRoleGrant, listOpenRoleGrants, loadChannelGuilds, pruneOpenRoleGrants, type RoleGrant } from "../data/discord/index.ts";
+import { countMergedByAccount } from "../data/mirror/index.ts";
 import { loadReporterSealed } from "../data/access/index.ts";
 import { AppReadError, readEnv, trackedOwner } from "../github/read.ts";
-import { ownerOf } from "../owners.ts";
 import { t } from "../i18n/index.ts";
 import type { Db } from "../db/index.ts";
 
@@ -103,7 +102,22 @@ export type RoleRest = {
   addMemberRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void>;
   /** A member's role ids; null when the user is not in the guild. */
   memberRoles(guildId: string, userId: string): Promise<string[] | null>;
+  /** A guild role's permission bits (decimal string) and whether an integration manages it; null when there is no such role. */
+  guildRole(guildId: string, roleId: string): Promise<{ permissions: string; managed: boolean } | null>;
 };
+
+export class UnsafeRoleError extends Error {}
+
+/**
+ * The contributor role may carry no permission and no integration: Verify hands it to anyone with a merged pull request, so a
+ * role that grants rights would be a way into the server's moderation. Throws UnsafeRoleError otherwise.
+ */
+async function checkRoleSafe(rest: RoleRest, cfg: RoleConfig): Promise<void> {
+  const role = await rest.guildRole(cfg.guildId, cfg.roleId);
+  if (!role) throw new UnsafeRoleError("the server has no role with that id");
+  if (role.managed) throw new UnsafeRoleError("that role belongs to an integration");
+  if (BigInt(role.permissions || "0") !== 0n) throw new UnsafeRoleError("that role grants permissions; choose a role without any");
+}
 
 const saveState = async (db: Db, s: Omit<RolePanelState, "at">): Promise<RolePanelState> => {
   const state = { ...s, at: new Date().toISOString() };
@@ -126,6 +140,15 @@ export async function ensureRolePanel(db: Db, rest: RoleRest, log: (l: string) =
   }
   const body = rolePanelMessage();
   try {
+    try {
+      await checkRoleSafe(rest, cfg);
+    } catch (e) {
+      if (!(e instanceof UnsafeRoleError)) throw e;
+      // No panel for a role that grants rights: the posted one goes, and the Discord page shows why.
+      if (st?.channelId === cfg.channelId && st.messageId) await rest.deleteMessage(cfg.channelId, st.messageId).catch(() => {});
+      log(`discord: the contributor role panel is not posted: ${e.message}`);
+      return await saveState(db, { channelId: cfg.channelId, messageId: null, error: e.message });
+    }
     if (st?.channelId === cfg.channelId && st.messageId) {
       try {
         await rest.editMessage(cfg.channelId, st.messageId, body);
@@ -170,9 +193,10 @@ export function watchRolePanel(db: Db, rest: RoleRest, log: (l: string) => void,
 
 /**
  * What a role request from the /verify pages came to: granted; already (the member had the role); not-member (the user is not in
- * the panel's server); forbidden (the bot may not manage the role); failed; off (no role is configured).
+ * the panel's server); forbidden (the bot may not manage the role); failed; off (no role is configured); unsafe-role (the role
+ * grants permissions or belongs to an integration, so it is not given).
  */
-export type GrantResult = "granted" | "already" | "not-member" | "forbidden" | "failed" | "off";
+export type GrantResult = "granted" | "already" | "not-member" | "forbidden" | "failed" | "off" | "unsafe-role";
 
 const grantAad = (id: string): string => `discord_role_grants:${id}`;
 
@@ -185,9 +209,14 @@ async function grantOne(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: stri
     const roles = await rest.memberRoles(cfg.guildId, userId);
     if (roles === null) return { result: "not-member", user };
     if (roles.includes(cfg.roleId)) return { result: "already", user };
+    await checkRoleSafe(rest, cfg);
     await rest.addMemberRole(cfg.guildId, userId, cfg.roleId, `Contributor verification: ${g.login} has a merged pull request`);
     return { result: "granted", user };
   } catch (e) {
+    if (e instanceof UnsafeRoleError) {
+      log(`discord: the contributor role is not given: ${e.message}`);
+      return { result: "unsafe-role", user };
+    }
     const forbidden = e instanceof RestError && e.status === 403;
     log(forbidden
       ? `discord: the bot may not give role ${cfg.roleId}: it needs Manage Roles, and its highest role must sit above that role`
@@ -196,21 +225,30 @@ async function grantOne(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: stri
   }
 }
 
-/** Carries out the open role requests, oldest first; each result is written once and audited as a Verify press is. Returns how many it answered. */
-export async function runRoleGrants(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: string) => void): Promise<number> {
-  const open = await listOpenRoleGrants(db);
-  if (!open.length) return 0;
+/** Open requests older than this are dropped unanswered (the result page has long said the role will appear shortly). */
+const GRANT_MAX_AGE_MS = 24 * 3_600_000;
+const GRANT_PAGE = 20;
+
+/**
+ * Carries out the open role requests, oldest first, a page at a time until a page comes back short; each result is written
+ * once and audited as a Verify press is. Returns how many it answered.
+ */
+export async function runRoleGrants(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: string) => void, now: () => number = Date.now): Promise<number> {
+  await pruneOpenRoleGrants(db, new Date(now() - GRANT_MAX_AGE_MS).toISOString());
   const cfg = await roleConfig(db);
   let n = 0;
-  for (const g of open) {
-    const { result, user } = await grantOne(db, keys, rest, log, cfg, g);
-    await db.write(async () => {
-      if (!await finishRoleGrant(db, g.id, result, new Date().toISOString())) return;
-      n++;
-      await audit(db, g.login, "discord-role-verify", g.login, { result, ...(user && { user }), from: "web" });
-    });
+  for (;;) {
+    const open = await listOpenRoleGrants(db, GRANT_PAGE);
+    for (const g of open) {
+      const { result, user } = await grantOne(db, keys, rest, log, cfg, g);
+      await db.write(async () => {
+        if (!await finishRoleGrant(db, g.id, result, new Date(now()).toISOString())) return;
+        n++;
+        await audit(db, g.login, "discord-role-verify", g.login, { result, ...(user && { user }), from: "web" });
+      });
+    }
+    if (open.length < GRANT_PAGE) return n;
   }
-  return n;
 }
 
 /** Runs runRoleGrants at start and whenever a role request is written (the `discord-verify` change counter). */
@@ -233,39 +271,47 @@ export function watchRoleGrants(db: Db, keys: DiscordKeys, rest: RoleRest, log: 
   signal.addEventListener("abort", () => clearInterval(timer), { once: true });
 }
 
-/** `merged` is null when GitHub could not be asked and the mirror has none. */
+/** `merged` is null when GitHub could not be asked (or was asked too often for the login) and the mirror has none. */
 export type MergedAnswer = { merged: boolean | null; via: "cache" | "mirror" | "search" };
-export type MergedCheck = (db: Db, login: string) => Promise<MergedAnswer>;
+/** The account to check: the login, and the GitHub account id when a sign-in proved it (the /verify pages). */
+export type MergedWho = { login: string; id?: number | null };
+export type MergedCheck = (db: Db, who: MergedWho) => Promise<MergedAnswer>;
+
+/** GitHub searches per login: each costs a search request, and the /verify pages can be run by anyone. */
+const SEARCHES_PER_LOGIN = { n: 3, ms: 10 * 60_000 };
 
 /** Total count of `is:pr is:merged author:<login> org:<owner>` through the read path; throws when GitHub cannot be asked. */
 async function searchMerged(login: string, owner: string): Promise<number> {
   const env = await readEnv(owner).catch(async (e: unknown) => { if (e instanceof AppReadError && e.notInstalled) return await readEnv(); throw e; });
   const args = ["api", "-X", "GET", "search/issues", "-f", `q=is:pr is:merged author:${login} org:${owner}`, "-f", "per_page=1", "--jq", ".total_count"];
   return await new Promise<number>((resolve, reject) => execFile("gh", args, { timeout: 30_000, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
-    // GitHub answers 422 for a login that does not exist: no merged pull request.
-    if (err) return /HTTP 422/.test(String(stderr)) ? resolve(0) : reject(new Error(String(stderr || err.message).replace(/\s+/g, " ").trim().slice(0, 200)));
+    // A 422 (a login GitHub does not know, or a query it refuses) is an unanswered check too, not "no merged pull request".
+    if (err) return reject(new Error(String(stderr || err.message).replace(/\s+/g, " ").trim().slice(0, 200)));
     const n = Number(stdout.trim());
     return Number.isFinite(n) ? resolve(n) : reject(new Error("GitHub sent an unreadable answer"));
   }));
 }
 
 /**
- * Asks the mirror first (merged pull requests of tracked repos of the owner), then GitHub's search, which also covers the
- * owner's untracked repos. A yes is cached for the life of the process.
+ * With a proven account id, asks the mirror first: merged pull requests by that account in repos of the tracked owner. Then
+ * GitHub's search by login, which also covers the owner's untracked repos; a login alone (the Verify button) goes straight to
+ * the search. A yes is cached for the life of the process, by account id when there is one.
  */
-export function mergedCheck(search: (login: string, owner: string) => Promise<number> = searchMerged): MergedCheck {
+export function mergedCheck(search: (login: string, owner: string) => Promise<number> = searchMerged, now: () => number = Date.now): MergedCheck {
   const yes = new Set<string>();
-  return async (db, login) => {
-    const key = login.toLowerCase();
+  const searches = new WindowLimits();
+  return async (db, who) => {
+    const login = who.login.toLowerCase();
+    const key = who.id ? `id:${who.id}` : `login:${login}`;
     if (yes.has(key)) return { merged: true, via: "cache" };
     const owner = (await trackedOwner(db)).toLowerCase();
-    const hist = await loadAuthorHistory(db, { logins: [login] });
-    if (hist.some((h) => h.merged > 0 && h.repos.some((r) => ownerOf(r).toLowerCase() === owner))) {
+    if (who.id && await countMergedByAccount(db, owner, who.id) > 0) {
       yes.add(key);
       return { merged: true, via: "mirror" };
     }
+    if (!searches.allow(now(), [{ key: login, ...SEARCHES_PER_LOGIN }])) return { merged: null, via: "search" };
     try {
-      const n = await search(login, owner);
+      const n = await search(who.login, owner);
       if (n > 0) yes.add(key);
       return { merged: n > 0, via: "search" };
     } catch {
@@ -312,7 +358,7 @@ export function installRolePanel(ix: Interactions, deps: RolePanelDeps): void {
       await record(login, "had");
       return void (await call.edit({ content: t("You already have the contributor role.") }));
     }
-    const m = await check(db, login);
+    const m = await check(db, { login });
     if (m.merged === null) {
       await record(login, "unchecked", m.via);
       return void (await call.edit({ content: t("GitHub could not be checked just now. Try again in a few minutes.") }));
@@ -322,8 +368,14 @@ export function installRolePanel(ix: Interactions, deps: RolePanelDeps): void {
       return void (await call.edit({ content: t("No merged pull request by {login} was found in our repositories.", { login }) }));
     }
     try {
+      await checkRoleSafe(rest, cfg);
       await rest.addMemberRole(cfg.guildId, userId, cfg.roleId, `Contributor verification: ${login} has a merged pull request`);
     } catch (e) {
+      if (e instanceof UnsafeRoleError) {
+        log(`discord: the contributor role is not given: ${e.message}`);
+        await record(login, "unsafe-role", m.via);
+        return void (await call.edit({ content: t("The contributor role is not set up on this server.") }));
+      }
       const forbidden = e instanceof RestError && e.status === 403;
       log(forbidden
         ? `discord: the bot may not give role ${cfg.roleId}: it needs Manage Roles, and its highest role must sit above that role`
