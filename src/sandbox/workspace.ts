@@ -10,7 +10,7 @@ import { loadTrackedRepos, readConfig, saveSettings } from "../data/control/inde
 import { loadRepos } from "../data/mirror/index.ts";
 import { SHARED_NAME } from "./command.ts";
 import { checkoutHeld, touchCheckout } from "./checkout.ts";
-import { checkoutForCommit, sandboxAvailable } from "./index.ts";
+import { checkoutForCommit } from "./index.ts";
 import { envVar } from "../env.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -126,9 +126,9 @@ export async function workspaceCheckouts(db: Db, log: (line: string) => void = c
   return out;
 }
 
-/** The workspace for a call, or none when tool mode is unavailable. */
+/** The workspace for a call, or none when AUTOCRAFT_WORKSPACE=off. */
 export async function defaultWorkspace(db: Db): Promise<{ name: string; dir: string }[]> {
-  if (!sandboxAvailable() || envVar("WORKSPACE") === "off") return [];
+  if (envVar("WORKSPACE") === "off") return [];
   try { return await workspaceCheckouts(db); } catch { return []; }
 }
 

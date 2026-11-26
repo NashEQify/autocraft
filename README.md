@@ -75,7 +75,7 @@ Items is one filterable list; a row's details open inline under it. Home lists w
 | `gh`, logged in | Sync (`gh api graphql`) and every GitHub write |
 | `git` | Clones, diffs and pushes |
 | `claude` (Claude Code CLI) | All Claude calls |
-| `bwrap` (bubblewrap, `/usr/bin/bwrap`) | Sandbox for tool-using calls. Without it, those calls run without tools; `AUTOCRAFT_NO_SANDBOX=1` forces that |
+| `bwrap` (bubblewrap, `/usr/bin/bwrap`) | Sandbox for a local Claude call. Model calls run on Task Runners, which sandbox them on their own machines: a call gets its checkout and tools whenever the checkout can be built, whether or not the server has bubblewrap or sets `AUTOCRAFT_NO_SANDBOX=1` |
 | `jev` (optional) | CLI for TypeSafe's Jev model, used by the classify, priority and duplicate steps (`jev --compact ask`). Without it, switched off (`autocraft-server inference jev off`), or when its account is out of credit or its key is rejected, Haiku does Jev's work through the Task Runners (more Claude usage) |
 | Podman and a second OS user | Build environments for Verify and Implement (optional) |
 | `sqlite3`, `curl` | `deploy/backup.sh` and `deploy/hook.sh` |

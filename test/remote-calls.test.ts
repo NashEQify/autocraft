@@ -23,6 +23,7 @@ import { remoteRoom } from "../src/remote/room.ts";
 import { setAcceptedModels } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
+import { checkoutForPr } from "../src/sandbox/index.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
@@ -380,6 +381,35 @@ describe("user-local remote calls", async () => {
       await reply(fix.secret, JSON.stringify({ "public.points[0]": "clean point" }));
       assert.deepEqual(JSON.parse((await ask)!.text).public.points, ["clean point", "second"]);
     } finally {
+      restore();
+    }
+  });
+
+  test("a review on a server with no local sandbox (AUTOCRAFT_NO_SANDBOX=1, no claude) still gets its checkout as a mount and tool mode", async () => {
+    const restore = setWorkspace(async () => []);
+    const saved = { no: process.env.AUTOCRAFT_NO_SANDBOX, bin: process.env.AUTOCRAFT_CLAUDE_BIN };
+    process.env.AUTOCRAFT_NO_SANDBOX = "1";
+    process.env.AUTOCRAFT_CLAUDE_BIN = join(dir, "no-claude");
+    const sha = "d".repeat(40);
+    mkdirSync(join(SCRATCH, "checkouts", "photocraft", sha), { recursive: true });
+    try {
+      const checkout = await checkoutForPr("photocraft", 1287, sha);
+      assert.ok(checkout, "the existing checkout is used");
+      const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db, { checkout, itemTools: null });
+      await idle("bob");
+      const lease = (await leaseFor("bob"))!;
+      const b = (await bundleOf(db, lease.secret))!;
+      assert.ok(b.mounts.some((m) => m.path === "/repo"), "the checkout is mounted");
+      assert.ok(b.maxTurns !== null && b.maxTurns > 0);
+      const args = b.hints.claude!.args;
+      assert.ok(args[args.indexOf("--tools") + 1]!.includes("Read"), "file tools are given");
+      await done(lease.secret, JSON.stringify({ verdict: "take", summary: "s", why: "w", public: { summary: "ok", points: [] } }));
+      await ask;
+    } finally {
+      process.env.AUTOCRAFT_NO_SANDBOX = saved.no;
+      process.env.AUTOCRAFT_CLAUDE_BIN = saved.bin;
+      if (saved.no === undefined) delete process.env.AUTOCRAFT_NO_SANDBOX;
+      if (saved.bin === undefined) delete process.env.AUTOCRAFT_CLAUDE_BIN;
       restore();
     }
   });
