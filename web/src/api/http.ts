@@ -303,6 +303,7 @@ export function createHttpApi(): Api {
     agents: {
       list: (f) => get(`/api/agents${qs(f)}`),
       get: (id) => get(`/api/agents/${id}`),
+      refusals: (window) => get(`/api/agents/refusals${qs({ window })}`),
     },
     rates: (window) => get(`/api/rates${qs({ window })}`),
     prompts: () => get("/api/prompts"),

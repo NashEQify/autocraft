@@ -72,7 +72,7 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
       if (Number(up.changes) !== 1) return false;
       await bury(db, [{ id: lease.id, hash: lease.secretHash }], now);
       const where = "token" in to ? "another Task Runner" : `the ${to.tier} tier (${to.model})`;
-      if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: a.error, summary: `refused by ${by}; retried on ${where}`, ...(a.output && { output: a.output }) }]);
+      if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: a.error, summary: `refused by ${by}; retried on ${where}`, ...(a.output && { output: a.output }), refusal: "retried" }]);
       return true;
     }
     const why = lease.refusals > 0 ? `${REFUSED_PREFIX} again: ${by}, after the retry` : lease.parentId !== null ? `${REFUSED_PREFIX}: ${by}, in a follow-up turn` : `${REFUSED_PREFIX}: ${by}; no other Task Runner or tier could take the call`;
@@ -81,7 +81,7 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
     })));
     if (Number(up.changes) !== 1) return false;
     await bury(db, [{ id: lease.id, hash: lease.secretHash }], now);
-    if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: `${why}. ${a.error}`, summary: `refused by ${by}`, ...(a.output && { output: a.output }) }]);
+    if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", ...(a.usage && { tokens: a.usage }), error: `${why}. ${a.error}`, summary: `refused by ${by}`, ...(a.output && { output: a.output }), refusal: "failed" }]);
     return true;
   });
   if (ok) {

@@ -1,6 +1,6 @@
-// Agent runs and rates over JSON; everyone signed in reads.
-import type { AgentRunFilter, AgentRunState } from "../../../web/src/api/types.ts";
-import { getRun, listRuns, rates as ratesOf, RunQueryError } from "../../agents/runs.ts";
+// Agent runs and rates over JSON; everyone signed in reads. Refused runs and their counts are for operators and maintainers.
+import type { AgentRunFilter, AgentRunState, RefusalWindow } from "../../../web/src/api/types.ts";
+import { getRun, listRuns, rates as ratesOf, refusals as refusalsOf, RunQueryError } from "../../agents/runs.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { hiddenRepos } from "./visible.ts";
@@ -28,6 +28,7 @@ export const list = async (db: Db, req: Req) => wrap(async () => {
   const q = (k: string) => req.query.get(k) || undefined;
   const f: AgentRunFilter = {
     state: q("state") as AgentRunState | "recent" | undefined, step: q("step"), repo: q("repo"), cursor: q("cursor"), limit: intParam(req, "limit"),
+    refused: req.query.get("refused") === "1" || undefined, window: q("window") as RefusalWindow | undefined,
   };
   return await listRuns(db, f, await hiddenRepos(db, req), canSeeInternals(req));
 });
@@ -41,4 +42,10 @@ export const detail = async (db: Db, req: Req) => wrap(async () => {
 export const rates = async (db: Db, req: Req) => wrap(async () => {
   const r = await ratesOf(db, req.query.get("window") ?? "24h", Date.now(), await hiddenRepos(db, req));
   return canSeeInternals(req) ? r : { ...r, stages: r.stages.filter((s) => s.step !== SECURITY_STEP) };
+});
+
+// Which runs a safety filter declined, by whom and on what: operators and maintainers only, like the errors themselves.
+export const refusals = async (db: Db, req: Req) => wrap(async () => {
+  if (!canSeeInternals(req)) throw new HttpError(403, "operators and maintainers only");
+  return await refusalsOf(db, req.query.get("window") ?? "7d", await hiddenRepos(db, req));
 });

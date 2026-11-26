@@ -21,6 +21,7 @@ import { pgScopeViews, SCOPED_SCHEMA } from "./scoped.ts";
 import { splitStageTripsPg, TRIP_SPLIT_VERSION } from "./trip-split.ts";
 import { featuresRepoOnlyPg, FEATURES_REPO_ONLY_VERSION } from "./feature-repo-only.ts";
 import { retireFixAttemptsPg } from "./fix-retire.ts";
+import { backfillRefusalsPg } from "./refused-runs.ts";
 import { holdsToItemsPg, HOLDS_TO_ITEMS_VERSION } from "./holds-to-items.ts";
 import { PG_SCHEMA_GENERATION } from "./pg-generation.ts";
 import { builtAfterCopy, copyStatePg, oneActiveLegPg } from "./state-copy.ts";
@@ -256,6 +257,7 @@ export async function migratePg(client: PgClient, opts: MigrationOpts = {}): Pro
     await m.step({ label: "fix attempts", run: () => retireFixAttemptsPg(client) });
     await m.step({ label: "features", run: () => featuresRepoOnlyPg(client) });
     await m.step({ label: "holds", run: () => holdsToItemsPg(client) });
+    await m.step({ label: "refused runs", table: "agent_runs", run: () => backfillRefusalsPg(client) });
     await copyStatePg(client, m);
     await m.ddl(schema.filter(builtAfterCopy).join("\n"), "after the copy");
     await m.step({ label: "stamp", run: async () => void (await client.query(`INSERT INTO settings (key, value) VALUES ('schema_stamp', $1), ('schema_generation', $2)
