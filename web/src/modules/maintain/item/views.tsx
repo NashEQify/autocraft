@@ -159,6 +159,10 @@ function ItemPage({ m, login }: { m: MaintainItem; login: string }) {
     chat.keep(r.chat);
     chat.refetch();
   };
+  const withdraw = async () => {
+    chat.keep(await api.itemChat.withdraw(m.repo, m.number));
+    chat.refetch();
+  };
   const status = chat.data?.status || m.status?.headline || null;
   const fallback = (x: NonNullable<MaintainItem["status"]>): ItemChatState => (x.held ? "held" : x.asked || x.rec || x.unclear ? "waiting" : x.live ? "running" : "idle");
   const state: ItemChatState = chat.data?.status ? chat.data.state : m.status ? fallback(m.status) : "idle";
@@ -197,7 +201,7 @@ function ItemPage({ m, login }: { m: MaintainItem; login: string }) {
           <Pending error={chat.error} />
         </div>
       ) : conv ? (
-        <ItemConversation c={conv} onSend={send} onEvent={(id) => show("events", id)} onGithub={() => show("github")} notice={<Controls m={m} />} />
+        <ItemConversation c={conv} onSend={send} onWithdraw={withdraw} onEvent={(id) => show("events", id)} onGithub={() => show("github")} notice={<Controls m={m} />} />
       ) : (
         <div className="flex flex-1 flex-col">
           <div className="flex flex-1 items-center justify-center px-4">

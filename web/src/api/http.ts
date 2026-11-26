@@ -149,6 +149,7 @@ export function createHttpApi(): Api {
     itemChat: {
       get: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/chat${qs({ since })}`),
       send: (repo, number, conversation, text) => post(`/api/items/${encodeURIComponent(repo)}/${number}/chat`, { conversation, text }),
+      withdraw: (repo, number) => post(`/api/items/${encodeURIComponent(repo)}/${number}/chat/withdraw`),
     },
     itemPeek: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/peek`),
     securityList: () => get("/api/security/findings"),

@@ -49,9 +49,11 @@ interface Props {
   blockedReason?: string;
   /** Rows with their own controls (holds, paused steps), right above the composer. */
   notice?: ReactNode;
+  /** Withdraws the reader's message that waits for Opus; rejects with the reason it failed. */
+  onWithdraw?: () => Promise<void>;
 }
 
-export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, notice }: Props) {
+export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, notice, onWithdraw }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const listEl = useRef<HTMLOListElement>(null);
   const atBottom = useRef(true);
@@ -104,6 +106,15 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
     setAnnounce(t("Message sent"));
   };
 
+  const withdraw = onWithdraw && (async () => {
+    try {
+      await onWithdraw();
+      setAnnounce(t("Message withdrawn"));
+    } catch (err) {
+      setAnnounce(err instanceof Error ? err.message : String(err));
+    }
+  });
+
   const running = last?.t === "work" && last.state === "running";
   const bs = blocks(c.entries);
   const lastBlock = bs[bs.length - 1];
@@ -122,7 +133,7 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
         <ol ref={listEl} role="log" aria-live="off" aria-label={t("Conversation with AutoCraft, oldest first")} className="mx-auto flex w-full max-w-[784px] flex-col gap-6 px-4 pb-6 pt-6 md:px-8">
           {bs.map((b) =>
             b.k === "said" ? (
-              <ChatBubble key={b.e.id} e={b.e} />
+              <ChatBubble key={b.e.id} e={b.e} {...(b.e.canWithdraw && withdraw ? { onWithdraw: withdraw } : {})} />
             ) : b.k === "github" ? (
               <GithubLine key={b.e.id} e={b.e} onGithub={onGithub} />
             ) : b.k === "discord" ? (

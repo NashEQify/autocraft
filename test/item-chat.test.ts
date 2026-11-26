@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { insertRun, finishRun } from "../src/agents/runs.ts";
-import { itemChat, postChat } from "../src/dash/api/item-chat.ts";
+import { itemChat, postChat, postChatWithdraw } from "../src/dash/api/item-chat.ts";
 import { DiscordKeys } from "../src/discord/keys.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { ChatEntry, ItemChat } from "../web/src/api/types.ts";
@@ -146,4 +146,18 @@ test("a command written in the chat is stored as the person's message, linked to
   const i = entries.findIndex((e) => e.t === "said" && e.body === "weight low");
   assert.ok(i >= 0, "the bubble is in the chat");
   assert.equal(entries[i + 1]?.t, "reply", "the command's reply follows it");
+});
+
+test("a maintainer's message waiting for Opus can be withdrawn from the chat, and then says who withdrew it", async () => {
+  const db = await seed();
+  const k = db.k as any;
+  await db.run(k.insertInto("conversations").values({ repo: "photocraft", number: 7, item_block: "", item_sig: "", created_at: at(5), created_by: "maint" }));
+  const turn = await db.run(k.insertInto("conversation_turns").values({ repo: "photocraft", number: 7, kind: "maintainer", login: "maint", at: at(5), body: "Does it clamp?", block: "", status: "pending" }));
+  await db.run(k.insertInto("chat_messages").values({ conversation_id: 1, author: "maint", via: "dashboard", kind: "said", body: "Does it clamp?", payload: null, workflow_event_id: null, turn_id: Number(turn.lastInsertRowid), at: at(5) }));
+  const bubble = (c: ItemChat) => c.conversations[0]!.entries.find((e): e is Extract<ChatEntry, { t: "said" }> => e.t === "said" && e.body === "Does it clamp?")!;
+
+  assert.deepEqual([bubble(await read(db)).pending, bubble(await read(db)).canWithdraw], [true, true], "an operator may withdraw it");
+  const after = await postChatWithdraw(db, { ...req("operator"), json: {} });
+  assert.ok(!bubble(after).pending && !bubble(after).canWithdraw);
+  assert.match(bubble(after).refusal ?? "", /op/);
 });

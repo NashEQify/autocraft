@@ -25,7 +25,7 @@ import { parse } from "../../workflow/parse.ts";
 import { recordSaid } from "../../workflow/said.ts";
 import { HttpError } from "../server/util.ts";
 import { needVisible } from "./visible.ts";
-import { askOpus, assertAskRate, canTalk } from "./conversations.ts";
+import { askOpus, assertAskRate, canTalk, withdrawMessage } from "./conversations.ts";
 import { runItemText } from "./commands.ts";
 import { discordKeys, type ItemMention } from "./discord.ts";
 import { statusOf } from "./maintain-item.ts";
@@ -40,7 +40,7 @@ const WAITING = new Set(["pending", "answering"]);
 const MAIN = "main";
 
 /** What the stamp and the answer both need, read once. */
-type Base = { c: Ctx; convs: ConversationRow[]; messages: Map<number, ChatMessageRow[]>; history: ItemWorkflow[]; leg: { workflowId: number | null; state: string } | null; canReply: boolean; stamp: string };
+type Base = { c: Ctx; convs: ConversationRow[]; messages: Map<number, ChatMessageRow[]>; history: ItemWorkflow[]; leg: { workflowId: number | null; state: string } | null; canReply: boolean; reader: string; stamp: string };
 
 async function base(db: Db, req: Req): Promise<Base> {
   const ref = await visibleItem(db, req);
@@ -60,7 +60,7 @@ async function base(db: Db, req: Req): Promise<Base> {
   const leg = legRow ? { workflowId: legRow.workflow_id, state: legRow.state } : null;
   const said = [...messages.values()].flat().map((m) => [m.id, m.at, m.workflowEventId, m.turnId]);
   const stamp = fingerprint(c, JSON.stringify(["chat", c.veiled, canReply, discordKeys() !== null]), [...sources, convs.map((x) => [x.id, x.title]), said, history, leg]);
-  return { c, convs, messages, history, leg, canReply, stamp };
+  return { c, convs, messages, history, leg, canReply, reader: req.user.login, stamp };
 }
 
 export async function itemChat(db: Db, req: Req): Promise<ItemChat | ItemChatUnchanged> {
@@ -93,7 +93,7 @@ async function chatFrom(db: Db, b: Base): Promise<ItemChat> {
       workflowEvents: rows.workflowEvents, workflows: b.history,
       turns: (thread?.turns ?? []).filter((x) => turnConversation(x) === (row?.id ?? null) || (main && turnConversation(x) === null)),
       cards: thread?.cards ?? [],
-      events: main ? events : [], mentions: main ? rows.discord : [], shots,
+      events: main ? events : [], mentions: main ? rows.discord : [], shots, reader: b.reader,
     });
     const running = main ? [...entries].reverse().find((e) => e.t === "work" && e.state === "running") : undefined;
     return {
@@ -148,6 +148,8 @@ function openOf(c: Ctx, wf: ItemWorkflow | null): ItemConversation["open"] {
 type Sources = {
   messages: ChatMessageRow[]; workflowEvents: StoredEvent[]; workflows: ItemWorkflow[]; turns: ThreadTurn[]; cards: CardRow[];
   events: Ev[]; mentions: ItemMention[]; shots: Map<string, ChatShot[]>;
+  /** The reader's login: a maintainer's message waiting for Opus may be withdrawn by its writer (or an operator). */
+  reader?: string;
 };
 /** One element of the timeline before folding: a chat entry, or an event that folds into a GitHub or Discord line. */
 type Part = { at: string; rank: number; key: string } & ({ entry: ChatEntry } | { gh: Ev } | { dc: ItemMention });
@@ -175,10 +177,12 @@ export function entriesOf(c: Ctx, s: Sources): ChatEntry[] {
       const hash = str(p.msgHash);
       if (hash) discordCommands.add(hash);
       const turn = m.turnId !== null ? turnById.get(m.turnId) : undefined;
-      const refusal = str(p.refusal) ?? (turn?.status === "failed" ? t("Opus could not answer this message.") : null);
+      const withdrawnBy = turn?.status === "failed" ? /^withdrawn by (\S+)$/.exec(turn.error ?? "")?.[1] : undefined;
+      const refusal = str(p.refusal) ?? (withdrawnBy ? t("Withdrawn by {login}.", { login: withdrawnBy }) : turn?.status === "failed" ? t("Opus could not answer this message.") : null);
       parts.push({ at: m.at, rank: 0, key: `msg:${m.id}`, entry: {
         t: "said", id: `msg:${m.id}`, at: m.at, login: m.author, via: VIA[m.via] ?? "dashboard", body: c.veiled ? "" : m.body, url: str(p.url),
-        ...(turn && WAITING.has(turn.status ?? "") ? { pending: true } : {}), ...(refusal ? { refusal: c.veiled ? "" : refusal } : {}),
+        ...(turn && WAITING.has(turn.status ?? "") ? { pending: true, ...(turn.kind === "maintainer" && (c.operator || turn.login.toLowerCase() === s.reader?.toLowerCase()) ? { canWithdraw: true } : {}) } : {}),
+        ...(refusal ? { refusal: c.veiled ? "" : refusal } : {}),
       } });
       const ev = m.workflowEventId !== null ? eventById.get(m.workflowEventId) : undefined;
       if (ev?.line) parts.push({ at: ev.at < m.at ? m.at : ev.at, rank: 1, key: `workflow:${ev.id}`, entry: { t: "reply", id: `workflow:${ev.id}`, at: ev.at, body: hide(ev.line), findings: [], ask: null } });
@@ -335,4 +339,17 @@ export async function postChat(db: Db, req: Req): Promise<{ chat: ItemChat; line
 async function setRefusal(db: Db, id: number, refusal: string): Promise<void> {
   const q = queryDb(db);
   await db.write(() => q.run(q.k.updateTable("main.chat_messages").set({ payload: JSON.stringify({ refusal }) }).where("id", "=", id)));
+}
+
+/**
+ * POST /api/items/:repo/:n/chat/withdraw: withdraws the maintainer's message that waits for Opus, as the conversation's withdraw does
+ * (an operator, or the maintainer who wrote it). Returns the chat.
+ */
+export async function postChatWithdraw(db: Db, req: Req): Promise<ItemChat> {
+  const repo = req.params.repo!;
+  const n = Number(req.params.n);
+  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "not an item number");
+  await needVisible(db, req, repo);
+  await withdrawMessage(db, req, repo, n);
+  return await readChat(db, req);
 }

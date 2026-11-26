@@ -250,8 +250,13 @@ export async function askOpus(db: Db, req: Req, repo: string, n: number, body: s
 export async function postWithdraw(db: Db, req: Req): Promise<ConversationView> {
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
-  await guard(async () => await withdrawTurn(db, repo, n, { login: req.user.login, operator: isOperator(req) }));
+  await withdrawMessage(db, req, repo, n);
   return await viewFor(db, req, repo, n);
+}
+
+/** Withdraws the message on the item that waits for Opus, as the reader: an operator, or the person who wrote it. */
+export async function withdrawMessage(db: Db, req: Req, repo: string, n: number): Promise<void> {
+  await guard(async () => await withdrawTurn(db, repo, n, { login: req.user.login, operator: isOperator(req) }));
 }
 
 /** The card, for someone who settles it on every repo it writes to (the act rule: an AutoCraft login with write access). */

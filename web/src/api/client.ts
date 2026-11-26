@@ -216,6 +216,8 @@ export interface Api {
     get(repo: RepoName, number: number, since?: string): Promise<ItemChat | ItemChatUnchanged>;
     /** Posts the reader's message to one conversation; `lines` is what AutoCraft understood or why nothing ran. */
     send(repo: RepoName, number: number, conversation: string, text: string): Promise<{ chat: ItemChat; lines: string[] }>;
+    /** Withdraws the message that waits for Opus (a said entry's canWithdraw). */
+    withdraw(repo: RepoName, number: number): Promise<ItemChat>;
   };
   /** The item in brief, for the hover card on its number. */
   itemPeek(repo: RepoName, number: number): Promise<ItemPeek>;

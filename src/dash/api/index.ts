@@ -56,7 +56,7 @@ import * as items from "./items.ts";
 import { activity } from "./activity.ts";
 import { downloads } from "./downloads.ts";
 import { itemPage } from "./item-page.ts";
-import { itemChat, postChat } from "./item-chat.ts";
+import { itemChat, postChat, postChatWithdraw } from "./item-chat.ts";
 import { trace as itemTrace, traceDetail as itemTraceDetail } from "./trace.ts";
 import { mergedAsApproved, postmergeOf } from "./postmerge.ts";
 import * as nightly from "./nightly.ts";
@@ -409,6 +409,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/items/:repo/:n/page", itemPage),
     get("/api/items/:repo/:n/chat", itemChat),
     post("/api/items/:repo/:n/chat", postChat),
+    post("/api/items/:repo/:n/chat/withdraw", postChatWithdraw),
     get("/api/items/:repo/:n/peek", items.peek),
     scoped(get("/api/activity", activity)),
     get("/api/downloads", downloads),

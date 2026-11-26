@@ -15,8 +15,8 @@ const VIA: Record<ChatVia, [string, typeof GithubLogoIcon]> = {
   cli: [t("Command line"), TerminalWindowIcon],
 };
 
-/** A person's message to AutoCraft, on the right: who, when and where they wrote it, then the text. */
-export function ChatBubble({ e }: { e: Said }) {
+/** A person's message to AutoCraft, on the right: who, when and where they wrote it, then the text. `onWithdraw`: the reader may withdraw it while it waits for Opus. */
+export function ChatBubble({ e, onWithdraw }: { e: Said; onWithdraw?: () => void }) {
   const [where, Icon] = VIA[e.via];
   const label = (
     <span className="inline-flex items-center gap-1">
@@ -42,6 +42,11 @@ export function ChatBubble({ e }: { e: Said }) {
         <p className="inline-flex items-center gap-1.5 text-xs text-ink/70">
           <CircleNotchIcon aria-hidden className="animate-spin" />
           {t("Waiting for the answer")}
+          {onWithdraw && (
+            <button type="button" onClick={onWithdraw} className="ml-1 inline-flex min-h-11 items-center rounded px-2 font-medium text-accent-ink hover:underline focus-visible:ring-2 focus-visible:ring-accent/60 md:min-h-0">
+              {t("Withdraw message")}
+            </button>
+          )}
         </p>
       )}
       {e.refusal && <p className="text-xs text-bad">{e.refusal}</p>}

@@ -10,7 +10,7 @@ const wait = <T,>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(str
 
 type Work = { state?: "done" | "running" | "failed"; title: string; model?: string; seconds?: number; costUsd?: number; outcome?: string; detail?: [string, string][]; kind: TraceKind; run?: number; tokens?: [number, number]; tools?: number; shots?: ChatShot[] };
 type Beat =
-  | { b: "said"; min: number; login: string; via: ChatVia; body: string }
+  | { b: "said"; min: number; login: string; via: ChatVia; body: string; pending?: boolean; refusal?: string }
   | { b: "reply"; min: number; body: string; findings?: ChatFinding[]; ask?: { to: string[]; question: string } }
   | ({ b: "work"; min: number } & Work)
   | { b: "gh"; min: number; actor: string; summary: string; body?: string }
@@ -122,6 +122,7 @@ const ISSUE_77: Story = {
         { label: "Notes page, before", taskId: 9103, name: "notes-page.png" }, { label: "Notes page, after", taskId: 9104, name: "notes-page.png" },
       ] },
     { b: "work", min: 6, kind: "check", state: "running", title: "Running the full test suite in the workspace", detail: [["Command", "cargo test --workspace"], ["Workspace", "deckcraft at 81c2e0a + 2 commits"]] },
+    { b: "said", min: 3, login: "kiri-n", via: "dashboard", body: "Does the notes page keep the slide's font when the font is missing on the machine?", pending: true },
   ],
 };
 
@@ -152,7 +153,8 @@ function chatOf(ref: string, s: Story, me: User): ItemConversation {
       else entries.push({ t: "github", id, at: at(x.min), lines: [line] });
       return;
     }
-    if (x.b === "said") entries.push({ t: "said", id, at: at(x.min), login: x.login, via: x.via, body: x.body, url: x.via === "github" ? `https://github.com/storytold/${ref.replace("#", "/pull/")}` : null });
+    if (x.b === "said") entries.push({ t: "said", id, at: at(x.min), login: x.login, via: x.via, body: x.body, url: x.via === "github" ? `https://github.com/storytold/${ref.replace("#", "/pull/")}` : null,
+      ...(x.pending ? { pending: true, ...(me.role === "operator" || x.login === me.login ? { canWithdraw: true } : {}) } : {}), ...(x.refusal ? { refusal: x.refusal } : {}) });
     else if (x.b === "reply") entries.push({ t: "reply", id, at: at(x.min), body: x.body, findings: x.findings ?? [], ask: x.ask ?? null });
     else entries.push({ t: "work", id, at: at(x.min), state: x.state ?? "done", title: x.title, model: x.model ?? null, seconds: x.seconds ?? null, costUsd: x.costUsd ?? null, outcome: x.outcome ?? null, detail: x.detail ?? [], eventId: traceId(ref, i, x), ...(x.shots ? { shots: x.shots } : {}) });
   });
@@ -265,6 +267,16 @@ export function createChatMock(me: User, changed: () => void): Pick<Api, "itemCh
         }
         changed();
         return wait({ chat: read(repo, number), lines: [line] }, 400);
+      },
+      async withdraw(repo, number) {
+        const s = stories[`${repo}#${number}`];
+        const beat = s?.beats.find((x): x is Extract<Beat, { b: "said" }> => x.b === "said" && !!x.pending);
+        if (!beat) throw new Error("No message waits for Opus.");
+        if (me.role !== "operator" && beat.login !== me.login) throw new Error("Only an operator, or the person who wrote it, withdraws a message.");
+        beat.pending = false;
+        beat.refusal = `Withdrawn by ${me.login}.`;
+        changed();
+        return wait(read(repo, number), 300);
       },
     },
   };
