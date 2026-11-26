@@ -115,6 +115,9 @@ export function createMockApi(): Api {
         category: i % 10 < 5 ? "Community" : "Development",
       };
     }),
+    rolePanel: new URLSearchParams(location.search).get("rolepanel") === "off"
+      ? { channelId: null, roleId: null, guildId: null, posted: null }
+      : { channelId: "900000000000102", roleId: "9000000000000777", guildId: "9000000000000001", posted: { messageId: "9000000000005555", error: null, at: new Date(Date.now() - 2 * 3_600_000).toISOString() } },
   };
   const mcpMock = createMcpMock(me, changed);
   const api: Omit<Api, keyof ItemPagesApi> = {
@@ -197,6 +200,14 @@ export function createMockApi(): Api {
         if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
         if (!/^[A-Za-z0-9_]{2,32}$/.test(emoji.trim()) && !/^\p{Extended_Pictographic}/u.test(emoji.trim())) throw new Error("emoji must be a custom emoji name (2-32 letters, digits or underscores) or one Unicode emoji");
         discord.reactEmoji = emoji.trim();
+        changed();
+        return wait(structuredClone(discord));
+      },
+      setRolePanel(panel) {
+        if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
+        if (panel && (!/^\d{15,22}$/.test(panel.channelId) || !/^\d{15,22}$/.test(panel.roleId.trim()))) throw new Error("channel and role must be Discord ids (digits only)");
+        const guildId = panel ? discord.channels.find((c) => c.channelId === panel.channelId)?.guildId ?? null : null;
+        discord.rolePanel = panel ? { channelId: panel.channelId, roleId: panel.roleId.trim(), guildId, posted: null } : { channelId: null, roleId: null, guildId: null, posted: null };
         changed();
         return wait(structuredClone(discord));
       },

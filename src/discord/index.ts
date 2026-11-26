@@ -24,6 +24,7 @@ import { Alerts, installAlertCommands } from "./alerts.ts";
 import { installSearchCommands } from "./search-commands.ts";
 import { dropIssueTexts, installIssueNew } from "./issue-new.ts";
 import { installPanel, postPanel } from "./panel.ts";
+import { installRolePanel, roleConfig, RoleConfigError, rolePanelState, setRoleConfig, watchRolePanel } from "./role-panel.ts";
 import { DiscordConfigError, readKeyFile, readTokenFile, type DiscordKeys } from "./keys.ts";
 import { forgetAuthor, forgetMessages, handleDispatch, setStatus } from "./store.ts";
 import { forgetFollowsOf } from "./threads.ts";
@@ -136,6 +137,8 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
   installAccountCommands(interactions, { db, keys });
   installPanel(interactions, db, installIssueNew(interactions, { db, keys, search, log }));
   installAlerts(db, keys, rest, interactions, signal, log);
+  installRolePanel(interactions, { db, keys, rest, log, baseUrl: envVar("BASE_URL") ?? null });
+  watchRolePanel(db, rest, log, signal);
   const pings = new Pings({ db, keys, rest, search, log, commands: new AtCommands({ db, keys, rest, log }) });
   const signals = new Signals({ db, keys, log });
   const reactor = new Reactor({ db, rest, log });
@@ -155,6 +158,7 @@ const USAGE = `usage: autocraft-server discord forget --message <message link or
        autocraft-server discord channels
        autocraft-server discord watch <channel id> | unwatch <channel id>
        autocraft-server discord panel post <channel id>
+       autocraft-server discord role-panel | role-panel set <channel id> <role id> | role-panel off
        autocraft-server discord filing list | add <owner/name> | remove <owner/name>
        autocraft-server discord offer list | hide <name> | show <name>`;
 
@@ -218,6 +222,16 @@ async function discord(args: string[]): Promise<void> {
     if (!r) die("no such channel; the bot has not reported it");
     await audit(db, "cli", "discord-panel", b, { message: r.messageId, created: r.created });
     console.log(`${r.created ? "posted" : "updated"} the panel in ${b} (message ${r.messageId})${r.pinError ? `; not pinned: ${r.pinError}` : ""}`);
+  } else if (sub === "role-panel" && !a) {
+    const [cfg, st] = await Promise.all([roleConfig(db), rolePanelState(db)]);
+    if (!cfg) console.log("the contributor role panel is off");
+    else console.log(`contributor role ${cfg.roleId} in server ${cfg.guildId}, panel in ${cfg.channelId}: ${st?.channelId === cfg.channelId ? (st.error ? `not posted: ${st.error}` : `message ${st.messageId}`) : "not posted yet"}`);
+  } else if (sub === "role-panel" && a === "set" && b && args[3]) {
+    const cfg = await setRoleConfig(db, "cli", { channelId: b, roleId: args[3] }).catch((e: Error) => die(e instanceof RoleConfigError ? e.message : `saving failed: ${e.message}`));
+    console.log(`the runner posts the contributor role panel in ${cfg!.channelId}; Verify gives role ${cfg!.roleId}`);
+  } else if (sub === "role-panel" && a === "off") {
+    await setRoleConfig(db, "cli", null);
+    console.log("the contributor role panel is off; the runner removes the posted panel");
   } else if (sub === "react-emoji") {
     if (!a) {
       console.log(await reactEmoji(db));
@@ -247,5 +261,5 @@ async function discord(args: string[]): Promise<void> {
 }
 
 export const commands = {
-  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch | panel post | filing list|add|remove | offer list|hide|show", run: (args: string[]) => discord(args) },
+  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch | panel post | role-panel [set|off] | filing list|add|remove | offer list|hide|show", run: (args: string[]) => discord(args) },
 };

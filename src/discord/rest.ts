@@ -136,15 +136,23 @@ export class RestClient implements DiscordRest {
     return (await this.#queue("POST", "/users/@me/channels", { recipient_id: userId }, true)) as { id: string };
   }
 
+  /**
+   * Gives a guild member a role; `reason` shows in the server's audit log. The bot needs Manage Roles, and its highest role
+   * must sit above the role. Adding a role the member already has succeeds.
+   */
+  async addMemberRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void> {
+    await this.#queue("PUT", `/guilds/${guildId}/members/${userId}/roles/${roleId}`, undefined, true, { "x-audit-log-reason": encodeURIComponent(reason.slice(0, 400)) });
+  }
+
   async overwriteGuildCommands(applicationId: string, guildId: string, commands: CommandDef[]): Promise<void> {
     await this.#queue("PUT", `/applications/${applicationId}/guilds/${guildId}/commands`, commands, true);
   }
 
-  #queue(method: string, path: string, body: unknown, auth: boolean): Promise<unknown> {
+  #queue(method: string, path: string, body: unknown, auth: boolean, headers?: Record<string, string>): Promise<unknown> {
     const key = routeKey(method, path);
     // The chain is per bucket once Discord has named it, else per route.
     const chain = this.#stateKey(key, path);
-    const run = (this.#chains.get(chain) ?? Promise.resolve()).then(() => this.#send(method, path, key, body, auth));
+    const run = (this.#chains.get(chain) ?? Promise.resolve()).then(() => this.#send(method, path, key, body, auth, headers));
     const tail = run.catch(() => undefined);
     this.#chains.set(chain, tail);
     void tail.then(() => { if (this.#chains.get(chain) === tail) this.#chains.delete(chain); });
@@ -157,7 +165,7 @@ export class RestClient implements DiscordRest {
     return b ? `${b}|${majorOf(path)}` : `${key}|${majorOf(path)}`;
   }
 
-  async #send(method: string, path: string, key: string, body: unknown, auth: boolean): Promise<unknown> {
+  async #send(method: string, path: string, key: string, body: unknown, auth: boolean, headers?: Record<string, string>): Promise<unknown> {
     const f = this.#d.fetch ?? fetch;
     const now = this.#d.now ?? Date.now;
     const sleep = this.#d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -168,7 +176,7 @@ export class RestClient implements DiscordRest {
       if (gap > 0) await sleep(Math.min(gap, MAX_WAIT_MS));
       const r = await f(`${API}${path}`, {
         method,
-        headers: { ...(auth && { authorization: `Bot ${this.#d.token}` }), ...(body !== undefined && { "content-type": "application/json" }) },
+        headers: { ...(auth && { authorization: `Bot ${this.#d.token}` }), ...(body !== undefined && { "content-type": "application/json" }), ...headers },
         ...(body !== undefined && { body: JSON.stringify(body) }),
       });
       const bucket = r.headers.get("x-ratelimit-bucket");

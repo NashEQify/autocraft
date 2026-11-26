@@ -67,6 +67,7 @@ export const HELP = [
   "Mention @AutoCraft with a question in a watched channel, or reply to a message and mention it, to get matching issues; text that starts with a command word is a command instead.",
   "Right-click a message, then Apps › Find issue, to search with that message's text.",
   "AutoCraft's bot reaction on a message means AutoCraft counted it for the issues it names.",
+  "The Verify button in the contributor role channel gives you the contributor role once you have a merged pull request; link your account first.",
 ].join("\n");
 
 export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number; read?: ReadDeps }): void {
