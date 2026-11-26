@@ -1,7 +1,7 @@
 // The context of the model calls a job makes (its job, step and queue class), the claim order of queued calls, and the room
 // and taker questions a step asks before it queues Task Runner calls. Jev runs are recorded here too.
 import { insertRun, type RunStart } from "./runs.ts";
-import { remoteRoom, roomOf, roomState, type RoomState } from "../remote/room.ts";
+import { remoteRoom, roomOf, roomState, SEEN_EVERY_MS, type RoomState } from "../remote/room.ts";
 import { batchKey, roomKey, takerTestIn, type TakerCall } from "../remote/takers.ts";
 import { loadRunningCounts } from "../data/inference/index.ts";
 import type { Db } from "../db/index.ts";
@@ -206,7 +206,32 @@ export async function takersCut<T>(db: Db, items: readonly T[], limit: number | 
 }
 
 /** The model queue's room for a pool's units by index (classify/run.ts pool): answers are kept for one round of the pool's scheduling. */
-export type PoolRoom = { round(): void; room(i: number): Promise<number>; taker(i: number): Promise<boolean> };
+export type PoolRoom = {
+  round(): void; room(i: number): Promise<number>; taker(i: number): Promise<boolean>;
+  /**
+   * Resolves once the room may differ from the round's reading: a change topic it reads moved, or ROOM_REFRESH_MS passed since
+   * the reading; at once when the round read nothing. Reads only the topics' counters, every `pollMs`, until then or until `signal` aborts.
+   */
+  changed(pollMs: number, signal: AbortSignal): Promise<void>;
+};
+
+/**
+ * The change topics whose writes move the room (src/data/runners/triggers.ts): calls entering or leaving the queue, leases starting
+ * and ending, picks, and Task Runners appearing, leaving or changing readiness, slots or claims.
+ */
+const ROOM_TOPICS = ["remote-queue", "remote-helpers"];
+/**
+ * The longest a waiting pool goes without reading the room again: what moves with time alone (a status or idle claim growing old,
+ * a queued call's caller going stale) or through tables outside ROOM_TOPICS (a user's settings, write permissions) shows within this.
+ */
+export const ROOM_REFRESH_MS = SEEN_EVERY_MS;
+
+const pause = (ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve) => {
+  if (signal.aborted) return resolve();
+  const t = setTimeout(done, ms);
+  function done(): void { clearTimeout(t); signal.removeEventListener("abort", done); resolve(); }
+  signal.addEventListener("abort", done, { once: true });
+});
 
 /**
  * PoolRoom for units whose calls name `reposOf(i)` (the job's repo param is added) and the items `refsOf(i)`, in the current call's
@@ -218,27 +243,42 @@ export type PoolRoom = { round(): void; room(i: number): Promise<number>; taker(
  */
 export function poolRoom(db: Db, reposOf: (i: number) => readonly string[] | undefined, refsOf: (i: number) => readonly ItemRefLike[], opts: { mayNotCall?: boolean; promptId?: string } = {}): PoolRoom {
   const cls = currentClass(opts.promptId);
-  let pass: RoomPass | null = null;
+  let pass: RoomPass | null = null, stamp = "", readAt = 0;
   const rooms = new Map<string, number>(), takers = new Map<string, boolean>();
+  const stampOf = async (): Promise<string> => { const s = await db.seqs(ROOM_TOPICS); return ROOM_TOPICS.map((t) => s[t] ?? 0).join(","); };
+  const passOf = async (): Promise<RoomPass> => {
+    if (pass) return pass;
+    // The counters are read before the room, so a write after the reading moves them.
+    const [s, st] = await db.together(() => Promise.all([stampOf(), roomState(db)]));
+    stamp = s;
+    readAt = Date.now();
+    return (pass ??= await queueRoomPass(db, opts.promptId, st));
+  };
   // The answers depend on the items only through which filtered users take them, so units of one repo share them when nobody filters.
   const keyOf = async (i: number): Promise<string> => {
     const r = reposOf(i);
-    return `${r === undefined ? "\0" : [...r].sort().join("\n")}\t${await (pass ??= await queueRoomPass(db, opts.promptId)).key(refsOf(i))}`;
+    return `${r === undefined ? "\0" : [...r].sort().join("\n")}\t${await (await passOf()).key(refsOf(i))}`;
   };
   return {
     round: () => { pass = null; rooms.clear(); takers.clear(); },
     room: async (i) => {
       const k = await keyOf(i);
       let n = rooms.get(k);
-      if (n === undefined) rooms.set(k, (n = await (pass ??= await queueRoomPass(db, opts.promptId)).room(cls, reposOf(i), undefined, refsOf(i))));
+      if (n === undefined) rooms.set(k, (n = await (await passOf()).room(cls, reposOf(i), undefined, refsOf(i))));
       return n;
     },
     taker: async (i) => {
       if (opts.mayNotCall) return true;
       const k = await keyOf(i);
       let t = takers.get(k);
-      if (t === undefined) takers.set(k, (t = await (pass ??= await queueRoomPass(db, opts.promptId)).taker(reposOf(i), undefined, refsOf(i))));
+      if (t === undefined) takers.set(k, (t = await (await passOf()).taker(reposOf(i), undefined, refsOf(i))));
       return t;
+    },
+    changed: async (pollMs, signal) => {
+      while (!signal.aborted && Date.now() - readAt < ROOM_REFRESH_MS) {
+        await pause(Math.min(pollMs, readAt + ROOM_REFRESH_MS - Date.now()), signal);
+        if (signal.aborted || await stampOf() !== stamp) return;
+      }
     },
   };
 }

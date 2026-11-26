@@ -4,8 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Kysely } from "kysely";
 import { join } from "node:path";
-import { allocation } from "../src/agents/call.ts";
-import { runJev, setRunner } from "../src/classify/run.ts";
+import { allocation, poolRoom } from "../src/agents/call.ts";
+import { pool, runJev, setRunner } from "../src/classify/run.ts";
 import { withConfig } from "../src/data/control/index.ts";
 import { effect } from "../src/db/effects.ts";
 import { COLUMNS } from "../src/db/types.ts";
@@ -29,6 +29,7 @@ import type { Req } from "../src/dash/types.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import { awaitCall, claimCall, enqueueCall } from "../src/remote/calls.ts";
 import { planned } from "../src/core/select.ts";
+import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { applyProposals, detectAutopilot } from "../src/runner/autopilot.ts";
 import { JobLogCopy } from "../src/runner/job-log.ts";
 import { Runner } from "../src/runner/runner.ts";
@@ -192,6 +193,30 @@ test("a Task Runner's claim reads the queue and the other Task Runners in sets",
     await expectFlat((n) => claims(n, 1, leases)(n), 2, 10);
     await expectFlat((n) => claims(2, n, leases)(n), 1, 4);
   }
+});
+
+test("a pool waiting for room reads the room when the queue changes, not on every poll", async () => {
+  // A ready Task Runner that is not active: it takes the units' calls, but there is no room for them now.
+  const reads = async (unitMs: number): Promise<number> => {
+    const w = await world();
+    await w.repo();
+    await w.db.run(w.db.k.insertInto("access").values({ login: "olga", role: "operator" }));
+    const id = (await createToken(w.db, "olga", "helper", { kind: "runner" })).row.id;
+    await storeStatus(w.db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+    let n = 0;
+    const stop = w.db.observe((e) => { if (e.kind === "query" && !/change_seq/.test(e.sql)) n++; });
+    try {
+      // Each unit stands for a call waiting in the queue: the others wait for room meanwhile.
+      await pool(numbers(3).map(() => () => new Promise((r) => setTimeout(r, unitMs))), poolRoom(w.db, () => ["app"], (i) => [{ repo: "app", number: i + 1 }]), { pollMs: 2 });
+    } finally {
+      stop();
+      w.close();
+      await w.db.close();
+    }
+    return n;
+  };
+  const short = await reads(20), long = await reads(200);
+  assert.ok(long <= short, `the room was read ${long} times while the calls took 200 ms each, against ${short} times at 20 ms`);
 });
 
 test("calls that wait for their result share one poll", async () => {
