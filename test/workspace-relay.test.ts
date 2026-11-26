@@ -48,7 +48,7 @@ describe("workspace relay", async () => {
     const now = new Date().toISOString();
     const ws = Number((await db.get(db.k.insertInto("workspaces").values({ repo: "photocraft", base_sha: "a".repeat(40), env_id: "k", state: "ready", state_at: now, created_at: now, updated_at: now }).returning("id")))!.id);
     await queueWorkspaceCall(db, request(ws));
-    const r = await claimCall(db, caller, { requestId: `ws-relay-claim-${++claims}`, protocol: PROTOCOL_VERSION, helperVersion: "1.3.6", harness: "claude", harnessVersion: "2", tiers: { top: "opus" } }, async () => true);
+    const r = await claimCall(db, caller, { requestId: `ws-relay-claim-${++claims}`, protocol: PROTOCOL_VERSION, helperVersion: "1.3.7", harness: "claude", harnessVersion: "2", tiers: { top: "opus" } }, async () => true);
     assert.ok(r.lease, JSON.stringify(r));
     const lease = r.lease;
     const runId = (await db.get(db.k.selectFrom("remote_calls").select("run_id").where("id", "=", lease.id)))!.run_id;

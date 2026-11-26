@@ -198,3 +198,32 @@ export async function loadItemReads(db: Db, keys: KeySource): Promise<Map<RefKey
   const rows = await q.all(q.k.selectFrom("main.item_reads as r").innerJoin(resolveKeys(db, keys, "kk"), (j) => j.onRef("kk.repo", "=", "r.repo").onRef("kk.number", "=", "r.number")).select(["r.repo", "r.number", "r.synced_at"]));
   return new Map(rows.map((r) => [refKey(r.repo, Number(r.number)), r.synced_at]));
 }
+
+/** A webhook delivery the delivery check asked GitHub to send again. */
+export type Redelivery = { guid: string; asked: number; asked_at: string | null };
+
+/** The recorded redeliveries of these GUIDs. */
+export async function loadRedeliveries(db: Db, guids: string[]): Promise<Map<string, Redelivery>> {
+  const q = queryDb(db);
+  const out = new Map<string, Redelivery>();
+  for (const part of kx.batches([...new Set(guids)])) {
+    for (const r of await q.all(q.k.selectFrom("main.webhook_redeliveries").select(["guid", "asked", "asked_at"]).where("guid", "in", part))) {
+      out.set(r.guid, { guid: r.guid, asked: Number(r.asked), asked_at: r.asked_at });
+    }
+  }
+  return out;
+}
+
+/** Records one more request for `guid` (`accepted`: GitHub took it, at `at`) and prunes rows not touched since `pruneBefore`; one `db.write`. */
+export async function noteRedelivery(db: Db, guid: string, accepted: boolean, at: string, pruneBefore: string): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    await q.run(q.k.insertInto("main.webhook_redeliveries").values({ guid, asked: 1, asked_at: accepted ? at : null, updated_at: at })
+      .onConflict((oc) => oc.column("guid").doUpdateSet((eb) => ({
+        asked: eb("main.webhook_redeliveries.asked", "+", 1),
+        updated_at: eb.ref("excluded.updated_at"),
+        ...(accepted ? { asked_at: eb.ref("excluded.asked_at") } : {}),
+      }))));
+    await q.run(q.k.deleteFrom("main.webhook_redeliveries").where("updated_at", "<", pruneBefore));
+  });
+}

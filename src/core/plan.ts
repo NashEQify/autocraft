@@ -472,6 +472,8 @@ export type ItemFacts = {
       asked: "author" | "maintainer" | null;
       /** The attempt's PR is open. */
       prOpen: boolean;
+      /** AutoCraft starts the attempt's plan again itself after its workspace did not start (src/implement/start-retry.ts): the failures in a row, and when (ms) the next start is due. */
+      startRetry?: { failures: number; dueAt: number };
     } | null;
     /** Live implementations in the repo other than this issue's. */
     liveInRepo: number;

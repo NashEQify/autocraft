@@ -1,2 +1,2 @@
 // Written by scripts/gen-pg-schema.ts (`pnpm pg-schema`), which moves the generation up by one whenever pgStamp() changes. Do not edit.
-export const PG_SCHEMA_GENERATION = { generation: 38, stamp: "8ed84202076804aa" };
+export const PG_SCHEMA_GENERATION = { generation: 39, stamp: "5e4ca86f19a62252" };

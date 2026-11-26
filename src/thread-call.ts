@@ -4,59 +4,82 @@
 import { parentPort, Worker } from "node:worker_threads";
 
 type Reply<R> = { n: number; ok: true; value: R } | { n: number; ok: false; error: string };
+type Waiting<R> = { ok: (v: R) => void; fail: (e: Error) => void; timer?: NodeJS.Timeout };
+/** A worker with the calls it still owes a reply, so a stopped worker fails only its own calls, never its replacement's. */
+type Running<R> = { w: Worker; pending: Map<number, Waiting<R>> };
 
 export class ThreadCall<Q, R> {
-  private worker: Worker | null = null;
-  private readonly pending = new Map<number, { ok: (v: R) => void; fail: (e: Error) => void }>();
+  private current: Running<R> | null = null;
   private seq = 0;
   private readonly url: URL;
   private readonly what: string;
   private readonly workerData: unknown;
+  private readonly timeoutMs: number | undefined;
 
-  /** `what` names the worker in errors. */
-  constructor(url: URL, what: string, workerData?: unknown) {
+  /**
+   * `what` names the worker in errors. With `timeoutMs`, a call without a reply by then fails, and the worker is replaced:
+   * one stuck call would otherwise hold every call queued behind it.
+   */
+  constructor(url: URL, what: string, workerData?: unknown, opts: { timeoutMs?: number } = {}) {
     this.url = url;
     this.what = what;
     this.workerData = workerData;
+    this.timeoutMs = opts.timeoutMs;
   }
 
   call(q: Q): Promise<R> {
     return new Promise((ok, fail) => {
-      const w = this.spawn();
+      const run = this.spawn();
       const n = ++this.seq;
-      if (!this.pending.size) w.ref();
-      this.pending.set(n, { ok, fail });
-      w.postMessage({ n, q });
+      if (!run.pending.size) run.w.ref();
+      const p: Waiting<R> = { ok, fail };
+      if (this.timeoutMs !== undefined) {
+        const ms = this.timeoutMs;
+        p.timer = setTimeout(() => this.stop(run, new Error(`the ${this.what} call got no reply within ${ms / 1000} s`)), ms);
+      }
+      run.pending.set(n, p);
+      run.w.postMessage({ n, q });
     });
   }
 
   /** Stops the worker; calls still waiting fail. */
   async close(): Promise<void> {
-    const w = this.worker;
-    this.worker = null;
-    await w?.terminate();
+    const run = this.current;
+    this.current = null;
+    await run?.w.terminate();
   }
 
-  private spawn(): Worker {
-    if (this.worker) return this.worker;
-    const w = new Worker(this.url, { workerData: this.workerData });
-    const fail = (e: Error): void => {
-      if (this.worker === w) this.worker = null;
-      for (const p of this.pending.values()) p.fail(e);
-      this.pending.clear();
-    };
-    w.on("message", (m: Reply<R>) => {
-      const p = this.pending.get(m.n);
-      this.pending.delete(m.n);
-      if (!this.pending.size) w.unref();
+  /** Fails the worker's waiting calls with `e` and stops it. */
+  private stop(run: Running<R>, e: Error): void {
+    this.settleAll(run, e);
+    void run.w.terminate();
+  }
+
+  private settleAll(run: Running<R>, e: Error): void {
+    if (this.current === run) this.current = null;
+    for (const p of run.pending.values()) {
+      clearTimeout(p.timer);
+      p.fail(e);
+    }
+    run.pending.clear();
+  }
+
+  private spawn(): Running<R> {
+    if (this.current) return this.current;
+    const run: Running<R> = { w: new Worker(this.url, { workerData: this.workerData }), pending: new Map() };
+    run.w.on("message", (m: Reply<R>) => {
+      const p = run.pending.get(m.n);
+      run.pending.delete(m.n);
+      if (!run.pending.size) run.w.unref();
       if (!p) return;
+      clearTimeout(p.timer);
       if (m.ok) p.ok(m.value);
       else p.fail(new Error(m.error));
     });
-    w.on("error", fail);
-    w.on("exit", (code) => fail(new Error(`the ${this.what} worker stopped (exit code ${code})`)));
-    w.unref();
-    return (this.worker = w);
+    run.w.on("error", (e: Error) => this.settleAll(run, e));
+    run.w.on("exit", (code) => this.settleAll(run, new Error(`the ${this.what} worker stopped (exit code ${code})`)));
+    run.w.unref();
+    return (this.current = run);
   }
 }
 
@@ -65,13 +88,15 @@ export function serveCalls<Q, R>(handle: (q: Q) => R | Promise<R>): void {
   const port = parentPort;
   if (!port) throw new Error("serveCalls runs in a worker thread");
   let queue: Promise<void> = Promise.resolve();
+  const answer = async (m: { n: number; q: Q }): Promise<void> => {
+    try {
+      port.postMessage({ n: m.n, ok: true, value: await handle(m.q) } satisfies Reply<R>);
+    } catch (e) {
+      port.postMessage({ n: m.n, ok: false, error: e instanceof Error ? e.message : String(e) } satisfies Reply<R>);
+    }
+  };
   port.on("message", (m: { n: number; q: Q }) => {
-    queue = queue.then(async () => {
-      try {
-        port.postMessage({ n: m.n, ok: true, value: await handle(m.q) } satisfies Reply<R>);
-      } catch (e) {
-        port.postMessage({ n: m.n, ok: false, error: e instanceof Error ? e.message : String(e) } satisfies Reply<R>);
-      }
-    });
+    // The error reply itself can throw (a message that cannot be cloned); the next call still runs.
+    queue = queue.then(() => answer(m)).catch(() => undefined);
   });
 }

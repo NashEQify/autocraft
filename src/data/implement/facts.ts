@@ -4,6 +4,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import { openItem } from "../mirror/fragments.ts";
+import { startRetryOf } from "../../implement/start-retry.ts";
 import { ENDED, IMPL_COLS, num, ofRow, parse, roundOf, type ImplRow, type RoundRow } from "./rows.ts";
 import {
   LIVE_STATES,
@@ -58,7 +59,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
       .orderBy("t.id")) as Promise<AttemptRow[]>,
     q.all(k.selectFrom("main.implementation_rounds as r").innerJoin("main.implementations as im", "im.id", "r.implementation_id")
       .select(["r.id", "r.implementation_id", "r.kind", "r.call_id", "r.result", "r.at"])
-      .where("r.kind", "in", ["question", "answer", "guidance", "revise"]).where("im.state", "not in", ENDED)
+      .where("r.kind", "in", ["question", "answer", "guidance", "revise", "start-failed"]).where("im.state", "not in", ENDED)
       .where((eb: any) => eb.or([byNumber(eb), byPrNumber(eb)])).orderBy("r.id")) as Promise<RoundRow[]>,
     q.all(k.selectFrom("main.implementations as im").select(["im.repo", "im.number"]).where("im.state", "in", [...LIVE_STATES])
       .where((eb: any) => openItem(eb, "im.repo", "im.number")).$if(!!o.repos, (s: any) => s.where(kx.inList(db, "im.repo", o.repos!)))) as Promise<{ repo: string; number: number | string }[]>,
@@ -107,6 +108,7 @@ export async function loadImplementFacts(db: Db, keys: KeySource, o: { repos?: s
       }),
       reviseHeads: revises.flatMap((x) => { const v = x.result as Partial<ReviseRound> | null; return typeof v?.head === "string" && (v.review || v.ci) ? [v.head] : []; }),
       lastRevise: (revises.at(-1)?.result ?? null) as ReviseRound | null,
+      startRetry: startRetryOf({ state: r.state as ImplementationState, rounds: rs }),
       textCounts: counts,
       prAttempts: (prAttempts.get(refKey(r.repo, Number(r.number))) ?? []).sort((x, y) => y.id - x.id),
     });

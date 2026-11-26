@@ -169,6 +169,26 @@ describe("user-local remote calls", async () => {
     await withdrawCall(db, ids[1]!, "test over");
   });
 
+  test("a reply goes to one await: a second await of the call that starts while the reply is taken does not get it", async (t) => {
+    const id = await queue();
+    const lease = (await leaseFor("bob"))!;
+    const text = (o: Promise<Awaited<ReturnType<typeof awaitCall>>>) => o.then((r) => (r.state === "done" ? r.text : r.state));
+    const first = text(awaitCall(db, id));
+    let second: Promise<string> | null = null;
+    const run = db.run.bind(db);
+    t.mock.method(db, "run", (async (...args: Parameters<typeof db.run>) => {
+      if (!second && new Error().stack!.includes("takeReplies")) {
+        second = text(awaitCall(db, id));
+        await sleep(50);
+      }
+      return await run(...args);
+    }) as typeof db.run);
+    await done(lease.secret, "the reply");
+    assert.equal(await first, "the reply");
+    assert.ok(second, "the reply was taken");
+    assert.notEqual(await second, "the reply");
+  });
+
   test("a lease without heartbeats goes back to the queue and the next claim gets it; the old secret is dead", async () => {
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     const first = (await leaseFor("bob"))!;

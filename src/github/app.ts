@@ -75,6 +75,19 @@ export function appJwt(app: Pick<AppSecrets, "clientId" | "privateKey">, nowMs =
 }
 
 export async function call(base: string, path: string, token: string | null, method = "GET", body?: unknown): Promise<unknown> {
+  return (await request(base, path, token, method, body)).body;
+}
+
+/** A GET of one page of a list, with the path of the next page from the Link header (null on the last page). */
+export async function callPage(base: string, path: string, token: string | null): Promise<{ body: unknown; next: string | null }> {
+  const r = await request(base, path, token, "GET");
+  const url = /<([^>]+)>;\s*rel="next"/.exec(r.link ?? "")?.[1];
+  if (!url) return { body: r.body, next: null };
+  const u = new URL(url, base);
+  return { body: r.body, next: u.pathname.replace(new URL(base).pathname.replace(/\/$/, ""), "") + u.search };
+}
+
+async function request(base: string, path: string, token: string | null, method: string, body?: unknown): Promise<{ body: unknown; link: string | null }> {
   effect("http");
   const r = await fetch(`${base}${path}`, {
     method,
@@ -94,7 +107,7 @@ export async function call(base: string, path: string, token: string | null, met
     }
     throw Object.assign(new AppError(`${method} ${path.replace(/\/[^/]*\/conversions$/, "/…/conversions")}: HTTP ${r.status}`), { status: r.status, rateLimited });
   }
-  return r.status === 204 ? null : r.json();
+  return { body: r.status === 204 ? null : await r.json(), link: r.headers.get("link") };
 }
 
 const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
