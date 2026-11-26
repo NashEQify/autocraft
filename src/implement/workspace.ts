@@ -28,7 +28,14 @@ const READY_POLL_MS = 3000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const iso = () => new Date().toISOString();
 
-export class WorkspaceUnavailable extends Error {}
+/** The workspace did not get ready. `startFailure` is false for a cancel: that is a person's doing, not a failed start. */
+export class WorkspaceUnavailable extends Error {
+  readonly startFailure: boolean;
+  constructor(message: string, startFailure = true) {
+    super(message);
+    this.startFailure = startFailure;
+  }
+}
 
 /** The head commit of the repo's default branch on GitHub, or null. */
 export async function mainHeadOf(db: Db, repo: string): Promise<string | null> {
@@ -78,7 +85,7 @@ export async function readyWorkspace(ctx: StepContext, o: { repo: string; baseSh
     if (w.state === "parked" && !await resumeWorkspace(db, id)) throw new WorkspaceUnavailable(`workspace ${id} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}`);
     if (!LIVE_STATES.includes(w.state as WorkspaceStateName)) throw new WorkspaceUnavailable(`workspace ${id} is ${w.state}${w.error ? `: ${w.error}` : ""}`);
     if (Date.now() - from > READY_LIMIT_MS) throw new WorkspaceUnavailable(`workspace ${id} was not ready within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`);
-    if (await ctx.cancelled()) throw new WorkspaceUnavailable("cancelled while the workspace started");
+    if (await ctx.cancelled()) throw new WorkspaceUnavailable("cancelled while the workspace started", false);
     if (w.state !== last) {
       last = w.state;
       await ctx.progress(`workspace ${id} ${w.state}`);
