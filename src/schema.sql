@@ -1041,6 +1041,28 @@ CREATE TABLE IF NOT EXISTS agent_run_tools (
   PRIMARY KEY (run_id, seq)
 ) WITHOUT ROWID;
 
+-- Full transcripts of model calls (every model message, tool call and tool result), one row per Task Runner attempt.
+-- The gzip JSONL object lives in the transcript store (src/transcripts: an S3-compatible bucket or a local directory);
+-- the row is its pointer and summary. Kept ten years, like agent_run_texts.
+CREATE TABLE IF NOT EXISTS agent_run_transcripts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  call_id INTEGER,                    -- remote_calls.id
+  attempt INTEGER NOT NULL DEFAULT 0, -- the call's attempt the transcript is of
+  outcome TEXT NOT NULL,              -- done | failed | refused
+  store TEXT NOT NULL,                -- local | s3
+  bucket TEXT,                        -- s3: the bucket the object is in
+  object_key TEXT NOT NULL,
+  bytes INTEGER NOT NULL,             -- size of the stored (gzip) object
+  raw_bytes INTEGER NOT NULL,         -- size of the JSONL
+  sha256 TEXT NOT NULL,               -- of the stored object
+  lines INTEGER NOT NULL,             -- events in the transcript
+  tool_count INTEGER NOT NULL,
+  last_tool TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_run_transcripts_run ON agent_run_transcripts(run_id, id);
+
 CREATE INDEX IF NOT EXISTS jobs_started ON jobs(started_at);
 
 -- Build environments: places that run untrusted code (workers), registered by an

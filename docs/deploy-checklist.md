@@ -63,6 +63,12 @@ The image sets every path (`/data/...`, `/config/...`). A deployment sets only t
 | `AUTOCRAFT_ATTACH_ACCESS_KEY_ID` | with the endpoint | none | Access key id of an API token that may write objects to the bucket. |
 | `AUTOCRAFT_ATTACH_SECRET_ACCESS_KEY` | with the endpoint | none | Its secret access key. Keep it in a Secret. |
 | `AUTOCRAFT_ATTACH_PUBLIC_URL` | with the endpoint | none | Public read origin of the bucket, `https://files.example.com`, no trailing slash. Issue bodies link `<this>/<object key>`. |
+| `AUTOCRAFT_TRANSCRIPT_S3_ENDPOINT` | no | local directory | S3-compatible endpoint of the private transcript bucket (`https://<account>.r2.cloudflarestorage.com` for Cloudflare R2). With all four `AUTOCRAFT_TRANSCRIPT_*` bucket variables set on the dashboard, each model call's full transcript is stored there as gzip JSONL; Admin > Storage can set a bucket instead, which wins over these. Never make the bucket public: the dashboard reads it for operators and maintainers. |
+| `AUTOCRAFT_TRANSCRIPT_BUCKET` | with the endpoint | none | Bucket name. Objects go to `<prefix>calls/<yyyy>/<mm>/run-<run>-call-<call>-<attempt>-<random>.jsonl.gz`. |
+| `AUTOCRAFT_TRANSCRIPT_ACCESS_KEY_ID` | with the endpoint | none | Access key id of an API token that may read, write and delete objects in that bucket only. |
+| `AUTOCRAFT_TRANSCRIPT_SECRET_ACCESS_KEY` | with the endpoint | none | Its secret access key. Keep it in a Secret. |
+| `AUTOCRAFT_TRANSCRIPT_PREFIX` | no | none | Key prefix inside the bucket, ending in `/`, for instances that share one bucket. |
+| `AUTOCRAFT_TRANSCRIPT_DIR` | no | `<data dir>/transcripts` | Directory for transcripts when no bucket is configured. With several dashboard replicas it must be a shared volume. |
 | `AUTOCRAFT_MERGE_CMD` | no | built-in `safe-merge` | External merge command; it must accept `--head <sha>`. |
 
 Never set `AUTOCRAFT_DEV_AUTH`: it signs in as any login and is allowed only on a loopback address.

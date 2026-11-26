@@ -1319,7 +1319,39 @@ export type AgentRunDetail = AgentRun & {
   error: string | null;
   tools: AgentRunTool[];     // tool uses in order
   textsHidden?: boolean;     // prompt, output and tool arguments are withheld from this user (viewers)
+  transcripts?: AgentRunTranscript[]; // full transcripts, one per Task Runner attempt; absent for viewers
 };
+/** A stored full transcript of one attempt of a call: its summary; the events are read with `agents.transcript`. */
+export type AgentRunTranscript = {
+  id: number;
+  attempt: number;
+  outcome: "done" | "failed" | "refused";
+  bytes: number;             // stored (gzip) size
+  rawBytes: number;
+  lines: number;             // events
+  toolCount: number;
+  lastTool: string | null;
+  createdAt: string;
+};
+/** One readable piece of a transcript: a model message, thinking, a tool call and its result, or another harness event. */
+export type TranscriptEntry = {
+  at: string | null;         // arrival of the event on the Task Runner
+  kind: "system" | "user" | "text" | "thinking" | "tool" | "result" | "final" | "event";
+  name?: string;             // tool: the tool's name
+  text: string;              // capped; `truncated` counts the characters left out
+  truncated?: number;
+  isError?: boolean;
+  sub?: boolean;             // from a subagent (the explorer)
+};
+export type TranscriptView = { runId: number; transcript: AgentRunTranscript; entries: TranscriptEntry[]; omitted: number };
+/** Where transcripts are stored. `source`: the admin setting, the environment, or the local directory by default. */
+export type TranscriptStoreStatus = {
+  active: { kind: "local" | "s3"; source: "settings" | "environment" | "default"; dir: string | null; endpoint: string | null; bucket: string | null; prefix: string; accessKeyId: string | null };
+  saved: { kind: "local" | "s3"; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretSet: boolean } | null;
+  environment: boolean;      // a bucket is configured in the environment
+  problem: string | null;
+};
+export type TranscriptStoreInput = { kind: "local" } | { kind: "s3"; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey?: string };
 export type AgentRunTool = {
   seq: number;
   tool: string;              // e.g. "Read", "mcp__build__check"

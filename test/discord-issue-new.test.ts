@@ -12,7 +12,7 @@ import { VectorIndex } from "../src/embed/vectors.ts";
 import { Interactions } from "../src/discord/interactions.ts";
 import { sanitize } from "../src/discord/issue-draft.ts";
 import type { BotRequest, FileResult } from "../src/discord/file-issue.ts";
-import { signV4 } from "../src/discord/attachments.ts";
+import { signV4 } from "../src/storage/s3.ts";
 import { installPanel } from "../src/discord/panel.ts";
 import { installIssueNew, type IssueAsk } from "../src/discord/issue-new.ts";
 import { addFilingRepo, COVERAGE_TTL_MS, coverageReader, removeFilingRepo, type ReadRepo } from "../src/discord/filing-repos.ts";
