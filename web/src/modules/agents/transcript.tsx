@@ -34,12 +34,13 @@ const clock = (iso: string | null) => (iso ? new Date(iso).toISOString().slice(1
 export const kib = (n: number) => (n < 1024 * 1024 ? `${num(Math.max(1, Math.round(n / 1024)))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
 /** One line per transcript of a run, linking to its page (the run detail's Transcripts list). */
-export function TranscriptLinks({ runId, transcripts }: { runId: number; transcripts: AgentRunTranscript[] }) {
-  if (transcripts.length === 0) return null;
+export function TranscriptLinks({ runId, transcripts, off }: { runId: number; transcripts: AgentRunTranscript[]; off?: boolean }) {
+  if (transcripts.length === 0 && !off) return null;
   return (
     <section aria-label={t("Transcripts")}>
       <h3 className="text-xs font-semibold text-ink/65">{t("Transcripts")}</h3>
-      <ul className="mt-1 divide-y divide-line rounded border border-line">
+      {off && <p className="mt-1 text-sm text-ink/65">{t("Transcripts are off for this instance.")}</p>}
+      {transcripts.length > 0 && <ul className="mt-1 divide-y divide-line rounded border border-line">
         {transcripts.map((x) => (
           <li key={x.id}>
             <Link to={`/agents/${runId}/transcripts/${x.id}`} className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm hover:bg-ink/[0.04]">
@@ -53,7 +54,7 @@ export function TranscriptLinks({ runId, transcripts }: { runId: number; transcr
             </Link>
           </li>
         ))}
-      </ul>
+      </ul>}
     </section>
   );
 }

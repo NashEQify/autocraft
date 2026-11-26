@@ -1,14 +1,15 @@
 // Full transcripts of model calls: every event the harness streamed (model text, thinking, tool calls with their
 // arguments and full results), one gzip JSONL object per Task Runner attempt. Objects go to the instance's transcript
-// store, an S3-compatible bucket (Cloudflare R2) or, without one, a local directory; the database keeps a pointer and a
-// summary (agent_run_transcripts). Readers go through the server: objects are never public.
+// store, an S3-compatible bucket (Cloudflare R2); the database keeps a pointer and a summary (agent_run_transcripts).
+// Readers go through the server: objects are never public.
 //
 // Where the store is configured, first match wins:
-// 1. the admin setting `transcript_store` (kind, endpoint, bucket, prefix, access key id; the secret sealed with the
-//    instance's session key);
+// 1. the admin setting `transcript_store`: a bucket (kind, endpoint, bucket, prefix, access key id; the secret sealed
+//    with the instance's session key), or the local directory `<data dir>/transcripts`, which only an instance with one
+//    dashboard replica can use (each replica has its own data directory);
 // 2. AUTOCRAFT_TRANSCRIPT_S3_ENDPOINT, _TRANSCRIPT_BUCKET, _TRANSCRIPT_ACCESS_KEY_ID, _TRANSCRIPT_SECRET_ACCESS_KEY
-//    (optional _TRANSCRIPT_PREFIX);
-// 3. the directory AUTOCRAFT_TRANSCRIPT_DIR, default `<data dir>/transcripts`.
+//    (optional _TRANSCRIPT_PREFIX).
+// With neither, transcripts are off: bundles do not ask Task Runners for them and nothing is stored.
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -37,7 +38,7 @@ const ENTRIES_MAX = 4000;
 
 type Saved = { kind: "local" } | { kind: "s3"; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secret: string | null };
 export type ActiveStore =
-  | { kind: "local"; dir: string; source: "settings" | "default" }
+  | { kind: "local"; dir: string; source: "settings" }
   | { kind: "s3"; bucket: S3Bucket; prefix: string; source: "settings" | "environment" };
 
 let sealer: TokenBox | null = null;
@@ -70,10 +71,10 @@ function envBucket(env: NodeJS.ProcessEnv): { bucket: S3Bucket; prefix: string }
   return { bucket: { endpoint: endpoint.replace(/\/+$/, ""), bucket, accessKeyId, secretAccessKey }, prefix: normPrefix(envVar("TRANSCRIPT_PREFIX", env) ?? "") };
 }
 
-export const localDir = (env: NodeJS.ProcessEnv = process.env): string => resolve(envVar("TRANSCRIPT_DIR", env) ?? join(dataDir(env), "transcripts"));
+export const localDir = (env: NodeJS.ProcessEnv = process.env): string => resolve(join(dataDir(env), "transcripts"));
 
-/** The store transcripts go to now, and why a saved setting could not be used (its secret does not open under this key). */
-export async function activeStore(db: Db, env: NodeJS.ProcessEnv = process.env): Promise<{ store: ActiveStore; problem: string | null }> {
+/** The store transcripts go to now (null: transcripts are off), and why a saved setting could not be used (its secret does not open under this key). */
+export async function activeStore(db: Db, env: NodeJS.ProcessEnv = process.env): Promise<{ store: ActiveStore | null; problem: string | null }> {
   const saved = savedOf(await setting(db, SETTING_KEY));
   let problem: string | null = null;
   if (saved?.kind === "local") return { store: { kind: "local", dir: localDir(env), source: "settings" }, problem };
@@ -84,8 +85,11 @@ export async function activeStore(db: Db, env: NodeJS.ProcessEnv = process.env):
   }
   const fromEnv = envBucket(env);
   if (fromEnv) return { store: { kind: "s3", ...fromEnv, source: "environment" }, problem };
-  return { store: { kind: "local", dir: localDir(env), source: "default" }, problem };
+  return { store: null, problem };
 }
+
+/** Whether this instance stores transcripts: only then do bundles ask Task Runners to send them. */
+export const transcriptsOn = async (db: Db): Promise<boolean> => (await activeStore(db)).store !== null;
 
 /** A local path for `key` inside `dir`; null for a key that would leave it. */
 function localPath(dir: string, key: string): string | null {
@@ -146,9 +150,11 @@ export type CallTranscript = { runId: number; callId: number; attempt: number; o
 /**
  * Stores one submitted transcript: inflates and checks it (one JSON object per line, `{at, event}`), takes the claim's
  * path root off, drops image data, hides credentials, writes the gzip JSONL to the active store and records the pointer.
- * Throws for a transcript that is not gzip JSONL or is too large; the caller logs and goes on.
+ * Null when transcripts are off. Throws for a transcript that is not gzip JSONL or is too large; the caller logs and goes on.
  */
-export async function saveCallTranscript(db: Db, t: CallTranscript, now: Date = new Date()): Promise<TranscriptRow> {
+export async function saveCallTranscript(db: Db, t: CallTranscript, now: Date = new Date()): Promise<TranscriptRow | null> {
+  const { store } = await activeStore(db);
+  if (!store) return null;
   let raw: Buffer;
   try { raw = await gunzipAsync(Buffer.from(t.gzipBase64, "base64"), { maxOutputLength: RAW_MAX }); } catch (e) {
     throw new Error((e as { code?: string }).code === "ERR_BUFFER_TOO_LARGE" ? `the transcript inflates past ${RAW_MAX / 1024 / 1024} MiB` : "the transcript is not gzip");
@@ -171,7 +177,6 @@ export async function saveCallTranscript(db: Db, t: CallTranscript, now: Date = 
   if (events === 0) throw new Error("the transcript has no events");
   const jsonl = Buffer.from(`${lines.join("\n")}\n`, "utf8");
   const body = await gzipAsync(jsonl);
-  const { store } = await activeStore(db);
   const iso = now.toISOString();
   const key = `${store.kind === "s3" ? store.prefix : ""}calls/${iso.slice(0, 4)}/${iso.slice(5, 7)}/run-${t.runId}-call-${t.callId}-${t.attempt}-${randomBytes(6).toString("hex")}.jsonl.gz`;
   await put(store, key, body);
@@ -192,6 +197,7 @@ export const summaryOf = (r: TranscriptRow): AgentRunTranscript => ({
 /** The stored object of a transcript, checked against its hash. Throws a plain-words error when it cannot be read. */
 export async function transcriptObject(db: Db, r: TranscriptRow): Promise<Buffer> {
   const { store } = await activeStore(db);
+  if (!store) throw new Error("Transcripts are off for this instance.");
   if (r.store !== store.kind || (store.kind === "s3" && r.bucket !== store.bucket.bucket)) {
     throw new Error(r.store === "s3" ? `This transcript is in bucket ${r.bucket}, which the current transcript storage does not use.` : "This transcript is in the local directory, which the current transcript storage does not use.");
   }
@@ -271,7 +277,7 @@ export async function storeStatus(db: Db, env: NodeJS.ProcessEnv = process.env):
   const saved = savedOf(await setting(db, SETTING_KEY));
   const { store, problem } = await activeStore(db, env);
   return {
-    active: store.kind === "s3"
+    active: store === null ? null : store.kind === "s3"
       ? { kind: "s3", source: store.source, dir: null, endpoint: store.bucket.endpoint, bucket: store.bucket.bucket, prefix: store.prefix, accessKeyId: store.bucket.accessKeyId }
       : { kind: "local", source: store.source, dir: store.dir, endpoint: null, bucket: null, prefix: "", accessKeyId: null },
     saved: saved === null ? null : saved.kind === "local" ? { kind: "local", endpoint: "", bucket: "", prefix: "", accessKeyId: "", secretSet: false }
@@ -295,7 +301,7 @@ function checkInput(raw: unknown): { kind: "local" } | { kind: "s3"; endpoint: s
   return { kind: "s3", endpoint, bucket, prefix, accessKeyId, secret: secret || null };
 }
 
-/** Saves the operator's choice (null removes it: the environment or the local default applies). A bucket without a new secret keeps the saved one. */
+/** Saves the operator's choice (null removes it: the environment's bucket applies, or transcripts are off). A bucket without a new secret keeps the saved one. */
 export async function saveStore(db: Db, raw: unknown | null, by: string): Promise<void> {
   if (raw === null) { await saveSettings(db, [{ key: SETTING_KEY, value: null }], by, { action: "transcript-store", details: { cleared: true } }); return; }
   const c = checkInput(raw);
@@ -318,8 +324,11 @@ export async function saveStore(db: Db, raw: unknown | null, by: string): Promis
 export async function testStore(db: Db, raw: unknown | null): Promise<{ ok: boolean; detail: string }> {
   let store: ActiveStore;
   try {
-    if (raw === null) store = (await activeStore(db)).store;
-    else {
+    if (raw === null) {
+      const active = (await activeStore(db)).store;
+      if (!active) return { ok: false, detail: "Transcripts are off: no store is configured." };
+      store = active;
+    } else {
       const c = checkInput(raw);
       if (c.kind === "local") store = { kind: "local", dir: localDir(), source: "settings" };
       else {

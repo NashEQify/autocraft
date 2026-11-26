@@ -1,4 +1,4 @@
-// Admin: where model-call transcripts are stored, a local directory or an S3-compatible bucket, with a probe test.
+// Admin: where model-call transcripts are stored, an S3-compatible bucket or (one replica only) a local directory, with a probe test.
 import { useEffect, useState } from "react";
 import { CheckCircleIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { t } from "../../../../src/i18n/index.ts";
@@ -13,16 +13,16 @@ import { Page } from "../../ui/organisms/Page";
 import { cn } from "../../ui/cn";
 import { TextInput } from "./parts";
 
-const SOURCE: Record<TranscriptStoreStatus["active"]["source"], string> = {
+const SOURCE: Record<NonNullable<TranscriptStoreStatus["active"]>["source"], string> = {
   settings: "Saved here",
   environment: "From the environment",
-  default: "Default",
 };
 
 type Form = { kind: "local" | "s3"; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey: string };
 
 const formOf = (s: TranscriptStoreStatus): Form => {
   const v = s.saved ?? s.active;
+  if (!v) return { kind: "s3", endpoint: "", bucket: "", prefix: "", accessKeyId: "", secretAccessKey: "" };
   return { kind: v.kind, endpoint: v.endpoint ?? "", bucket: v.bucket ?? "", prefix: v.prefix, accessKeyId: v.accessKeyId ?? "", secretAccessKey: "" };
 };
 const inputOf = (f: Form): TranscriptStoreInput =>
@@ -30,6 +30,7 @@ const inputOf = (f: Form): TranscriptStoreInput =>
 
 function Active({ s }: { s: TranscriptStoreStatus }) {
   const a = s.active;
+  if (!a) return <p className="text-sm">{t("Off: model-call transcripts are not stored.")}</p>;
   const rows: [string, string][] =
     a.kind === "s3"
       ? [
@@ -40,7 +41,7 @@ function Active({ s }: { s: TranscriptStoreStatus }) {
           [t("Access key id"), a.accessKeyId ?? ""],
         ]
       : [
-          [t("Store"), t("Local directory")],
+          [t("Store"), t("Local directory (single replica only)")],
           [t("Directory"), a.dir ?? ""],
         ];
   return (
@@ -115,10 +116,10 @@ function TranscriptStore() {
         >
           <fieldset className="flex flex-wrap gap-2">
             <legend className="sr-only">{t("Store")}</legend>
-            {(["local", "s3"] as const).map((k) => (
+            {(["s3", "local"] as const).map((k) => (
               <label key={k} className={cn("flex h-11 cursor-pointer items-center gap-2 rounded border px-3 text-sm", form.kind === k ? "border-accent bg-accent/10" : "border-line")}>
                 <input type="radio" name="transcript-store-kind" value={k} checked={form.kind === k} onChange={() => set({ kind: k })} />
-                {k === "local" ? t("Local directory") : t("S3-compatible bucket")}
+                {k === "local" ? t("Local directory (single replica only)") : t("S3-compatible bucket")}
               </label>
             ))}
           </fieldset>
@@ -157,7 +158,7 @@ function TranscriptStore() {
             </Button>
             {data.saved && (
               <Button type="button" size="sm" variant="ghost" loading={write.busy === "clear"} onClick={clear} className="max-md:h-11">
-                {data.environment ? t("Use the environment's bucket") : t("Use the default directory")}
+                {data.environment ? t("Use the environment's bucket") : t("Turn transcripts off")}
               </Button>
             )}
           </div>

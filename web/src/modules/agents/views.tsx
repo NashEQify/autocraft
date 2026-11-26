@@ -378,7 +378,7 @@ export function RunDetailBody({ id }: { id: number }) {
         <>
           <Collapsible title="Prompt" text={r.prompt} empty="Prompt text removed after ten years." />
           <Collapsible title="Output" text={r.output} empty={r.state === "running" ? "Still running." : "Output removed after ten years."} open />
-          <TranscriptLinks runId={r.id} transcripts={r.transcripts ?? []} />
+          <TranscriptLinks runId={r.id} transcripts={r.transcripts ?? []} off={!!r.transcriptsOff && !!r.via} />
         </>
       )}
     </div>

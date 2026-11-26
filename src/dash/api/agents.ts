@@ -9,7 +9,7 @@ import { SECURITY_STEP } from "../../security/rules.ts";
 import type { Db } from "../../db/index.ts";
 import type { Res } from "../types.ts";
 import { loadRunTranscripts, loadTranscript, type TranscriptRow } from "../../data/inference/index.ts";
-import { saveStore, storeStatus, summaryOf, testStore, transcriptObject, transcriptView } from "../../transcripts/index.ts";
+import { saveStore, storeStatus, summaryOf, testStore, transcriptObject, transcriptsOn, transcriptView } from "../../transcripts/index.ts";
 
 const wrap = async <T>(f: () => Promise<T | Promise<T>>): Promise<T> => {
   try {
@@ -41,7 +41,8 @@ export const detail = async (db: Db, req: Req) => wrap(async () => {
   if (!/^\d{1,15}$/.test(req.params.id ?? "")) throw new HttpError(400, "not a run id");
   const staff = canSeeInternals(req);
   const run = await getRun(db, Number(req.params.id), { hidden: await hiddenRepos(db, req), texts: staff });
-  return staff ? { ...run, transcripts: (await loadRunTranscripts(db, run.id)).map(summaryOf) } : run;
+  if (!staff) return run;
+  return { ...run, transcripts: (await loadRunTranscripts(db, run.id)).map(summaryOf), ...(!(await transcriptsOn(db)) && { transcriptsOff: true }) };
 });
 
 /** A transcript the requester may read: operators and maintainers, of a run in a repo they see. Throws HttpError. */
