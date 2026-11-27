@@ -112,7 +112,11 @@ export type PoolOptions = {
  * whose repos have no room does not hold back later ones. It reads the room when a job ends or the room may have changed
  * (PoolRoom.changed), so a pool whose calls wait long for a Task Runner reads the room only when the queue or the Task Runners
  * change. A reading does not yet count the calls of jobs still preparing theirs (running, no call queued: PoolUnit), and the
- * jobs started after it: both are taken off it, so a room of N starts N jobs. When none has room and none runs, the first job whose repos have a
+ * jobs started after it: both are taken off it, so a room of N starts N jobs. The jobs counted are taken off the room of every
+ * repo: the Task Runner a call will take is not known, and the runners of one repo may serve others (the runner's startJobs
+ * counts its starts the same way); a fresh reading counts queued calls by their takers again. A PoolRoom whose units may
+ * finish without a model call (`mayNotCall`) starts jobs up to `max` whatever the room: a call one of them makes waits in the
+ * model queue. When none has room and none runs, the first job whose repos have a
  * Task Runner that may take them starts regardless; jobs no Task Runner may take never start, and once only they are left the
  * pool ends without them (a later pass picks them again). With `first`, the first job that has such a Task Runner runs alone first.
  * A job whose model call was withdrawn because no Task Runner could take it (NoTakerError) is skipped the same way; the others go on.
@@ -152,7 +156,7 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
         fresh = false;
         used = [...units].filter((u) => !u.called).length;
       }
-      const i = free > 0 ? await findSeq(pending, async (x) => await width.room(x) - used > 0) : undefined;
+      const i = free <= 0 ? undefined : width.mayNotCall ? pending[0] : await findSeq(pending, async (x) => await width.room(x) - used > 0);
       if (i !== undefined) { used++; launch(i); continue; }
       if (!running.size) {
         const any = await findSeq(pending, takenBy);

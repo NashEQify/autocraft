@@ -218,6 +218,8 @@ export async function takersCut<T>(db: Db, items: readonly T[], limit: number | 
 /** The model queue's room for a pool's units by index (classify/run.ts pool): answers are kept for one round of the pool's scheduling. */
 export type PoolRoom = {
   round(): void; room(i: number): Promise<number>; taker(i: number): Promise<boolean>;
+  /** The units may finish without a model call (poolRoom's `mayNotCall`): the room does not hold them back, only the pool's `max`. */
+  mayNotCall?: boolean;
   /**
    * Resolves once the room may differ from the last reading: a change topic it reads moved, the moment the reading says it rises
    * with time alone came (roomRisesAt), or ROOM_REFRESH_MS passed; never before one pause of at most `pollMs`. Reads only the
@@ -276,6 +278,7 @@ export function poolRoom(db: Db, reposOf: (i: number) => readonly string[] | und
     return `${r === undefined ? "\0" : [...r].sort().join("\n")}\t${await (await passOf()).key(refsOf(i))}`;
   };
   return {
+    ...(opts.mayNotCall && { mayNotCall: true }),
     round: () => { pass = null; rooms.clear(); takers.clear(); },
     room: async (i) => {
       const k = await keyOf(i);

@@ -72,6 +72,7 @@ import { planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import { leaseTurnover } from "../remote/calls.ts";
 import type { Db } from "../db/index.ts";
+import { createHash } from "node:crypto";
 
 /** Fallback only: the planner normally runs on a content change, a finished job or a release. */
 export const PLAN_EVERY_MS = 5 * 60_000;
@@ -333,11 +334,22 @@ const wasIdle = (j: { items: number | null; acted: number | null }): boolean => 
 
 type FpRecord = { job: number | null; fp: string };
 
-/** What the lane's input looked like: the step, its repo, and the counters of the topics it reads. */
-export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>): Promise<string> {
+/**
+ * What the lane's input looked like: the step, its repo, and the counters of the topics it reads. A per-item job's input is its own
+ * PR (`prSig`: prSigOf its facts) in place of the counters, so an idle item job runs again when its PR changed, not when any item did.
+ */
+export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>, prSig?: string): Promise<string> {
+  const repo = typeof params.repo === "string" ? params.repo : "";
+  if (prSig !== undefined && lanePrOf(params) !== null) return [step, repo, `#${lanePrOf(params)}`, prSig, await extraOf(db, lane.extra), await takersOf(db)].join("|");
   if (seqs === undefined) seqs = await db.seqs();
   const topics = lane.topics ?? INPUT_TOPICS;
-  return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await extraOf(db, lane.extra), await takersOf(db)].join("|");
+  return [step, repo, ...topics.map((t) => seqs[t] ?? 0), await extraOf(db, lane.extra), await takersOf(db)].join("|");
+}
+
+/** A digest of a PR's facts, without the clock and the rank score, which move without the PR changing. */
+export function prSigOf(facts: PrFacts): string {
+  const { now: _now, score: _score, ...rest } = facts;
+  return createHash("sha1").update(JSON.stringify(rest)).digest("base64url");
 }
 
 async function fpRecord(db: Db, step: string, repo: string | null, lane: number | null = null): Promise<FpRecord | null> {
@@ -1171,6 +1183,21 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     return paused.get(stepName)!;
   };
   const note = (stepName: string, why: string) => { status[stepName] ??= why; };
+  // The facts digest of each PR of the pass, for the fingerprints of per-item jobs; made on first use.
+  let sigs: Map<string, PrFacts> | null = null;
+  const digests = new Map<string, string>();
+  const prSig = async (params: Params): Promise<string | undefined> => {
+    const n = lanePrOf(params);
+    if (n === null || typeof params.repo !== "string") return undefined;
+    const key = `${params.repo}#${n}`;
+    if (!digests.has(key)) {
+      sigs ??= new Map((await plansOf(db, ctx)).prs.map((p) => [`${p.facts.repo}#${p.facts.number}`, p.facts]));
+      const f = sigs.get(key);
+      if (!f) return undefined;
+      digests.set(key, prSigOf(f));
+    }
+    return digests.get(key);
+  };
 
   /**
    * The job's `limit` (undefined when the step has none), or null when it cannot start now. With `lane`, the
@@ -1188,7 +1215,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (waits !== null) { note(stepName, waits); return null; }
     if (lane) {
       const repo = typeof params.repo === "string" ? params.repo : null;
-      const fp = await fingerprintOf(db, lane, stepName, params, seqs);
+      const fp = await fingerprintOf(db, lane, stepName, params, seqs, await prSig(params));
       const pr = lanePrOf(params);
       const b = await failureBackoff(db, stepName, ms, { repo, fp, lane: pr });
       if (b) {
@@ -1251,7 +1278,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
         // A lane PR's own job works one PR: it keeps no more of the daily limit than that.
         const limit = g.limit === undefined ? undefined : lanePrOf(c.params) !== null ? Math.min(g.limit, 1) : g.limit;
         const params: Params = { ...c.params, ...(limit === undefined ? {} : { limit }) };
-        proposals.push({ lane: lane.name, step: c.step, params, fp: await fingerprintOf(db, lane, c.step, c.params, seqs), ...(c.gate ? { gate: (({ refs: _, ...g }) => g)(c.gate) } : {}) });
+        proposals.push({ lane: lane.name, step: c.step, params, fp: await fingerprintOf(db, lane, c.step, c.params, seqs, await prSig(c.params)), ...(c.gate ? { gate: (({ refs: _, ...g }) => g)(c.gate) } : {}) });
         if (item) items++;
         else if (!approvedLane(lanePr) && ++taken >= perLane) break;
       }
