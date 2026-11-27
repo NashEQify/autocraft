@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { breakerTripped, classifyPush, requiredResult } from "../src/core/push-outcome.ts";
 import { join } from "node:path";
 import { tmpdir } from "./world-db.ts";
-import { addPushOutcomes, pushesUnsettled, resolvePushes, UNSETTLED_PUSHES_MAX } from "../src/data/control/index.ts";
+import { addPushOutcomes, loadPushFacts, loadTrips, pushesUnsettled, resolvePushes, UNSETTLED_PUSHES_MAX } from "../src/data/control/index.ts";
 import { connectDb } from "./helpers/raw-db.ts";
 
 test("push outcome: green to red is broke, red to green is fixed, optional checks are ignored", () => {
@@ -61,4 +61,34 @@ test("the unsettled-push gate counts only recent pushes whose PR is open at the 
   await push(6, "h6", "2026-11-07T11:40:00Z");
   assert.equal(await unsettled(now), true);
   assert.equal(await unsettled(new Date("2026-11-07T14:00:00Z")), false, "pushes older than 2 hours no longer count");
+});
+
+test("a push whose green before predates a move of the default branch is stale and trips nothing; a fresh green that turns red still counts", async () => {
+  const db = await connectDb(join(tmpdir("push-stale"), "t.db"));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "o/r", added_by: "op", added_at: "2026-11-01T00:00:00Z" }));
+  const main = "2026-11-10T00:00:00Z";
+  await db.run(db.k.insertInto("main_ci").values({ repo: "o/r", head_sha: "m2", branch: "main", state: "green", failing: "[]", checks: "[]", committed_at: main, first_seen_at: main, state_changed_at: main, updated_at: main }));
+  const green = JSON.stringify([{ name: "gate", state: "success" }]), red = JSON.stringify([{ name: "gate", state: "failure" }]);
+  const pr = async (n: number, committedAt: string) => {
+    await db.run(db.k.insertInto("pr_checks").values({ repo: "o/r", number: n, head_oid: `a${n}`, overall: "success", checks: green, fetched_at: "2026-11-12T00:00:00Z" }));
+    await db.run(db.k.insertInto("pr_commits").values({ repo: "o/r", number: n, oid: `a${n}`, committed_at: committedAt, first_seen_at: committedAt }));
+  };
+  const push = async (ns: number[]) => {
+    await addPushOutcomes(db, ns.map((n) => ({ action: "fixup-push", repo: "o/r", number: n, from: `a${n}`, to: `b${n}` })));
+    await resolvePushes(db, ns.map((n) => ({ repo: "o/r", number: n, head_oid: `b${n}`, checks: red })), "2026-11-12T01:00:00Z");
+  };
+  // Green on runs older than the default branch head: the red after the push may come from the base.
+  await pr(2, "2026-11-05T00:00:00Z"); await pr(3, "2026-11-06T00:00:00Z");
+  await push([2, 3]);
+  const outcomes = async () => (await db.all(db.k.selectFrom("push_outcomes").select(["number", "outcome"]).orderBy("number"))).map((r) => `${r.number}:${r.outcome}`);
+  assert.deepEqual(await outcomes(), ["2:stale", "3:stale"]);
+  assert.equal((await loadTrips(db)).has("fixup:o/r"), false);
+  assert.equal((await loadPushFacts(db, [{ repo: "o/r", number: 2 }])).get("o/r#2")?.brokeHead, "b2", "the CI fix still repairs that head");
+  // Fresh greens: a head we pushed after the base moved (dated by our push, its commit is older), and one committed after it.
+  await pr(4, "2026-11-01T00:00:00Z");
+  await db.run(db.k.insertInto("own_pushes").values({ repo: "o/r", number: 4, from_oid: "a0", to_oid: "a4", action: "fixup-push", at: "2026-11-11T00:00:00Z", landed_at: "2026-11-11T00:00:00Z" }));
+  await pr(5, "2026-11-11T00:00:00Z");
+  await push([4, 5]);
+  assert.deepEqual((await outcomes()).slice(2), ["4:broke", "5:broke"]);
+  assert.ok((await loadTrips(db)).has("fixup:o/r"), "two broken pushes trip the repo's breaker; the stale ones take no place in its window");
 });

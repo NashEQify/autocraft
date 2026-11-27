@@ -2,7 +2,13 @@
 
 /** The result of the required checks at one commit. Optional checks and skipped ones do not count. */
 export type Required = "green" | "red" | "pending" | "none";
-export type Outcome = "kept-green" | "fixed" | "broke" | "still-red" | "unknown";
+/**
+ * The result before a push. `stale`: green, but the base branch moved after the run it came from, so the run the push starts merges
+ * with a newer base and a failure there may come from the base's change (base drift).
+ */
+export type Before = Required | "unknown" | "stale";
+/** `stale`: the push had a stale green before it; it counts for the breaker neither as broken nor as a clean push. */
+export type Outcome = "kept-green" | "fixed" | "broke" | "still-red" | "unknown" | "stale";
 
 /** The stages that push or merge, as the circuit breaker names them. */
 export const TRIP_STAGES = ["fixup", "cifix", "implement", "merge"] as const;
@@ -19,17 +25,28 @@ export function requiredResult(checks: { name: string; state: string }[], option
   return req.some((c) => c.state === "success") ? "green" : "none";
 }
 
+/**
+ * A green result before a push counts only when its run is newer than the base branch head the push's run merges with. `ranAt`:
+ * the earliest the run can have started (when its head was pushed or committed); `baseAt`: when the base head at the push landed.
+ * Either time unknown: the green is not shown to be fresh.
+ */
+export function freshBefore(res: Required | "unknown", ranAt: string | null, baseAt: string | null): Before {
+  if (res !== "green") return res;
+  return ranAt !== null && baseAt !== null && baseAt <= ranAt ? "green" : "stale";
+}
+
 /** The outcome once the checks after the push are final, or null while they are not (including before any required check exists; the 3-day expiry then gives `unknown`). A side without a known result gives `unknown`. */
-export function classifyPush(before: Required | "unknown", after: Required | "unknown"): Outcome | null {
+export function classifyPush(before: Before, after: Required | "unknown"): Outcome | null {
   if (after === "pending" || after === "none") return null;
+  if (before === "stale") return "stale";
   if (after === "red") return before === "green" ? "broke" : before === "red" ? "still-red" : "unknown";
   if (after === "green") return before === "red" ? "fixed" : before === "green" ? "kept-green" : "unknown";
   return "unknown";
 }
 
-/** True when `broke` is at least BREAKER_BROKE of the newest BREAKER_WINDOW outcomes (newest first; null: not known yet). */
+/** True when `broke` is at least BREAKER_BROKE of the newest BREAKER_WINDOW outcomes (newest first; null: not known yet). `stale` outcomes take no place in the window. */
 export function breakerTripped(newestFirst: (Outcome | null)[]): boolean {
-  return newestFirst.slice(0, BREAKER_WINDOW).filter((o) => o === "broke").length >= BREAKER_BROKE;
+  return newestFirst.filter((o) => o !== "stale").slice(0, BREAKER_WINDOW).filter((o) => o === "broke").length >= BREAKER_BROKE;
 }
 
 /** The breaker stage of an audit push action. */
