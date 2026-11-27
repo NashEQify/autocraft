@@ -53,7 +53,7 @@ import { loadOwnLogins } from "../data/access/index.ts";
 import { loadLivenessState, loadStoredPlans } from "../data/planner/index.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
 import { checkRequest, DEADLINE_ERROR, JobError, now } from "./jobs.ts";
-import { NO_TAKER_SKIP } from "./leases.ts";
+import { NO_TAKER_SKIP, UNITS_RAN } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, wantOf, type Active, type UntakenTest } from "./concurrency.ts";
 import { APPROVED_LANE, approvedLane, hasApprovedLane, ITEM_LANE, loadSteps, perItemLane, type Params, type StepDef } from "./steps.ts";
 import { repoInScope, type RepoScope, type ScopeFor } from "../core/scope.ts";
@@ -1342,7 +1342,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
 function onlyUntaken(j: { items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null }): boolean {
   if (j.acted || !j.lease_skips || (j.items ?? 0) > j.lease_skips || !j.lease_skip_keys) return false;
   try {
-    const keys = JSON.parse(j.lease_skip_keys) as string[];
+    const keys = (JSON.parse(j.lease_skip_keys) as string[]).filter((k) => !k.startsWith(UNITS_RAN));
     return keys.length > 0 && keys.every((k) => k.startsWith(NO_TAKER_SKIP));
   } catch { return false; }
 }
@@ -1350,7 +1350,7 @@ function onlyUntaken(j: { items: number | null; acted: number | null; lease_skip
 /** The lease keys among a job's skip keys: null for a job from before the keys were recorded. */
 function leaseSkipKeys(keys: string | null): string[] | null {
   if (!keys) return null;
-  try { return (JSON.parse(keys) as string[]).filter((k) => !k.startsWith(NO_TAKER_SKIP)); } catch { return null; }
+  try { return (JSON.parse(keys) as string[]).filter((k) => !k.startsWith(NO_TAKER_SKIP) && !k.startsWith(UNITS_RAN)); } catch { return null; }
 }
 
 /** True when a running job holds a lease on one of the keys a job skipped (a job from before the keys were recorded: on any lease). */
@@ -1381,8 +1381,8 @@ function takerPartOf(fp: string, topics: readonly string[]): string | null {
  * still describes. An operator release since then ends it. `lane`: the lane PR (lanePrOf) of a per-item job; `topics`: the lane's.
  * A job proposed for its items (`byRefs`) whose calls were only withdrawn for want of a taker is not idle: the gate on its items' takers already
  * holds it back while nobody can take them, and the same Task Runner coming back leaves the taker signature as it was.
- * A job without items that handled nothing and only left work no Task Runner takes waits for the takers, not for the rest of its
- * input: it runs again once the taker signature, the work people started or approved (STARTED_TOPICS) or the lane's extra reading
+ * A job without items that handled nothing, ran no pool unit to an end (UNITS_RAN) and only left work no Task Runner takes waits for
+ * the takers, not for the rest of its input: it runs again once the taker signature, the work people started or approved (STARTED_TOPICS) or the lane's extra reading
  * changes. On a busy repo the other counters move on every pass, while the work it left stays untaken.
  */
 async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp: string, o: { lane?: number | null; byRefs?: boolean; topics?: readonly string[] } = {}): Promise<string | null> {
@@ -1396,11 +1396,16 @@ async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp:
   if (last.lease_skips && leaseKeys?.length !== 0 && !await skippedLeaseHeld(db, leaseKeys)) return null;
   const rec = await fpRecord(db, step, repo, lane);
   if (!rec || rec.job !== last.id) return null;
-  const parked = onlyLeft && wasIdle(last) && lane === null;
+  const parked = onlyLeft && wasIdle(last) && lane === null && !unitsRan(last.lease_skip_keys);
   const topics = o.topics ?? INPUT_TOPICS;
   if (parked ? (takerPartOf(fp, topics) ?? fp) !== (takerPartOf(rec.fp, topics) ?? rec.fp) : rec.fp !== fp) return null;
   if ((await releasedAt(db, step) ?? "") > last.endedAt) return null;
-  return parked ? "no Task Runner takes the work it left; it runs again when the Task Runners change" : "nothing to do: its input has not changed since the last run";
+  return parked ? "no Task Runner takes the work it left; it runs again when a Task Runner can take it" : "nothing to do: its input has not changed since the last run";
+}
+
+/** True when a job's pool units ran to an end other than a skip for want of a taker (UNITS_RAN): one may wait on work that is still going. */
+function unitsRan(keys: string | null): boolean {
+  try { return (JSON.parse(keys ?? "[]") as string[]).some((k) => k.startsWith(UNITS_RAN)); } catch { return true; }
 }
 
 const warned = new Set<string>();

@@ -117,7 +117,7 @@ test("a started item whose next model step no Task Runner can take says so, nami
 test("a pool job whose only unit no Task Runner takes waits for the takers, not for its other input", async () => {
   const { poolRoom } = await import("../src/agents/call.ts");
   const { pool } = await import("../src/classify/run.ts");
-  const { leaseSkipKeys, NO_TAKER_SKIP } = await import("../src/runner/leases.ts");
+  const { leaseSkipKeys, NO_TAKER_SKIP, UNITS_RAN } = await import("../src/runner/leases.ts");
   const { INPUT_TOPICS } = await import("../src/runner/autopilot.ts");
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "planner-taker-pool-")), "t.db"));
   await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1").run();
@@ -130,22 +130,35 @@ test("a pool job whose only unit no Task Runner takes waits for the takers, not 
 
   const lane = [{ name: "verify", steps: ["verify"], perRepo: true, detect: async () => [{ step: "verify", params: { repo: "photocraft" } }] }];
   const plan = async () => await detectAutopilot(db, { lanes: lane });
-  const first = await plan();
-  const [id] = await applyProposals(db, first.proposals, { lanes: lane });
-  assert.ok(id, "the repo's job is queued");
+  const end = async (id: number, keys: string[]) =>
+    await db.prepare("UPDATE jobs SET state = 'done', started_at = ?, ended_at = ?, lease_skips = 1, lease_skip_keys = ? WHERE id = ?").run(T, new Date().toISOString(), JSON.stringify(keys), id);
+  let seq = 0;
+  const unrelated = async () => {
+    const before = await db.seqs();
+    await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES (?, 0)").run(`other${++seq}`);
+    const after = await db.seqs();
+    assert.ok(INPUT_TOPICS.some((t) => after[t] !== before[t]), "an input of the lane moved");
+  };
+  const queue = async () => {
+    const [id] = await applyProposals(db, (await plan()).proposals, { lanes: lane });
+    assert.ok(id, "the repo's job is queued");
+    return id!;
+  };
+
+  // A job in which another unit ran (its builds may still be running) waits for its input as usual, not for the takers.
+  await end(await queue(), [`${NO_TAKER_SKIP}photocraft#2`, `${UNITS_RAN}1`]);
+  await unrelated();
+  const id = await queue();
 
   let ran = false;
   await pool([async () => { ran = true; }], poolRoom(db, () => ["photocraft"], () => [{ repo: "photocraft", number: 2 }]), { log: () => {} });
-  const keys = leaseSkipKeys().filter((k) => k === `${NO_TAKER_SKIP}photocraft#2`);
+  const keys = leaseSkipKeys().filter((k) => k.startsWith(NO_TAKER_SKIP) || k.startsWith(UNITS_RAN));
+  assert.deepEqual(keys, [`${NO_TAKER_SKIP}photocraft#2`], "the unit left unstarted is recorded as a skip for want of a taker, and no unit ran");
   assert.equal(ran, false);
-  assert.equal(keys.length, 1, "the unit left unstarted is recorded as a skip for want of a taker");
-  await db.prepare("UPDATE jobs SET state = 'done', started_at = ?, ended_at = ?, lease_skips = 1, lease_skip_keys = ? WHERE id = ?").run(T, new Date().toISOString(), JSON.stringify(keys), id);
+  await end(id, keys);
 
   assert.equal((await plan()).proposals.length, 0, "the idle job is not queued again");
-  const before = await db.seqs();
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('other', 0)").run();
-  const after = await db.seqs();
-  assert.ok(INPUT_TOPICS.some((t) => after[t] !== before[t]), "an input of the lane moved");
+  await unrelated();
   assert.equal((await plan()).proposals.length, 0, "input that does not change the takers leaves it parked");
 
   await setUserRepos(db, "olga", ["deckcraft", "photocraft"]);
