@@ -32,6 +32,10 @@ export const MAX_CALLS_KEY = "max_calls";
 export const MAX_CALLS_MAX = 64;
 /** Runner statuses count as fresh for this long. */
 export const STATUS_FRESH_MS = scaled((300 + 60) * 1000);
+/** How long an empty claim counts as an idle helper: two claim intervals and some slack. */
+export const IDLE_FRESH_MS = scaled(45_000);
+/** A lease whose last heartbeat is at most this old shows its helper is running: three heartbeats (src/remote/protocol.ts HEARTBEAT_S, 30 s). */
+export const LIVE_LEASE_MS = 3 * scaled(30 * 1000);
 export const DROP_WINDOW_MS = scaled(2 * 3600_000);
 export const FAILURE_WINDOW_MS = scaled(30 * 60_000);
 

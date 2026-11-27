@@ -524,22 +524,29 @@ export async function loadStartedRefs(db: Db, f: StartedFilter = {}): Promise<Se
 
 /**
  * The Task Runner snapshot's input: live workflows, the PRs live implement workflows work on, and the merged PRs of workflows that ended
- * done through that merge within MERGED_WORK_MS of `now` (endedByMerge); three result sets in one wave.
+ * done through that merge within MERGED_WORK_MS of `now` (endedByMerge); the live rows carry the Task Runners taken onto their
+ * workflow (item-runners.ts). Four result sets in one wave.
  */
 export async function loadStartedWork(db: Db, now: number = Date.now()): Promise<StartedWork> {
   const q = queryDb(db);
   const k = q.k as any;
   const since = new Date(now - MERGED_WORK_MS).toISOString();
-  const [live, prs, merged] = await db.together(() => Promise.all([
-    q.all(k.selectFrom("main.item_workflows as w").select(["w.repo", "w.number", "w.entry", "w.state", "w.started_by", "w.approved_by"]).where("w.state", "in", LIVE_STATES).orderBy("w.id")),
-    q.all(k.selectFrom(linkRows(db, LIVE_STATES).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select(["l.repo as repo", "l.pr as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).orderBy("w.id")),
+  const [live, prs, merged, taken] = await db.together(() => Promise.all([
+    q.all(k.selectFrom("main.item_workflows as w").select(["w.id", "w.repo", "w.number", "w.entry", "w.state", "w.started_by", "w.approved_by"]).where("w.state", "in", LIVE_STATES).orderBy("w.id")),
+    q.all(k.selectFrom(linkRows(db, LIVE_STATES).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select(["w.id as id", "l.repo as repo", "l.pr as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).orderBy("w.id")),
     q.all(MERGE_WAYS.map((via) => k.selectFrom("main.item_workflows as w").innerJoin("main.items as m", (j: any) => j.onRef("m.repo", "=", "w.repo").onRef("m.number", "=", via === "pr" ? "w.number" : "w.pr_number"))
       .select(["m.repo as repo", "m.number as pr", "w.started_by as started_by", "w.approved_by as approved_by", "w.id as id"]).where("w.state", "=", "done").where("w.updated_at", ">=", since)
       .where((eb: any) => endedByMerge(eb, "w", "m.repo", "m.number", since, via))).reduce((a: any, b: any) => a.unionAll(b)).orderBy("id")),
-  ])) as [{ repo: string; number: number; entry: Entry; state: WorkflowState; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[]];
+    q.all(k.selectFrom("main.item_runners as g").innerJoin("main.item_workflows as w", "w.id", "g.workflow_id").select(["g.workflow_id", "g.login"])
+      .where("g.released_at", "is", null).where("w.state", "in", LIVE_STATES).orderBy("g.id")),
+  ])) as [{ id: number; repo: string; number: number; entry: Entry; state: WorkflowState; started_by: string; approved_by: string | null }[], { id: number; repo: string; pr: number; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[], { workflow_id: number; login: string }[]];
+  // The Task Runners taken onto each workflow (item-runners.ts), which its rows carry.
+  const takers = new Map<number, string[]>();
+  for (const g of taken) (takers.get(Number(g.workflow_id)) ?? takers.set(Number(g.workflow_id), []).get(Number(g.workflow_id))!).push(g.login);
+  const takenBy = (id: number): { takenBy?: string[] } => (takers.has(Number(id)) ? { takenBy: takers.get(Number(id))! } : {});
   return {
-    live: live.map((r) => ({ repo: r.repo, number: Number(r.number), entry: r.entry, state: r.state, startedBy: r.started_by, approvedBy: r.approved_by })),
-    prs: prs.map((r) => ({ repo: r.repo, pr: Number(r.pr), startedBy: r.started_by, approvedBy: r.approved_by })),
+    live: live.map((r) => ({ repo: r.repo, number: Number(r.number), entry: r.entry, state: r.state, startedBy: r.started_by, approvedBy: r.approved_by, ...takenBy(r.id) })),
+    prs: prs.map((r) => ({ repo: r.repo, pr: Number(r.pr), startedBy: r.started_by, approvedBy: r.approved_by, ...takenBy(r.id) })),
     merged: merged.map((r) => ({ repo: r.repo, pr: Number(r.pr), startedBy: r.started_by, approvedBy: r.approved_by })),
   };
 }

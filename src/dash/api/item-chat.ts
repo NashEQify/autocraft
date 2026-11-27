@@ -1,9 +1,10 @@
 // GET /api/items/:repo/:n/chat: an item's conversations with AutoCraft. What people said (from any surface) and AutoCraft's replies
 // come from the chat messages, the workflow events they produced and the Opus turns; the work AutoCraft did, the GitHub activity and the
 // Discord mentions come from the item trace (trace.ts), GitHub and Discord folded into one line per run between two other entries.
-// Queued jobs and model calls about the item come with the one line that says what holds each back (src/runner/why-queued.ts).
+// Queued jobs and model calls about the item come with the one line that says what holds each back (src/runner/why-queued.ts), and
+// the reader's Task Runner with the take or release it may send (src/core/item-runner.ts).
 // A fixed number of set-based reads per request: the stamp's wave, then the trace, the thread and the merge leg's wait.
-import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatQueued, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
+import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatQueued, ChatRunner, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import { loadArtifacts } from "../../data/build/index.ts";
 import { ensureMainConversation, linkMessage, loadConversationsOfItem, loadMessages, setMessageRefusal, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
@@ -12,14 +13,18 @@ import { loadItems } from "../../data/mirror/index.ts";
 import { loadScreenshotRuns } from "../../data/merge/index.ts";
 import type { CardRow, ThreadTurn } from "../../data/conversations/types.ts";
 import { loadItemTraceStamp, type ItemTraceRows } from "../../data/views/trace.ts";
-import { loadLegs, loadWorkflowHistory } from "../../data/workflow/index.ts";
+import { loadItemRunners, loadLegs, loadWorkflowHistory } from "../../data/workflow/index.ts";
+import { loadRunnerTokensOf } from "../../data/access/index.ts";
+import { takeRefusal } from "../../core/item-runner.ts";
+import { runnerOffers, loadView } from "../../remote/view.ts";
+import { isLive } from "../../workflow/resolve.ts";
 import type { StoredEvent } from "../../data/workflow/types.ts";
 import { t } from "../../i18n/index.ts";
 import { askedLogins } from "../../workflow/asked.ts";
 import { yesClause, yesNext } from "../../workflow/status.ts";
 import { ENTRY_LABEL } from "../../workflow/vocab.ts";
 import { legWait } from "../../workflow/waits.ts";
-import { queuedOfItems } from "../../runner/why-queued.ts";
+import { queuedOfItems, type QueuedWork } from "../../runner/why-queued.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow, type PlanPart, type Recommendation } from "../../workflow/types.ts";
 import type { Req } from "../types.ts";
 import { parse } from "../../workflow/parse.ts";
@@ -42,7 +47,7 @@ const WAITING = new Set(["pending", "answering"]);
 const MAIN = "main";
 
 /** What the stamp and the answer both need, read once. */
-type Base = { c: Ctx; convs: ConversationRow[]; messages: Map<number, ChatMessageRow[]>; history: ItemWorkflow[]; leg: { workflowId: number | null; state: string } | null; canReply: boolean; reader: string; queued: ChatQueued[]; stamp: string };
+type Base = { c: Ctx; convs: ConversationRow[]; messages: Map<number, ChatMessageRow[]>; history: ItemWorkflow[]; leg: { workflowId: number | null; state: string } | null; canReply: boolean; reader: string; queued: ChatQueued[]; runner: ChatRunner | null; stamp: string };
 
 async function base(db: Db, req: Req): Promise<Base> {
   const ref = await visibleItem(db, req);
@@ -64,8 +69,28 @@ async function base(db: Db, req: Req): Promise<Base> {
   const said = [...messages.values()].flat().map((m) => [m.id, m.at, m.workflowEventId, m.turnId, m.payload]);
   // A quiet pull request shows a viewer no queued work, as it shows no work titles.
   const queued = c.veiled ? [] : work.map((w): ChatQueued => ({ id: `${w.kind}:${w.id}`, title: w.title, since: w.since, why: w.why }));
-  const stamp = fingerprint(c, JSON.stringify(["chat", c.veiled, canReply, discordKeys() !== null]), [...sources, convs.map((x) => [x.id, x.title]), said, history, leg, queued]);
-  return { c, convs, messages, history, leg, canReply, reader: req.user.login, queued, stamp };
+  const runner = await runnerOf(db, req.user.login, shownWorkflow(history), { staff: c.staff, may: canReply, queued: c.veiled ? [] : work });
+  const stamp = fingerprint(c, JSON.stringify(["chat", c.veiled, canReply, discordKeys() !== null]), [...sources, convs.map((x) => [x.id, x.title]), said, history, leg, queued, runner]);
+  return { c, convs, messages, history, leg, canReply, reader: req.user.login, queued, runner, stamp };
+}
+
+/**
+ * The reader's Task Runner on the item's live work (src/core/item-runner.ts): Release while it runs the work, Take while work about the
+ * item is queued that one of the reader's Task Runners could run; and whose Task Runners were taken onto it, for staff. Null when
+ * there is nothing to show.
+ */
+async function runnerOf(db: Db, login: string, wf: ItemWorkflow | null, o: { staff: boolean; may: boolean; queued: readonly QueuedWork[] }): Promise<ChatRunner | null> {
+  if (!wf || !isLive(wf) || (!o.staff && !o.may)) return null;
+  const [grants, tokens, view] = await db.together(() => Promise.all([
+    loadItemRunners(db, [wf.id]), o.may ? loadRunnerTokensOf(db, login) : [], o.may && o.queued.length ? loadView(db, Date.now()) : null,
+  ]));
+  const takers = (grants.get(wf.id) ?? []).map((g) => g.login);
+  const facts = { runners: tokens.length, takers };
+  const tiers = o.queued.flatMap((q) => (q.tier ? [q.tier] : []));
+  const action = !o.may ? null : !takeRefusal(wf, login, "release", facts) ? "release"
+    : view && !takeRefusal(wf, login, "take", facts) && runnerOffers(view, login, tiers) ? "take" : null;
+  const on = o.staff ? takers : [];
+  return action || on.length ? { action, on } : null;
 }
 
 export async function itemChat(db: Db, req: Req): Promise<ItemChat | ItemChatUnchanged> {
@@ -113,6 +138,7 @@ async function chatFrom(db: Db, b: Base): Promise<ItemChat> {
       canReply: b.canReply,
       working: running?.t === "work" ? running.title : null,
       queued: main ? b.queued : [],
+      runner: main ? b.runner : null,
     };
   });
   return { repo: c.repo, number: c.n, stamp: b.stamp, ...head, conversations };

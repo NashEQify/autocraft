@@ -402,6 +402,7 @@ function refusalText(r: Refusal, clock: Clock): string {
     case "issue-merge-queue": return t("An issue can't go in the merge queue. Use implement and merge.");
     case "issue-review-merge": return t("An issue's review merges nothing. Approve the merge with implement: implement and merge.");
     case "autorepin-not-pr": return t("autorepin is for pull requests.");
+    case "no-live-work": return r.word === "take" ? t("Nothing to take: no work runs on this item.") : t("Nothing to release: no work runs on this item.");
     case "already-held": return t("Already held by {login}, {time}. Reply resume to go on.", { login: r.by, time: clock(r.at) });
     case "not-held": return t("This item is not held.");
     case "already-started": return t("Already started: {entry}, by {login}, {time}.", { entry: t(ENTRY_LABEL[r.entry]), login: r.by, time: clock(r.at) });

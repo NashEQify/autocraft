@@ -2439,6 +2439,20 @@ CREATE INDEX IF NOT EXISTS workflow_events_login ON workflow_events(login, via, 
 -- The readers of what happened last leave the archived rows out: they are written later than what they record.
 CREATE INDEX IF NOT EXISTS workflow_events_live ON workflow_events(repo, number, id) WHERE kind <> 'archived';
 CREATE INDEX IF NOT EXISTS workflow_events_live_at ON workflow_events(at) WHERE kind <> 'archived';
+-- A person's Task Runner taken onto one item's live workflow (take / release): it may claim that workflow's calls while no runner of
+-- the starter or approver is ready with room (src/remote/started.ts, src/data/runners/cross.ts startedWorkAllows). The grant ends
+-- with the workflow (a new start has another id) or with released_at.
+CREATE TABLE IF NOT EXISTS item_runners (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  workflow_id INTEGER NOT NULL,
+  login TEXT NOT NULL,
+  at TEXT NOT NULL,
+  released_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS item_runners_live ON item_runners(workflow_id, login) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS item_runners_item ON item_runners(repo, number, id);
 CREATE INDEX IF NOT EXISTS workflow_events_workflow ON workflow_events(workflow_id) WHERE workflow_id IS NOT NULL;
 -- An archived row (src/db/switch-over.ts) names the answer, open question or action it records in parsed: {"kind": "archived", "legacy": "decision:<id>"}.
 CREATE UNIQUE INDEX IF NOT EXISTS workflow_events_archived ON workflow_events(repo, number, parsed) WHERE kind = 'archived';

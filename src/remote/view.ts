@@ -37,6 +37,13 @@ export const tiersOf = (models: RunnerRow["models"], accepted: Record<Tier, stri
 export const freshReady = (s: RunnerSnapshot, r: RunnerRow, now: number): boolean =>
   r.readiness === "ready" && r.reportedAt !== null && r.reportedAt >= now - STATUS_FRESH_MS && !s.cooled.has(r.login.toLowerCase());
 
+/**
+ * Whether a Task Runner credential of `login`, connected or not, offers one of `tiers` as it last reported (any tier before its first
+ * report); with no tiers, whether the login has a Task Runner credential at all.
+ */
+export const runnerOffers = (v: RemoteView, login: string, tiers: readonly Tier[]): boolean =>
+  v.snapshot.runners.some((r) => r.login.toLowerCase() === login.toLowerCase() && (!tiers.length || r.reportedAt === null || tiers.some((t) => tiersOf(r.models, v.accepted).has(t))));
+
 /** A runner as the taker rule reads it: its user's repos (My repos narrowed by its own last list), skipped tasks, item filter and offered tiers. */
 export type Runner = { tokenId: number; login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter; tiers: ReadonlySet<Tier>; row: RunnerRow };
 

@@ -37,7 +37,7 @@ import { resumePrompt } from "../build/workspace-call.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import { tierTaker } from "./takers.ts";
-import { heldForOwner, startedOf, type StartedCalls } from "./started.ts";
+import { heldForOwner, startedOf, tierTokens, type StartedCalls } from "./started.ts";
 import { orderedOf, type Cand } from "./cands.ts";
 import { pickCounts } from "./picks-rules.ts";
 import { fastLaneFits, judges, roleFits, runnerTakes, sameLogin } from "./rules.ts";
@@ -275,7 +275,7 @@ export const leasedBy = async (db: Db, login: string): Promise<number> => leased
 export const leaseTurnover = async (db: Db, login: string): Promise<string> => (await runners.loadLeaseTurnover(db, [login])).get(login.toLowerCase()) ?? "0:";
 
 /** Whether the queued call is for work the caller started or approved (started.ts): never a call bound to a user. */
-const startedBy = (s: StartedCalls, r: Cand, login: string): boolean => r.forLogin === null && s.owners(r.refs, r.step).has(login.toLowerCase());
+const startedBy = (s: StartedCalls, r: Cand, login: string): boolean => r.forLogin === null && s.owners(r.refs, r.step, r.tier).has(login.toLowerCase());
 
 /** What the claim order reads of the caller: Manual only, skipped tasks, item filter; whose calls are whose; whose picks count. */
 type OrderReads = { manual: boolean; skip: ReadonlySet<string>; items: ItemFilter; started: StartedCalls; pickers: ReadonlySet<string> };
@@ -549,7 +549,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
         if (cut && room < LOGIN_CUT_MIN_MS) { tooLong++; continue; }
         const got = await leaseOne(db, caller, claim, r, cut ? Math.floor(room / 1000) * 1000 : null, {
           perLogin: lane || max === null || own ? null : r.parent_id !== null ? max + 1 : max, interactive: lane ? slots : null,
-        }, started, !fast && !own && !lane && f.idle, live);
+        }, started ? tierTokens(w.view, r.tier) : null, !fast && !own && !lane && f.idle, live);
         // The client left, or shutdown answered the claim: nothing is leased to nobody.
         if (got === "gone") return null;
         if (got === "old") { oldHelper++; continue; }
@@ -591,9 +591,10 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
 /**
  * Leases call `r` to the caller (runners.leaseCall: one transaction under the login's lease lock, every condition in its
  * compare-and-set). The run's stored prompt is built before: scrubbing and compressing a large prompt takes milliseconds. A
- * call whose bundle lists the workspace server goes only to the claude harness, with the resume note of its workspace.
+ * call whose bundle lists the workspace server goes only to the claude harness, with the resume note of its workspace. `tiered`: for
+ * work the caller started, approved or took, the credentials that serve its tier (started.ts tierTokens); null for other work.
  */
-async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs: number | null, caps: { perLogin: number | null; interactive: number | null }, started: boolean, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | "old" | null> {
+async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs: number | null, caps: { perLogin: number | null; interactive: number | null }, tiered: readonly number[] | null, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | "old" | null> {
   const source = await runners.loadLeaseSource(db, r.id);
   if (!source) return null;
   const bundle = JSON.parse(source.bundle) as Omit<TaskBundle, "callId">;
@@ -610,7 +611,7 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs
   const l = await runners.leaseCall(db, {
     id: r.id, caller: { tokenId: caller.tokenId, login: caller.login, role: caller.role, claimId: claim.requestId },
     claim: { harness: claim.harness, harnessVersion: claim.harnessVersion, root: claim.root ?? null, requestId: claim.requestId, ownLane: claim.ownLane === true },
-    model: claim.tiers[r.tier]!, now: Date.now(), caps, started, clearIdle, timeoutMs, source, prompt, rewrite: rewritten ? { bundle: JSON.stringify(bundle), baseStdin: base } : null, live,
+    model: claim.tiers[r.tier]!, now: Date.now(), caps, started: tiered !== null, ...(tiered && { tierTokens: tiered }), clearIdle, timeoutMs, source, prompt, rewrite: rewritten ? { bundle: JSON.stringify(bundle), baseStdin: base } : null, live,
   });
   if (l === null || l === "limit" || l === "gone") return l;
   return { id: l.id, secret: l.secret, title: titleOf(source.promptId, source.items), requiredHelper: REQUIRED_HELPER };

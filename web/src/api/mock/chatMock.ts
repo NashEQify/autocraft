@@ -6,6 +6,7 @@ import type { AgentRunDetail, TraceEvent, TraceKind, User } from "../types";
 import { NOW } from "./fixtures";
 
 const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
+const hhmm = () => new Date(NOW).toISOString().slice(11, 16);
 const wait = <T,>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 
 type Work = { state?: "done" | "running" | "failed"; title: string; model?: string; seconds?: number; costUsd?: number; outcome?: string; detail?: [string, string][]; kind: TraceKind; run?: number; tokens?: [number, number]; tools?: number; shots?: ChatShot[] };
@@ -20,7 +21,8 @@ type Beat =
 /** Queued work about the item; `viewer`: the line a viewer reads, when it names a person's Task Runner. */
 type Queued = { title: string; min: number; why: string | null; viewer?: string };
 /** `quiet`: a quiet security pull request, which viewers see veiled (who and when only). */
-interface Story { title: string; status: string; state: ItemChatState; next: string | null; working: string | null; quiet?: boolean; queued?: Queued[]; beats: Beat[] }
+/** `startedBy` and `takenBy`: who started the live work, and whose Task Runners were taken onto it (take / release). */
+interface Story { title: string; status: string; state: ItemChatState; next: string | null; working: string | null; quiet?: boolean; queued?: Queued[]; startedBy?: string; takenBy?: string[]; beats: Beat[] }
 
 const SAID_ON: Record<ChatVia, string> = { dashboard: "the dashboard", github: "GitHub", discord: "Discord", agent: "an agent", cli: "the command line" };
 
@@ -111,6 +113,8 @@ const ISSUE_77: Story = {
   state: "running",
   next: "open a PR and review it, then ask ochre-fox before merging",
   working: "Running the full test suite in the workspace",
+  startedBy: "ochre-fox",
+  takenBy: [],
   queued: [
     { title: "Verify", min: 5, why: "Waiting for another job on this item" },
     { title: "Review", min: 3, why: "Waiting for ochre-fox's Task Runner (usage limit until 05:10 UTC)", viewer: "Waiting for a Task Runner" },
@@ -186,7 +190,15 @@ function chatOf(ref: string, s: Story, me: User): ItemConversation {
   const [repo, num] = ref.split("#");
   const veiled = s.quiet && me.role === "viewer";
   const queued = veiled ? [] : (s.queued ?? []).map((q, i) => ({ id: `${ref}:q${i}`, title: q.title, since: at(q.min), why: me.role === "viewer" && q.viewer ? q.viewer : q.why }));
-  return { id: `${ref}:main`, title: s.title, item: { repo: repo!, number: Number(num) }, entries: veiled ? entries.map(veil) : entries, open: veiled && open ? { ...open, question: "" } : open, canReply: me.role !== "viewer", working: s.working, queued };
+  return { id: `${ref}:main`, title: s.title, item: { repo: repo!, number: Number(num) }, entries: veiled ? entries.map(veil) : entries, open: veiled && open ? { ...open, question: "" } : open, canReply: me.role !== "viewer", working: s.working, queued, runner: runnerOf(s, me, queued.length > 0) };
+}
+
+/** The reader's Task Runner on the story's live work, as the server's item chat gives it. */
+function runnerOf(s: Story, me: User, queued: boolean): ItemConversation["runner"] {
+  if (!s.startedBy || me.role === "viewer") return null;
+  const taken = s.takenBy ?? [];
+  const action = taken.includes(me.login) ? "release" : queued && me.login !== s.startedBy ? "take" : null;
+  return action || taken.length ? { action, on: taken } : null;
 }
 
 /** Every beat of a story as trace events, for the Events tab. */
@@ -283,6 +295,13 @@ export function createChatMock(me: User, changed: () => void): Pick<Api, "itemCh
           // A refusal no workflow event carries: only the lines answer it.
           changed();
           return wait({ chat: read(repo, number), lines: [`Not merging ${ref}: CI failed on the last commit (clippy). Fix it first?`] }, 400);
+        } else if ((word === "take" || word === "release") && s.startedBy) {
+          const taken = s.takenBy ?? [];
+          s.takenBy = word === "take" ? [...taken.filter((l) => l !== me.login), me.login] : taken.filter((l) => l !== me.login);
+          line = word === "take"
+            ? `Runs on ${me.login}'s Task Runner too (set by ${me.login}, ${hhmm()} UTC) while the Task Runners of the people who started or approved it are busy, away or held. Reply release to stop.`
+            : `No longer runs on ${me.login}'s Task Runner (set by ${me.login}, ${hhmm()} UTC).`;
+          s.beats.push({ b: "reply", min: 0, body: line });
         } else if (/^(hold|stop|pause|wait)$/.test(word)) {
           s.beats.push({ b: "reply", min: 0, body: `On hold (held by ${me.login}). I keep off it until someone replies **resume**.` });
           s.status = `Held by ${me.login}`;

@@ -5,7 +5,7 @@
 import { tk } from "../i18n/index.ts";
 import { WEIGHT_NORMAL, WEIGHT_WORDS, type Control, type Entry, type WeightWord } from "./types.ts";
 
-export type CommandWord = "review" | "fix-up" | "implement" | "merge" | "drop" | "fix" | "backlog" | "close" | "hold" | "resume" | "autorepin";
+export type CommandWord = "review" | "fix-up" | "implement" | "merge" | "drop" | "fix" | "backlog" | "close" | "hold" | "resume" | "take" | "release" | "autorepin";
 
 export type CommandDef = {
   word: CommandWord;
@@ -99,6 +99,22 @@ export const COMMANDS: readonly CommandDef[] = [
     does: tk("Goes on with a held item where it was, with its merge approval, now in your name. yes does the same. If the author pushed commits meanwhile, AutoCraft reviews them first. An item nobody started goes back to how it was."),
     back: tk("As the plan said before the hold."),
     example: "resume",
+  },
+  {
+    word: "take", usage: "take", aliases: ["run on my task runner", "take on my task runner"], entry: null,
+    short: tk("Run the item's work on your own Task Runner too."),
+    does: tk("Your Task Runner takes this item's work while the Task Runners of the person who started or approved it are busy, away or held by their usage limit; theirs come first. Only this item: your other settings stay as they are. Until its work ends or you release it."),
+    back: tk("As the plan said before."),
+    example: "take",
+    more: true,
+  },
+  {
+    word: "release", usage: "release", aliases: ["release my task runner"], entry: null,
+    short: tk("Stop running the item's work on your Task Runner."),
+    does: tk("Ends a take: your Task Runner takes no more of this item's work. A call it runs now finishes."),
+    back: tk("As the plan said before."),
+    example: "release",
+    more: true,
   },
   {
     word: "autorepin", usage: "autorepin <pull request> [via <branch>]", aliases: ["auto-repin", "auto repin"], entry: null,

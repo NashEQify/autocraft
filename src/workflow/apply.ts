@@ -13,11 +13,13 @@ import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadLatestIssueReview, queueIssueReviews } from "../data/issuereview/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { retryPremergeAt } from "../data/review/index.ts";
-import { setCallLevels } from "../data/runners/index.ts";
-import { countEventsSince, dropWorkflows, endFixupRequests, loadFixupRequests, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
+import { dropSnapshotCache, setCallLevels } from "../data/runners/index.ts";
+import { addAudit } from "../data/control/index.ts";
+import { countEventsSince, dropWorkflows, loadItemRunners, releaseItemRunner, takeItemRunner, endFixupRequests, loadFixupRequests, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowEvent, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
 import { chainsOwn } from "../core/evidence.ts";
 import { ACTION_WAITS } from "../core/may.ts";
+import { takeRefusal, type TakeRefusal } from "../core/item-runner.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { redAtHead } from "../core/decide.ts";
@@ -331,6 +333,8 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
     return { ...out("refused", reply([replyLine(r, input.clock, input.mention), now].filter((x) => x !== null).join(" ")), wf?.id ?? null), refusal: r.refusal.why };
   }
 
+  if (r.run.runner) return await runnerCommand(db, r.run.runner, wf!, { login, via, at, ref: refText(on.repo, on.number), clock: input.clock ?? utcClock, connect: connectUrl(), reply, noted, event, out });
+
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}), ...(input.keepBatch ? { keepBatch: true } : {}) };
   try {
     const runners = via === "cli" || login === RULE_STARTER || !needsRunner(r.run) ? null : await runnerNotice(db, on.repo, login, input.clock);
@@ -358,16 +362,62 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
   }
 }
 
-/** A run that gives a Task Runner work: anything but an end, an autorepin, a weight alone and a resume of what nobody started. */
+type RunnerCommandCtx = {
+  login: string; via: Surface; at: string; ref: string; clock: Clock; connect: string;
+  reply: (line: string) => string; noted: (line: string) => string;
+  event: (kind: WorkflowEventKind, workflowId: number | null, line: string) => WorkflowEvent;
+  out: (outcome: ItemOutcome["outcome"], line: string, workflowId?: number | null) => ItemOutcome;
+};
+
+/**
+ * take / release: the sender's own Task Runner onto the live workflow's work, or off it (src/core/item-runner.ts decides, the claim
+ * rule is in src/remote/started.ts and src/data/runners/cross.ts). The grant, its event and its audit entry are one write.
+ */
+async function runnerCommand(db: Db, word: "take" | "release", wf: ItemWorkflow, o: RunnerCommandCtx): Promise<ItemOutcome> {
+  const [tokens, grants] = await db.together(() => Promise.all([access.loadRunnerTokensOf(db, o.login), loadItemRunners(db, [wf.id])]));
+  const no = takeRefusal(wf, o.login, word, { runners: tokens.length, takers: (grants.get(wf.id) ?? []).map((g) => g.login) });
+  const refuse = (why: string) => o.out("refused", o.reply(t("Nothing ran on {ref}: {why}", { ref: o.ref, why })), wf.id);
+  if (no) return refuse(takeRefusalText(no, o.connect));
+  const p = { login: o.login, time: o.clock(o.at) };
+  const line = word === "take"
+    ? t("Runs on {login}'s Task Runner too (set by {login}, {time}) while the Task Runners of the people who started or approved it are busy, away or held. Reply release to stop.", p)
+    : t("No longer runs on {login}'s Task Runner (set by {login}, {time}).", p);
+  const done = await db.write(async () => {
+    const ok = word === "take"
+      ? await takeItemRunner(db, { workflowId: wf.id, repo: wf.repo, number: wf.number, login: o.login, at: o.at })
+      : await releaseItemRunner(db, { workflowId: wf.id, login: o.login, at: o.at });
+    if (!ok) return false;
+    await recordEvents(db, [o.event(word === "take" ? "taken" : "released", wf.id, o.noted(line))]);
+    await addAudit(db, [{ login: o.login, action: word === "take" ? "item-take" : "item-release", target: `${wf.repo}#${wf.number}`, details: { workflowId: wf.id, via: o.via }, at: o.at }]);
+    return true;
+  });
+  // Another command of the sender's took or released it a moment before.
+  if (!done) return refuse(takeRefusalText(word === "take" ? "already-taken" : "not-taken", o.connect));
+  dropSnapshotCache(db);
+  return o.out("run", o.reply(line), wf.id);
+}
+
+function takeRefusalText(r: TakeRefusal, connect: string): string {
+  switch (r) {
+    case "own-work": return t("you started or approved it, so your Task Runner takes its work first already.");
+    case "no-runner": return t("you have no Task Runner. Set one up: {url}", { url: connect });
+    case "already-taken": return t("it already runs on your Task Runner. Reply release to stop.");
+    case "not-taken": return t("it does not run on your Task Runner.");
+  }
+}
+
+/** The Connect page, where a person sets up a Task Runner. */
+const connectUrl = (): string => `${envVar("BASE_URL")?.replace(/\/+$/, "") ?? ""}/connect`;
+
+/** A run that gives a Task Runner work: anything but an end, an autorepin, a take or release, a weight alone and a resume of what nobody started. */
 const needsRunner = (r: Run): boolean =>
-  r.end === null && r.autorepin === null && r.resume !== "unstarted"
+  r.end === null && r.autorepin === null && r.runner === null && r.resume !== "unstarted"
   && (r.start !== null || r.again !== null || r.approve || r.retryMerge || r.answers || r.resume !== null || r.goesOn || r.pick !== null || r.fix.length > 0 || r.implements);
 
 /** The Task Runner line for work `login` started or approved on `repo` (runnerLine); null when there is nothing to say or the runners could not be read. */
 async function runnerNotice(db: Db, repo: string, login: string, clock: Clock = utcClock): Promise<string | null> {
   try {
-    const connect = `${envVar("BASE_URL")?.replace(/\/+$/, "") ?? ""}/connect`;
-    return runnerLine(await loadRunnerRoom(db, repo, login), repo, connect, clock);
+    return runnerLine(await loadRunnerRoom(db, repo, login), repo, connectUrl(), clock);
   } catch {
     return null;
   }

@@ -2743,7 +2743,14 @@ export interface ItemConversation {
   working: string | null;
   /** Work about the item that is queued, oldest first (the main conversation only). */
   queued: ChatQueued[];
+  /** The reader's Task Runner on the item's live work (the main conversation only); null when there is nothing to show. */
+  runner?: ChatRunner | null;
 }
+/**
+ * `action`: the button the reader may press, "take" (run the queued work on their own Task Runner too) or "release"; null for none.
+ * `on`: the logins whose Task Runners were taken onto the work, for operators and maintainers; empty for others.
+ */
+export interface ChatRunner { action: "take" | "release" | null; on: string[] }
 /** A queued job or model call about the item: `why` is the one line that says what holds it back, null when nothing known does. */
 export interface ChatQueued { id: string; title: string; since: string; why: string | null }
 /** Where AutoCraft is with an item, for the item header. */
