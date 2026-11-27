@@ -168,10 +168,11 @@ test("a question on a started issue's status comment pings its asked people once
   const id = await insertWorkflow(db, { repo: "app", number: 7, kind: "issue", entry: "implement", state: "running", startedBy: OPERATOR, startedAt: T0, startedVia: "github" }, T0);
   const ask = async (text: string, at: string) => await updateWorkflow(db, id, { state: "recommending", rec: { text, parts: { fix: [], drop: [] }, merges: false }, recAt: at }, at);
 
-  let next = 5000;
+  let next = 5000, refusePing = false;
   const writes: { args: string[]; body: string }[] = [];
   const exec: Exec = async (_cmd, args, opts) => {
     writes.push({ args, body: opts?.input ?? "" });
+    if (refusePing && args[0] === "issue" && !(opts?.input ?? "").includes("autocraft:pr-status")) return { code: 1, stdout: "", stderr: "HTTP 502" };
     if (args[0] === "api") return { code: 0, stdout: JSON.stringify({ html_url: "x" }), stderr: "" };
     return { code: 0, stdout: `https://github.com/storytold/app/issues/${args[2]}#issuecomment-${next++}\n`, stderr: "" };
   };
@@ -189,8 +190,15 @@ test("a question on a started issue's status comment pings its asked people once
   assert.equal((await run()).made.length, 0, "the same question is not pinged again");
 
   await ask("Keep it in one pull request.", T1);
+  refusePing = true;
+  const refused = await run();
+  assert.deepEqual([refused.r.edited, refused.r.failed, refused.r.pingFailed], [["app#7"], [], ["app#7"]], "a failed ping does not fail the comment's edit");
+  const row = async () => (await db.get(db.k.selectFrom("main.pr_status_comments").select(["pinged", "retry_at"]).where("number", "=", 7)))!;
+  assert.equal((await row()).retry_at, null, "nor holds up its next edit");
+  assert.ok(!(await row()).pinged!.endsWith(T1), "the question is not counted as pinged");
+  refusePing = false;
   const second = await run();
-  assert.deepEqual([second.r.edited, second.r.pinged], [["app#7"], ["app#7"]], "a new question edits the comment and pings once more");
+  assert.deepEqual([second.r.edited, second.r.pinged], [[], ["app#7"]], "the ping is tried again, without an edit");
 
   await updateWorkflow(db, id, { state: "running", rec: null, recAt: null });
   const answered = await run();
@@ -227,11 +235,13 @@ test("an implementation's question is answered by a comment on its issue, by opt
   };
   const answer = async (impl: number) => (await roundsOf(db, impl)).filter((r) => r.kind === "answer").map((r) => (r.result as { option: string }).option);
 
-  const byNumber = await asked(7), byYes = await asked(9);
+  const byNumber = await asked(7), byYes = await asked(9), byQuestion = await asked(11);
   await comment(w, `@${SLUG} 2`, { number: 7, issue: true });
   await comment(w, `@${SLUG} yes`, { number: 9, issue: true });
+  await comment(w, `@${SLUG} one file per layer?`, { number: 11, issue: true });
   await drain(w);
-  assert.deepEqual((await commands(w)).map((c) => c.state), ["done", "done"], JSON.stringify(await commands(w)));
+  assert.deepEqual((await commands(w)).slice(0, 2).map((c) => c.state), ["done", "done"], JSON.stringify(await commands(w)));
   assert.deepEqual(await answer(byNumber), ["o2"], "the named option answers");
   assert.deepEqual(await answer(byYes), ["o1"], "a yes answers with the recommended option");
+  assert.deepEqual(await answer(byQuestion), [], "an option named in a question answers nothing");
 });

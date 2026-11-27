@@ -6,7 +6,7 @@
 // words must match exactly one planned part; a weight alone needs a started item. While an implementation's question is open, its
 // options are the parts, and a reply that is only an option's number or words answers it. A fix whose words match no part is an
 // instruction the fix-up carries out, with the planned parts; a bare fix where the review lists no fix fixes its finding.
-import { describe } from "./parse.ts";
+import { CONDITION, describe, GUARD } from "./parse.ts";
 import { heldWork, sameQuestion, type CloseReason, type CommandPart, type Entry, type ItemKind, type ItemWorkflow, type Parsed, type PlanPart, type QuestionAnswer, type WorkflowState } from "./types.ts";
 
 /**
@@ -323,9 +323,11 @@ const HEDGE = new Set(["no", "not", "never", "don", "dont", "wait", "hold", "sto
 
 /**
  * The option of the open question a reply names on its own ("2", "option 2", "go with per document"): by its number, or by words that
- * are all words of exactly one option's title. Null when there is no open question, or the reply says anything else.
+ * are all words of exactly one option's title. Null when there is no open question, or the reply says anything else: a question, a
+ * negation or hedge (the parser's GUARD) or a condition word names nothing.
  */
 export function optionNamed(wf: ItemWorkflow, reply: string): PlanPart | null {
+  if (GUARD.test(reply) || reply.toLowerCase().split(/[^\p{L}']+/u).some((w) => CONDITION.test(w))) return null;
   const options = optionsOf(wf);
   const text = reply.toLowerCase().replace(/[.!]+$/, "").replace(/^(?:(?:go with|take|use|option|part|number|answer)\s+)+/, "").trim();
   const number = /^#?(\d+)$/.exec(text);

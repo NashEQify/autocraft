@@ -28,13 +28,13 @@ import { jobItem } from "../runner/job-items.ts";
 import type { Db } from "../db/index.ts";
 import { t } from "../i18n/index.ts";
 import { freshConfig } from "../data/control/index.ts";
-import { countStatusRetriesDue, loadStatusRetriesAt, saveStatusComments, workflowActors, type StatusRow } from "../data/workflow/index.ts";
+import { countStatusRetriesDue, loadLatestSaid, loadStatusRetriesAt, saveStatusComments, workflowActors, type StatusRow } from "../data/workflow/index.ts";
 import { loadStatusExtras, loadStatusInputs } from "../data/views/prStatus.ts";
 import { attributionLines, currentStep, listText, queueLine, recommendationLine, stateLine, stepLines, workflowSteps, type Progress } from "../workflow/status.ts";
 import { openQuestion } from "../workflow/asked.ts";
 import { heldWork, type ItemWorkflow, type PlanPart } from "../workflow/types.ts";
 import { legWaits } from "../workflow/waits.ts";
-import { answerHow, pingable, pingBody, pingDue, type Ping } from "./ping.ts";
+import { answerHow, givenUp, PING_TRIES, pingable, pingBody, pingDue, PRODUCED_MS, type Ping } from "./ping.ts";
 
 export const ACTOR = "pr-status";
 /** Ends every status comment, so the comment is found again on GitHub when the stored row is missing. */
@@ -121,10 +121,10 @@ export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): str
   return out;
 }
 
-/** The comment body of a started item: its paragraphs, how to answer when a recommendation is open, and the links. */
-export function workflowBody(repo: string, number: number, paragraphs: string[], answerable: boolean, slug: string | null, base: string | null): string {
+/** The comment body of a started item: its paragraphs, how to answer the workflow `answerable` when its recommendation is open, and the links. */
+export function workflowBody(repo: string, number: number, paragraphs: string[], answerable: Pick<ItemWorkflow, "rec" | "plan"> | null, slug: string | null, base: string | null): string {
   const parts = [...paragraphs];
-  if (answerable && slug) parts.push(answerHow(slug));
+  if (answerable && slug) parts.push(answerHow(slug, answerable));
   if (base) parts.push(t("Details for maintainers: {link}", { link: `[${t("this item")}](${base}${itemPath(repo, number)})` }));
   return `${parts.join("\n\n")}\n\n${MARKER}`;
 }
@@ -245,7 +245,9 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
     const merged = status.step === "Merged" ? batches.get(`merged:${key}`) : undefined;
     const pr = (open ?? merged)?.pr;
     const a = w ? answered.get(w.wf.id) : undefined;
-    const implementation = w && status.kind === "issue" && w.wf.number === n && w.wf.entry === "implement" && w.wf.prNumber !== null ? w.wf.prNumber : undefined;
+    // Only where the PR shows this workflow: a PR with work of its own leaves the issue's questions on the issue.
+    const linked = w && status.kind === "issue" && w.wf.number === n && w.wf.entry === "implement" ? w.wf.prNumber : null;
+    const implementation = linked !== null && started.get(linked)?.wf.id === w!.wf.id ? linked : undefined;
     const workflow: WorkflowFacts | undefined = w ? {
       wf: w.wf, answered: a ? { by: a.login, at: a.at } : null, quiet: quiet.has(key), wait: waits.get(w.wf.id) ?? null, ...(implementation !== undefined ? { implementation } : {}),
     } : undefined;
@@ -318,7 +320,7 @@ const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
 const notFound = (r: { stderr: string; stdout: string }): boolean => /404|not found/i.test(`${r.stderr} ${r.stdout}`);
 
 export type PrStatusParams = { repo: string; by: By; runId: string; limit: number; log?: (line: string) => void; querier?: Querier; exec?: Exec; now?: () => Date; base?: string | null; /** Replaces the installation-token minter (tests). */ mint?: Writer["mint"] };
-export type PrStatusResult = { posted: string[]; edited: string[]; pinged: string[]; gone: string[]; failed: string[]; due: number; paced: boolean };
+export type PrStatusResult = { posted: string[]; edited: string[]; pinged: string[]; pingFailed: string[]; gone: string[]; failed: string[]; due: number; paced: boolean };
 
 /**
  * Posts or edits the due status comments of one repo, at most `limit`, under a per-repo lease so two jobs never post on
@@ -326,7 +328,7 @@ export type PrStatusResult = { posted: string[]; edited: string[]; pinged: strin
  */
 export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusResult> {
   const log = p.log ?? (() => {});
-  const out: PrStatusResult = { posted: [], edited: [], pinged: [], gone: [], failed: [], due: 0, paced: false };
+  const out: PrStatusResult = { posted: [], edited: [], pinged: [], pingFailed: [], gone: [], failed: [], due: 0, paced: false };
   const now = p.now ?? (() => new Date());
   // Without the repo's switch only the comments of items a person started or approved are due: their starts are the approval (members).
   const repoGrant = await guardRepo(db, p.repo, "status", p.by);
@@ -348,6 +350,7 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
     const q = p.querier ?? new Client(500), run = p.exec ?? realExec;
     const base = (p.base === undefined ? envVar("BASE_URL") ?? null : p.base)?.replace(/\/+$/, "") || null;
     const me = await writerLogin(db), ours = await ownLoginTest(db, p.repo), slug = shownMention(appSlug(), await mentionName(db));
+    const said = await loadLatestSaid(db, [...new Set(due.flatMap((d) => (d.ping ? [d.ping.workflowId] : [])))]);
     for (const d of due.slice(0, Math.max(0, p.limit))) {
       const ref = `${p.repo}#${d.number}`, at = now().toISOString();
       const issue = d.facts.status.kind === "issue";
@@ -355,14 +358,14 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
       const wf = d.facts.workflow;
       const ended = d.facts.status.step === "Merged" || d.facts.status.step === "Closed";
       const body = wf
-        ? workflowBody(p.repo, d.number, workflowLines({ ...d.facts, workflow: wf }), !ended && !wf.quiet && wf.implementation === undefined && openQuestion(wf.wf) !== null, slug, base)
-        : d.released ? workflowBody(p.repo, d.number, [`**${d.line}**`], false, slug, base)
+        ? workflowBody(p.repo, d.number, workflowLines({ ...d.facts, workflow: wf }), !ended && !wf.quiet && wf.implementation === undefined && openQuestion(wf.wf) !== null ? wf.wf : null, slug, base)
+        : d.released ? workflowBody(p.repo, d.number, [`**${d.line}**`], null, slug, base)
         : commentBody(p.repo, d.number, d.line, history, d.facts.status.step === "In the merge queue", base);
       const shown = d.line.split("\n")[0];
       // The stored row as it stands: the edit and the ping each write it on.
       let cur: RowValues = d.prev
-        ? { comment_id: d.prev.comment_id, author: d.prev.author, line: d.prev.line, steps: d.prev.steps, final: d.prev.final, failures: d.prev.failures, retry_at: d.prev.retry_at, updated_at: d.prev.updated_at, pinged: d.prev.pinged }
-        : { comment_id: null, author: null, line: null, steps: "[]", final: 0, failures: 0, retry_at: null, updated_at: at, pinged: null };
+        ? { comment_id: d.prev.comment_id, author: d.prev.author, line: d.prev.line, steps: d.prev.steps, final: d.prev.final, failures: d.prev.failures, retry_at: d.prev.retry_at, updated_at: d.prev.updated_at, pinged: d.prev.pinged, ping_failures: d.prev.ping_failures }
+        : { comment_id: null, author: null, line: null, steps: "[]", final: 0, failures: 0, retry_at: null, updated_at: at, pinged: null, ping_failures: 0 };
       try {
         if (d.edit) {
           const row = { ...cur, line: d.line, steps: JSON.stringify(history), final: d.facts.status.step === "Merged" ? 1 : 0, failures: 0, retry_at: null, updated_at: at };
@@ -388,25 +391,36 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
           (found ? out.edited : out.posted).push(ref);
           await jobItem(db, p.repo, d.number, `status comment ${found ? "edited" : "posted"}: ${shown}`, log);
         }
-        if (d.ping && cur.comment_id) {
-          const to = await pingable(db, d.ping.to);
-          if (to.length) {
-            const text = pingBody(to, d.ping.rec, slug, `${d.facts.status.url}#issuecomment-${cur.comment_id}`);
-            const r = await ghComment(w, g, run, "pr-status-ping", { repo: p.repo, number: d.number, pr: !issue }, { by: "fixed" }, text, { run: p.runId, line: text.split("\n")[0] });
-            if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
-            out.pinged.push(ref);
-            await jobItem(db, p.repo, d.number, `asked people pinged: ${to.join(", ")}`, log);
-          }
-          cur = { ...cur, pinged: d.ping.key };
-          await store(db, p.repo, d.number, cur);
-        }
       } catch (e) {
         if (e instanceof WritePacedError) { out.paced = true; log(`${p.repo}: ${e.message}`); break; }
         out.failed.push(ref);
         const failures = (d.prev?.failures ?? 0) + 1;
         await store(db, p.repo, d.number, { ...cur, final: 0, failures, retry_at: retryAt(failures, now().getTime()), updated_at: at });
         await jobItem(db, p.repo, d.number, `status comment failed: ${oneLine(String((e as Error).message ?? e))}`, log);
+        continue;
       }
+      if (!d.ping || !cur.comment_id || !wf) continue;
+      // Its failures are its own: the comment's edits go on, and after PING_TRIES the question is given up.
+      try {
+        const by = said.get(d.ping.workflowId);
+        const made = by && d.ping.recAt !== null && Date.parse(d.ping.recAt) >= Date.parse(by.at) && Date.parse(d.ping.recAt) - Date.parse(by.at) <= PRODUCED_MS ? by.login.toLowerCase() : null;
+        const to = await pingable(db, d.ping.to.filter((l) => l.toLowerCase() !== made));
+        if (to.length) {
+          const text = pingBody(to, wf.wf, d.ping.rec, slug, `${d.facts.status.url}#issuecomment-${cur.comment_id}`);
+          const r = await ghComment(w, g, run, "pr-status-ping", { repo: p.repo, number: d.number, pr: !issue }, { by: "fixed" }, text, { run: p.runId, line: text.split("\n")[0] });
+          if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
+          out.pinged.push(ref);
+          await jobItem(db, p.repo, d.number, `asked people pinged: ${to.join(", ")}`, log);
+        }
+        cur = { ...cur, pinged: d.ping.key, ping_failures: 0 };
+      } catch (e) {
+        if (e instanceof WritePacedError) { out.paced = true; log(`${p.repo}: ${e.message}`); break; }
+        const tries = cur.ping_failures + 1, gone = tries >= PING_TRIES;
+        cur = gone ? { ...cur, pinged: givenUp(d.ping.key), ping_failures: 0 } : { ...cur, ping_failures: tries };
+        out.pingFailed.push(ref);
+        await jobItem(db, p.repo, d.number, `ping failed${gone ? `, given up after ${PING_TRIES} tries` : ""}: ${oneLine(String((e as Error).message ?? e))}`, log);
+      }
+      await store(db, p.repo, d.number, cur);
     }
   } finally {
     await release();

@@ -21,6 +21,7 @@ import { SIM_THRESHOLD } from "./dupes/scan.ts";
 import { splitStageTripsSqlite } from "./db/trip-split.ts";
 import { retireFixAttemptsSqlite } from "./db/fix-retire.ts";
 import { featuresRepoOnlySqlite } from "./db/feature-repo-only.ts";
+import { pingsSettledSqlite } from "./db/pings-settled.ts";
 import { holdsToItemsSqlite } from "./db/holds-to-items.ts";
 import { backfillRefusalsSqlite } from "./db/refused-runs.ts";
 import { chatBackfillSqlite } from "./db/chat-backfill.ts";
@@ -380,6 +381,7 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["conversation_turns", "conversation_id", "INTEGER"],
   // The question of a status comment whose asked people were last pinged in a reply (src/prstatus/ping.ts).
   ["pr_status_comments", "pinged", "TEXT"],
+  ["pr_status_comments", "ping_failures", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
@@ -552,6 +554,7 @@ function backfill(db: DatabaseSync): void {
   holdsToItemsSqlite(db);
   backfillRefusalsSqlite(db);
   chatBackfillSqlite(db);
+  pingsSettledSqlite(db);
   // Reviews made before snapshots existed count as having read everything up to now: no wave of re-reviews.
   const now = new Date().toISOString();
   db.prepare("UPDATE main.opus_reviews SET seen_at = ? WHERE seen_at IS NULL").run(now);

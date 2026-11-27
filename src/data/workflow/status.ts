@@ -39,8 +39,20 @@ export async function saveStatusComments(db: Db, rows: StatusRow[]): Promise<voi
   const q = queryDb(db);
   await db.write(async () => {
     for (const part of kx.batches(unique)) {
-      await q.run(q.k.insertInto(T).values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at", "pinged"]))));
+      await q.run(q.k.insertInto(T).values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at", "pinged", "ping_failures"]))));
     }
+  });
+}
+
+/**
+ * Records that a command's reply on the item showed the question `key` (`<workflow id>:<rec_at>`): the status comment pings nobody about it
+ * (src/prstatus/ping.ts). An item without a status comment row gets one that holds only this.
+ */
+export async function markQuestionShown(db: Db, repo: string, number: number, key: string, at: string): Promise<void> {
+  const q = queryDb(db);
+  await db.write(async () => {
+    await q.run(q.k.insertInto(T).values({ repo, number, pinged: key, ping_failures: 0, updated_at: at })
+      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet({ pinged: key, ping_failures: 0 })));
   });
 }
 

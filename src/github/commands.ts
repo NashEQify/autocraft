@@ -15,7 +15,7 @@ import { actorOf, type AccessRow } from "../data/access/index.ts";
 import { requestReadsAfter } from "../data/mirror/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
 import {
-  loadCommandWork, loadNudges, pruneCommands as pruneCommandRows, queueCommands, recordNudges, saveCommandProgress, settleCommands, type CommandRow, type CommandState,
+  loadCommandWork, loadNudges, markQuestionShown, pruneCommands as pruneCommandRows, queueCommands, recordNudges, saveCommandProgress, settleCommands, type CommandRow, type CommandState,
 } from "../data/workflow/index.ts";
 import { guardRepo } from "../core/guard.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
@@ -337,6 +337,7 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
     const own: Parsed = again.kind === "ambiguous" || items.length !== 1 ? again : { ...again, items: [] };
     const res = await linkingComment(db, Number(r.comment_id), r.login, () => runCommand(db, actor, "github", { parsed: own, items: [{ repo: r.repo, number: r.number }], ...(head ? { head } : {}), ...(mentionName ? { mention: mentionName } : {}), at: now.toISOString(), asked: () => r.created_at }));
     const o = res.items[0];
+    if (o?.question && reply) await markQuestionShown(db, r.repo, r.number, `${o.question.workflowId}:${o.question.recAt}`, now.toISOString());
     await settle(db, d, r, o?.outcome === "run" ? "done" : "refused", o?.line ?? (res.lines.join(" ") || NOT_RUN), now, { reply, allowed });
   } catch (e) {
     deps.log?.(`github command ${ref}: ${oneLine(String((e as Error)?.message ?? e))}`);
@@ -390,6 +391,7 @@ function readInBackground(db: Db, d: Drain, r: Row, deps: CommandDeps, o: { acto
       const res = await linkingComment(db, id, r.login, () => runText(db, o.actor, "github", { parsed: o.again, items: [{ repo: r.repo, number: r.number }], ...(o.mention ? { mention: o.mention } : {}), at: clock().toISOString(), asked: () => r.created_at },
         { text: o.text, own: [{ repo: r.repo, number: r.number }], named: false, condition: o.condition, waitMs: READ_BACKGROUND_WAIT_MS, parse: { repo: r.repo }, pin, ...(deps.read ? { deps: deps.read } : {}) }));
       const out = res.items[0];
+      if (out?.question && o.reply) await markQuestionShown(db, r.repo, r.number, `${out.question.workflowId}:${out.question.recAt}`, clock().toISOString());
       state = out?.outcome === "run" ? "done" : "refused";
       line = out?.line ?? (res.lines.join(" ") || NOT_RUN);
     } catch (e) {

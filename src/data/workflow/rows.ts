@@ -289,6 +289,20 @@ export async function loadAnswers(db: Db, workflowIds: number[], o: { resumes?: 
   return out;
 }
 
+/** Each workflow's newest event that a person sent (a model's reading of a message left out): who, from where, on which item and when. */
+export async function loadLatestSaid(db: Db, workflowIds: number[]): Promise<Map<number, { login: string; via: string; number: number; at: string }>> {
+  const out = new Map<number, { login: string; via: string; number: number; at: string }>();
+  if (workflowIds.length === 0) return out;
+  const q = queryDb(db);
+  const k = q.k as any;
+  const newest = k.selectFrom("main.workflow_events as m").select((eb: any) => eb.fn.max("m.id").as("id")).where("m.kind", "<>", "read")
+    .where(kx.inList(db, "m.workflow_id", workflowIds, "bigint")).groupBy("m.workflow_id");
+  for (const r of await q.all(k.selectFrom("main.workflow_events as e").select(["e.workflow_id", "e.login", "e.via", "e.number", "e.at"]).where("e.id", "in", newest)) as { workflow_id: number; login: string; via: string; number: number; at: string }[]) {
+    out.set(Number(r.workflow_id), { login: r.login, via: r.via, number: Number(r.number), at: r.at });
+  }
+  return out;
+}
+
 /** Up to when a person has seen each workflow's item and chose to go on with it, and when they last said so (its start without an event); when someone last resumed it. */
 export async function loadGoOnAt(db: Db, workflows: { id: number; startedAt: string }[]): Promise<Map<number, GoneOn>> {
   const out = new Map<number, GoneOn>();
