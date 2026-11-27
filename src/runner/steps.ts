@@ -409,6 +409,9 @@ export const STEPS: StepDef[] = [
       const { runVerify } = await import("../verify/index.ts");
       const r = await runVerify(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.usageRun(r.runId);
+      // PRs skipped because GitHub could not be read (crates, diff, base) would otherwise leave an idle job that waits for its PRs to
+      // change: failing it retries them after the failed-job backoff.
+      if (!r.handled && r.skipped.length) throw new Error(`${r.repo}: planned none of ${r.candidates} candidates; GitHub could not be read for ${r.skipped.join(", ")}`);
       const k = Object.entries(r.kinds).map(([x, n]) => `${n} ${x}`).join(", ");
       return `${r.repo}: planned ${r.handled} of ${r.candidates} candidates${k ? ` (${k})` : ""}; ${r.errors} errors, ${r.tasks.length} tasks queued`;
     },
