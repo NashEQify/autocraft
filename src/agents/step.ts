@@ -2,7 +2,7 @@
 // where Jev is unsure or unavailable). A step is declared once (src/agents/steps.ts) with its parser, retries,
 // lint and fallbacks; the runner does the calls, retries, lint and fix turn (askClaude), the Jev reply parse, the
 // usage rows and the error result.
-import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
+import { ItemWithdrawnError, NoTakerError, poolRoom, repoBatches } from "./call.ts";
 import { jevAvailable } from "./jev.ts";
 import { add, askClaude, askJev, pool, promptVersion, saveUsages, type AskOptions, type UsageRow, type LintedReply, type Usage } from "../classify/run.ts";
 import { CLAUDE_PROMPTS, JEV_PROMPTS, JEV_USD_PER_INPUT_TOKEN, renderJev, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
@@ -117,7 +117,8 @@ type Reply = { text: string; usage: Usage; problems?: LintProblem[]; fixTurn?: b
  * model's safety filter declined, which the queue already ran once more elsewhere, ends the attempts with its error.
  * Values of every answered attempt are in `values`, in order; `rest` is what no attempt answered. A call withdrawn for lack of
  * a taker (NoTakerError) ends the attempts: with earlier answers they are returned with the rest unanswered, as when the
- * attempts run out; without, the usage of what ran is saved and the error is thrown.
+ * attempts run out; without, the usage of what ran is saved and the error is thrown. A call withdrawn for its item
+ * (ItemWithdrawnError) is thrown the same way, earlier answers or not.
  */
 export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C> = {}): Promise<StepResult<I, V>> {
   const reg = step.provider === "jev" ? JEV_PROMPTS[step.id] : CLAUDE_PROMPTS[step.id];
@@ -137,7 +138,8 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
     let refusal: string | null = null;
     try { r = await call(db, step, todo, { ...opts, onRefused: (e) => { refusal = e; opts.onRefused?.(e); } }); } catch (e) {
       if (!(e instanceof NoTakerError)) throw e;
-      if (!values.length) untaken = e;
+      // A call withdrawn for its item ends the item's work, earlier answers included.
+      if (!values.length || e instanceof ItemWithdrawnError) untaken = e;
       break;
     }
     if (!r && refusal !== null) { error = refusal; break; }

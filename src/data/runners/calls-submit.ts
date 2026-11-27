@@ -115,7 +115,7 @@ export async function discardGoneLease(db: Db, lease: LiveLease, a: { usage: Tok
   return await db.write(async () => {
     const up = await q.run(q.k.updateTable("main.remote_calls").set({ state: "failed", error: reason, ended_at: now, progress: null, usage: a.usage ? JSON.stringify(a.usage) : null, duration_ms: a.duration })
       .where("id", "=", lease.id).where("state", "=", "leased").where("lease_secret_hash", "=", lease.secretHash)
-      .where((eb) => itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login" })));
+      .where((eb) => itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login", step: "remote_calls.step" })));
     if (Number(up.changes) !== 1) return false;
     await bury(db, [{ id: lease.id, hash: lease.secretHash }], now);
     if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", error: reason, summary: "result discarded", ...(a.usage && { tokens: a.usage }) }]);
