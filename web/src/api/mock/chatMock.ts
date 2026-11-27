@@ -78,7 +78,7 @@ const PR_455: Story = {
   next: "fix the hidden-group case, then merge",
   working: null,
   quiet: true,
-  queued: [{ title: "Duplicates", min: 9, why: "All 32 job slots are busy" }, { title: "Classify", min: 4, why: "No Task Runner takes Classify tasks on designcraft" }],
+  queued: [{ title: "Duplicates", min: 9, why: "Every Task Runner that may take it is busy" }, { title: "Classify", min: 4, why: "No Task Runner takes Classify tasks on designcraft" }],
   beats: [
     { b: "gh", min: 2 * 1440, actor: "sable-ui", summary: "Opened the pull request" },
     { b: "gh", min: 2 * 1440 - 11, actor: "github-actions", summary: "CI passed on 2c9e4f1 (6 checks)" },

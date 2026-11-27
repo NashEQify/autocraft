@@ -55,9 +55,11 @@ function usePage(repo: string, number: number) {
   });
 }
 
-/** Something moves without a topic: a message waiting for its answer, a running step's progress, or queued work and what holds it back. */
+/** Something moves without a topic: a message waiting for its answer, or a running step's progress. */
 const moving = (c: ItemChat | undefined) =>
-  !!c?.conversations.some((v) => v.working || v.queued.length > 0 || v.entries.some((e) => (e.t === "said" && e.pending) || (e.t === "work" && e.state === "running")));
+  !!c?.conversations.some((v) => v.working || v.entries.some((e) => (e.t === "said" && e.pending) || (e.t === "work" && e.state === "running")));
+/** Queued work, whose reason changes slowly: read less often. */
+const queued = (c: ItemChat | undefined) => !!c?.conversations.some((v) => v.queued.length > 0);
 
 /** The chat read, asked `since` its last stamp. `keep` stores a read the send already returned, so the next read is small. */
 function useChat(repo: string, number: number) {
@@ -73,7 +75,7 @@ function useChat(repo: string, number: number) {
       last.current = { key, chat: r };
       return r;
     },
-    { pollMs: (c) => (moving(c) ? 4000 : false) },
+    { pollMs: (c) => (moving(c) ? 4000 : queued(c) ? 20_000 : false) },
   );
   const keep = useCallback((chat: ItemChat) => void (last.current = { key, chat }), [key]);
   return { ...q, keep };
