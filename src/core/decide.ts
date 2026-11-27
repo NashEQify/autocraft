@@ -746,7 +746,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   if (!held && reviewFollowUpsDue(f)) actions.push(act("followups", f.head, { source: "review", reviewHead: f.review!.head }));
 
   // Verify: a take at the head (or a merge entry, which has no review), CI not failing, not verified yet (a stale verification does not count).
-  const verifiable = mx ? !!f.head : !!r && r.head === f.head && r.verdict === "take" && !r.stale;
+  // A PR approved for merge is verified once, at the head it merges: CI green and its pre-merge review there without a defect that stops it.
+  const verifiable = mx ? !!f.head : !!r && r.head === f.head && r.verdict === "take" && !r.stale
+    && (!approvedForMerge(f) || (ciAllows(f.ci) && f.premerge?.head === f.head && f.premerge.hasFindings && f.premerge.defects === 0));
   if (!held && !f.draft && verifiable && f.ci !== "failure" && (!f.verification || f.verification.state === "stale")) {
     actions.push(act("verify", f.head, { bucket: f.verifyUnavailable ? "unavailable" : "plan" }));
   }
