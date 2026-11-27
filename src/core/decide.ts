@@ -596,7 +596,7 @@ const stuckWait = (f: PrFacts): Wait | null => {
   if (cf === "done" && (f.cifix?.states.includes("comment-failed") || f.cifix?.unsent === "final")) return person("ask-failed", "a person: the CI fix comment failed");
   if (cf === "done" && f.cifix?.states.includes("pushing")) return system("ci-running", "the push of the CI fix");
   if (cf === "done" && f.cifix?.states.some((s) => s === "push-denied" || s === "cannot-push")) return person("ci-fix-failed", "a person to fix CI: the CI fix could not push");
-  if (cf === "failed" || cf === "capped") return f.brokeByUs ? person("ci-own-breakage", "a person to fix CI our push broke") : f.quiet || mergeOwned(f) ? RED_CI : f.repoFacts.commentApproved ? CI_AUTHOR : COMMENT_OFF;
+  if (cf === "failed" || cf === "capped") return f.brokeByUs ? person("ci-own-breakage", f.brokeByDrift ? "a person to fix CI, which fails since the base branch moved" : "a person to fix CI our push broke") : f.quiet || mergeOwned(f) ? RED_CI : f.repoFacts.commentApproved ? CI_AUTHOR : COMMENT_OFF;
   return cf === "cannot-push" ? (f.quiet ? RED_CI : COMMENT_OFF) : null;
 };
 

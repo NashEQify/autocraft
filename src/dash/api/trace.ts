@@ -119,7 +119,8 @@ export const taskEvent = (t: { id: number; job_id: number | null; step: string; 
 });
 export const pushEvent = (p: { id: number; at: string; stage: string; action: string; to_oid: string; before_res: string; after_res: string | null; outcome: string | null }): Ev => ({
   id: `push:${p.id}`, kind: "check", at: p.at, head: p.to_oid, actor: step(p.stage),
-  summary: `${GITHUB_ACTIONS[p.action] ?? humanize(p.action)} by AutoCraft: required checks ${p.before_res} → ${p.after_res ?? "pending"}${p.outcome ? `, ${p.outcome}` : ""}`, ref: { head: p.to_oid },
+  summary: `${GITHUB_ACTIONS[p.action] ?? humanize(p.action)} by AutoCraft: required checks ${p.before_res === "stale" ? "green, then the base branch moved," : p.before_res} → ${p.after_res ?? "pending"}${
+    p.outcome === "stale" ? ", not counted by the circuit breaker" : p.outcome ? `, ${p.outcome}` : ""}`, ref: { head: p.to_oid },
 });
 export const patchCheckEvent = (p: { id: number; kind: string; subject: string; round: number; verdict: string; model: string; reasons: string; created_at: string }): Ev => ({
   id: `patchcheck:${p.id}`, kind: "check", at: p.created_at, head: null, actor: model(p.model, "model"), summary: `Patch check (${p.kind}, round ${p.round}): ${p.verdict}`,

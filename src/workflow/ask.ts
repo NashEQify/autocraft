@@ -51,7 +51,7 @@ const REVIEW_AGAIN: Partial<Record<WaitCode, (f?: PrFacts) => string>> = {
   "review-failed": () => t("Its review failed too often at this commit."),
   "ask-failed": () => t("AutoCraft could not post its comment to the contributor."),
   "ci-fix-failed": (f) => ciFixTried(f, t("CI fails, and the CI fix could not repair it.")),
-  "ci-own-breakage": (f) => ciFixTried(f, t("CI fails since a push of AutoCraft's, and the CI fix could not repair it.")),
+  "ci-own-breakage": (f) => ciFixTried(f, f?.brokeByDrift ? t("CI fails since the base branch moved, and the CI fix could not repair it.") : t("CI fails since a push of AutoCraft's, and the CI fix could not repair it.")),
   "ci-nothing-to-fix": () => t("CI fails, and the CI fix has nothing to fix there."),
   "revision-failed": () => t("The implementation session ended, and its pull request is not ready to merge."),
 };

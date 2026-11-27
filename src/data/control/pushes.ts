@@ -3,10 +3,11 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import type { MadePush, OutcomePush } from "../../core/evidence.ts";
-import { BREAKER_WINDOW, breakerTripped, classifyPush, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
+import { BREAKER_WINDOW, breakerTripped, classifyPush, freshBefore, latestTime, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Before, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { RefKey } from "../mirror/types.ts";
 import { loadChecks } from "../mirror/checks.ts";
+import { loadCommits } from "../mirror/activity.ts";
 import { loadMainCi, loadMainCiAt } from "../mirror/mainci.ts";
 import { closeMovedPushOutcomes, loadOpenHeadPushes } from "./cross.ts";
 import { REPO_SETTINGS } from "./settings.ts";
@@ -36,23 +37,28 @@ async function loadOptionalChecks(db: Db, repos: readonly string[]): Promise<(re
   return (repo) => REPO_SETTINGS.optionalChecks.read(rows.get(`${name}:${repo}`) ?? undefined) as string[];
 }
 
-/** The state of the default branch's newest head: by commit time (unknown last), then by when it was first seen. */
-function latestMainState(heads: { state: string; committed_at: string | null; first_seen_at: string }[]): string | undefined {
-  let best: (typeof heads)[number] | undefined;
+type MainHeadTime = { head_sha: string; state: string; committed_at: string | null; first_seen_at: string };
+
+/** The default branch's newest head: by commit time (unknown last), then by when it was first seen; times compared as instants. */
+function latestMain(heads: MainHeadTime[]): MainHeadTime | undefined {
+  let best: MainHeadTime | undefined;
   for (const h of heads) {
     if (!best) { best = h; continue; }
-    const a = h.committed_at, b = best.committed_at;
-    const newer = a !== null && b === null ? true : a === null && b !== null ? false : a !== b ? a! > b! : h.first_seen_at > best.first_seen_at;
+    const a = latestTime(h.committed_at), b = latestTime(best.committed_at);
+    const newer = a !== null && b === null ? true : a === null && b !== null ? false : a !== b ? a! > b! : (latestTime(h.first_seen_at) ?? 0) > (latestTime(best.first_seen_at) ?? 0);
     if (newer) best = h;
   }
-  return best?.state;
+  return best;
 }
 
 /**
  * Records pushes that succeeded: the required-check result at the head before each (from the stored checks, when they are for
- * that head). A branch the push created has no earlier head: it takes the CI result of the commit it was built on (`base`),
- * else of the default branch's latest CI (a red or unknown baseline is no baseline for "broke"). Actions with no push stage are
- * skipped. A push is recorded once per `(repo, number, to, action)`, also across calls, in one statement.
+ * that head). A green before counts only when the default branch did not move after its run (core `freshBefore`), else it is
+ * `stale`: the run is dated by the latest of our own push of that head and the sync first seeing its commit, and the base by the
+ * default branch's newest head; with either time unknown the green counts. A branch the push created has no earlier head: it takes
+ * the CI result of the newest default-branch head with a final one (green, optional or red), else of the commit it was built on
+ * (`base`); a red or unknown baseline is no baseline for "broke". Actions with no push stage are skipped. A push is recorded
+ * once per `(repo, number, to, action)`, also across calls, in one statement.
  */
 export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> {
   const first = new Map<string, NewPush>();
@@ -60,26 +66,41 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
   const list = [...first.values()];
   if (!list.length) return;
   const fresh = list.filter((p) => !p.from), moved = list.filter((p) => p.from && p.number !== null);
-  const freshRepos = [...new Set(fresh.map((p) => p.repo))];
-  const [ciAt, ciHeads, stored, optional] = await db.together(() => Promise.all([
+  const movedKeys = moved.map((p) => ({ repo: p.repo, number: p.number! }));
+  const q = queryDb(db);
+  const [ciAt, ciHeads, stored, optional, commits, ownAt] = await db.together(() => Promise.all([
     loadMainCiAt(db, fresh.filter((p) => p.base).map((p) => ({ repo: p.repo, sha: p.base! }))),
-    freshRepos.length ? loadMainCi(db, { repos: freshRepos }) : Promise.resolve(new Map<string, { state: string; committed_at: string | null; first_seen_at: string }[]>()),
-    loadChecks(db, moved.map((p) => ({ repo: p.repo, number: p.number! }))),
+    loadMainCi(db, { repos: [...new Set(list.map((p) => p.repo))] }),
+    loadChecks(db, movedKeys),
     loadOptionalChecks(db, moved.map((p) => p.repo)),
+    movedKeys.length ? loadCommits(db, movedKeys) : Promise.resolve(new Map<RefKey, { oid: string; committed_at: string; first_seen_at: string | null }[]>()),
+    movedKeys.length ? q.all(q.k.selectFrom("main.own_pushes").select(["repo", "number", "to_oid", "at"])
+      .where(kx.tupleIn(db, ["repo", "number", "to_oid"], moved.map((p) => [p.repo, p.number!, p.from!]), ["text", "bigint", "text"]))) : Promise.resolve([]),
   ]));
+  const ownPushedAt = new Map<string, string>(ownAt.map((r) => [`${r.repo}#${r.number}@${r.to_oid}`, r.at]));
   const now = new Date().toISOString();
   const rows = list.map((p) => {
-    let before: Required | "unknown" = "unknown";
+    let before: Before = "unknown";
+    const latest = latestMain(ciHeads.get(p.repo) ?? []);
     if (!p.from) {
-      const m = (p.base ? ciAt.get(`${p.repo}@${p.base}`)?.state : undefined) ?? latestMainState(ciHeads.get(p.repo) ?? []);
+      // The new PR's run merges with the newest default-branch head: the CI result of the newest head with a final one.
+      const final = latestMain((ciHeads.get(p.repo) ?? []).filter((h) => h.state === "green" || h.state === "optional" || h.state === "red"));
+      const m = final?.state ?? (p.base ? ciAt.get(`${p.repo}@${p.base}`)?.state : undefined);
       before = m === "green" || m === "optional" ? "green" : m === "red" ? "red" : "unknown";
     } else if (p.number !== null) {
-      const row = stored.get(`${p.repo}#${p.number}`);
-      if (row && row.head_oid === p.from) before = requiredResult(parse(row.checks), optional(p.repo));
+      const ref = `${p.repo}#${p.number}`;
+      const row = stored.get(ref);
+      if (row && row.head_oid === p.from) {
+        const c = commits.get(ref)?.find((x) => x.oid === p.from);
+        // The run started after its head was pushed: our push of it, or the sync first seeing the commit (its commit time can be
+        // days earlier). The base head landed at its commit time at the earliest. Each bound is taken so that the green counts.
+        const ranAt = latestTime(ownPushedAt.get(`${ref}@${p.from}`), c?.first_seen_at, c?.committed_at);
+        const baseAt = latest ? latestTime(latest.committed_at) ?? latestTime(latest.first_seen_at) : null;
+        before = freshBefore(requiredResult(parse(row.checks), optional(p.repo)), ranAt, baseAt);
+      }
     }
     return { at: p.at ?? now, stage: PUSH_STAGE[p.action]!, action: p.action, repo: p.repo, number: p.number, from_oid: p.from, to_oid: p.to, before_res: before };
   });
-  const q = queryDb(db);
   for (const part of kx.batches(rows)) {
     const v = kx.valuesTable(db, part.map((r, ord) => ({ ...r, ord })), { ord: "bigint", at: "text", stage: "text", action: "text", repo: "text", number: "bigint", from_oid: "text", to_oid: "text", before_res: "text" }, "v");
     await q.run((q.k as any).insertInto("main.push_outcomes").columns(["at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res"])
@@ -114,7 +135,7 @@ export async function resolvePushes(db: Db, rows: { repo: string; number: number
     if (!open.length) continue;
     const after = requiredResult(parse(r.checks), optional(r.repo));
     for (const p of open) {
-      const outcome = classifyPush(p.before_res as Required | "unknown", after);
+      const outcome = classifyPush(p.before_res as Before, after);
       if (outcome === null) continue;
       done.add(p.id);
       settled.push({ id: p.id, number: r.number, after_res: after, outcome, resolved_at: at });
@@ -140,7 +161,7 @@ type Window = { outcome: Outcome | null; repo: string; number: number | null; to
  * The circuit breaker for a batch: the trip rows involved and both windows of recent outcomes in one wave, the decision in
  * memory in the order of `pairs`, and one `tripStage` call. A repo's breaker trips when BREAKER_BROKE of its last BREAKER_WINDOW
  * pushes of the stage since its last resume broke a required check; the instance-wide one when the broken pushes among the stage's
- * last BREAKER_WINDOW (since its own last resume) come from 2 or more repos. A repo's own breaker has dealt with its broken
+ * last BREAKER_WINDOW (since its own last resume) come from 2 or more repos. `stale` outcomes take no place in either window. A repo's own breaker has dealt with its broken
  * pushes up to its last resume, and with all of them while it is tripped: those do not count towards the instance-wide one.
  */
 export async function evaluatePushBreakers(db: Db, pairs: { stage: string; repo: string }[], at: string = new Date().toISOString()): Promise<string[]> {
@@ -154,7 +175,7 @@ export async function evaluatePushBreakers(db: Db, pairs: { stage: string; repo:
       : j.onRef("t.stage", "=", "p.stage"))
     .select((eb: kx.AnyEb) => ["p.outcome as outcome", "p.repo as repo", "p.number as number", "p.to_oid as to_oid", "p.at as at", "p.stage as stage",
       eb.fn.agg<number>("row_number").over((ob: any) => (partition === "repo" ? ob.partitionBy(["p.stage", "p.repo"]) : ob.partitionBy("p.stage")).orderBy("p.id", "desc")).as("rn")])
-    .where((eb: kx.AnyEb) => eb.and([where(eb), eb("p.at", ">", eb.fn.coalesce("t.cleared_at", eb.val("")))])).as("w"))
+    .where((eb: kx.AnyEb) => eb.and([where(eb), eb("p.at", ">", eb.fn.coalesce("t.cleared_at", eb.val(""))), eb("p.outcome", "is distinct from", eb.val("stale"))])).as("w"))
     .select(["w.outcome", "w.repo", "w.number", "w.to_oid", "w.at", "w.stage", "w.rn"]).where("w.rn", "<=", BREAKER_WINDOW).orderBy("w.stage").orderBy("w.rn")) as Promise<(Window & { rn: number })[]>;
   const [trips, repoRows, stageRows] = await db.together(() => Promise.all([
     q.all(q.k.selectFrom("main.stage_trips").select(["stage", "active", "reason", "evidence", "tripped_at", "cleared_at", "cleared_by"])
@@ -216,24 +237,25 @@ const outcomePush = (r: { from_oid: string; to_oid: string; action: string; at: 
 
 /**
  * Per PR: the heads we pushed or moved off (`to_oid` and `from_oid`), when each head was moved off (the latest push away from it),
- * and the head our latest push broke (`outcome = 'broke'`, last by id).
+ * and the head our latest push broke (`outcome = 'broke'`, last by id). A push that turned red after a stale green counts as broken
+ * here: the CI fix repairs base drift at that head as it repairs our own breakage; only the breaker leaves it out.
  */
 export async function loadPushFacts(db: Db, keys: { repo: string; number: number }[] | KeySource): Promise<Map<RefKey, PushFacts>> {
   const out = new Map<RefKey, PushFacts>();
   if (isEmptyKeys(keys)) return out;
   const q = queryDb(db);
   const rows = await q.all(q.k.selectFrom("main.push_outcomes as p").innerJoin(keysJoin(db, keys), (j) => j.onRef("kk.repo", "=", "p.repo").onRef("kk.number", "=", "p.number"))
-    .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid", "p.at as at", "p.outcome as outcome", "p.action as action"]).orderBy("p.id"));
+    .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid", "p.at as at", "p.outcome as outcome", "p.after_res as after_res", "p.action as action"]).orderBy("p.id"));
   for (const r of rows) {
     const ref = `${r.repo}#${r.number}`;
-    const f = out.get(ref) ?? out.set(ref, { pushed: new Set(), movedOffAt: new Map(), moves: [], brokeHead: null }).get(ref)!;
+    const f = out.get(ref) ?? out.set(ref, { pushed: new Set(), movedOffAt: new Map(), moves: [], brokeHead: null, brokeStale: false }).get(ref)!;
     f.pushed.add(r.to_oid);
     if (r.from_oid !== null) {
       f.pushed.add(r.from_oid);
       f.moves.push(outcomePush({ ...r, from_oid: r.from_oid }));
       if (r.to_oid !== r.from_oid && r.at > (f.movedOffAt.get(r.from_oid) ?? "")) f.movedOffAt.set(r.from_oid, r.at);
     }
-    if (r.outcome === "broke") f.brokeHead = r.to_oid;
+    if (r.outcome === "broke" || (r.outcome === "stale" && r.after_res === "red")) { f.brokeHead = r.to_oid; f.brokeStale = r.outcome === "stale"; }
   }
   return out;
 }
