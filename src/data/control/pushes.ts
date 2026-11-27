@@ -3,7 +3,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import type { MadePush, OutcomePush } from "../../core/evidence.ts";
-import { BREAKER_WINDOW, breakerTripped, classifyPush, freshBefore, latestTime, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Before, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
+import { BREAKER_WINDOW, breakerTripped, classifyPush, freshBefore, latestTime, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Before, type Outcome, type TripStage } from "../../core/push-outcome.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { RefKey } from "../mirror/types.ts";
 import { loadChecks } from "../mirror/checks.ts";
