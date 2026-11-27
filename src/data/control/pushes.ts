@@ -39,13 +39,13 @@ async function loadOptionalChecks(db: Db, repos: readonly string[]): Promise<(re
 
 type MainHeadTime = { head_sha: string; state: string; committed_at: string | null; first_seen_at: string };
 
-/** The default branch's newest head: by commit time (unknown last), then by when it was first seen. */
+/** The default branch's newest head: by commit time (unknown last), then by when it was first seen; times compared as instants. */
 function latestMain(heads: MainHeadTime[]): MainHeadTime | undefined {
   let best: MainHeadTime | undefined;
   for (const h of heads) {
     if (!best) { best = h; continue; }
-    const a = h.committed_at, b = best.committed_at;
-    const newer = a !== null && b === null ? true : a === null && b !== null ? false : a !== b ? a! > b! : h.first_seen_at > best.first_seen_at;
+    const a = latestTime(h.committed_at), b = latestTime(best.committed_at);
+    const newer = a !== null && b === null ? true : a === null && b !== null ? false : a !== b ? a! > b! : (latestTime(h.first_seen_at) ?? 0) > (latestTime(best.first_seen_at) ?? 0);
     if (newer) best = h;
   }
   return best;

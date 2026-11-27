@@ -31,7 +31,9 @@ test("a new branch takes the CI result of the newest default-branch head with a 
   await db.run(db.k.insertInto("tracked_repos").values({ name: "o/r", added_by: "op", added_at: "2026-11-01T00:00:00Z" }));
   const ci = async (sha: string, state: string, at: string) => await db.run(db.k.insertInto("main_ci").values({ repo: "o/r", head_sha: sha, branch: "main", state, failing: "[]", checks: "[]", committed_at: at, first_seen_at: at, state_changed_at: at, updated_at: at }));
   await ci("base", "red", "2026-11-01T00:00:00Z");
-  await ci("latest", "green", "2026-11-02T00:00:00Z");
+  // Newest by time, not by text: 2026-11-02T00:00Z written with an offset sorts before the red head's text.
+  await ci("latest", "green", "2026-11-01T20:00:00-04:00");
+  await ci("older", "red", "2026-11-01T23:00:00.000Z");
   const before = async () => (await db.get(db.k.selectFrom("push_outcomes").select("before_res").orderBy("id", "desc").limit(1)))!.before_res;
   await addPushOutcomes(db, [{ action: "implement-push", repo: "o/r", number: null, from: null, to: "c1", base: "base" }]);
   assert.equal(await before(), "green", "the new PR's run merges with the newest head");
