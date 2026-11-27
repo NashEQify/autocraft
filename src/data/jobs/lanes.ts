@@ -162,7 +162,7 @@ export async function claimMark(db: Db, name: string, nowMs: number, minGapMs: n
 export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number: number }[], since: string, steps: readonly string[]): Promise<LaneRun[]> {
   if (!refs.length || !steps.length) return [];
   const q = queryDb(db);
-  const rows = await q.all(q.k.selectFrom("jobs").select((eb) => ["repo", "step", "id", "state", "ended_at", numberOf(db).as("number")])
+  const rows = await q.all(q.k.selectFrom("jobs").select((_eb) => ["repo", "step", "id", "state", "ended_at", numberOf(db).as("number")])
     .where("requested_by", "=", PIPELINE_USER).where("ended_at", ">", since).where("state", "in", ["done", "failed"])
     .where((eb) => kx.inList(db, eb.ref("step"), steps)).where((eb) => kx.inList(db, eb.ref("repo"), [...new Set(refs.map((r) => r.repo))]))
     .where((eb) => {

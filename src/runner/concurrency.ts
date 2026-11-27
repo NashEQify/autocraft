@@ -75,7 +75,7 @@ export const noRunnerForTask = (repo: string, step: string): string => {
   return `No Task Runner takes ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} tasks on ${repo}`;
 };
 /** The reason a job waits when Task Runners take its repo and step's task, but none takes a call about any of its due items. */
-export const noRunnerForItems = (repo: string, step: string, refs: readonly ItemRef[]): string => {
+export const noRunnerForItems = (_repo: string, step: string, refs: readonly ItemRef[]): string => {
   const task = taskOfStep(step);
   return `No Task Runner takes ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} tasks on ${refs.map((r) => `${r.repo}#${r.number}`).join(", ")}`;
 };
