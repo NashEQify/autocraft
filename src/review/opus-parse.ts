@@ -63,6 +63,8 @@ export type OpusPr = {
   size: string;
   lines_changed: number;
   ci: string;
+  /** Present only when CI is red: the required checks that fail at the reviewed head. */
+  failing_checks?: string[];
   mergeable: string | null;
   files: string[];
   tests_omitted: string[];

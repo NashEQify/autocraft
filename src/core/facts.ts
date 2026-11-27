@@ -107,7 +107,7 @@ function currentHead(m: Mirrored): string | null {
 
 /** Whether the PR is a draft, or no longer open (`gone`, which `draft` includes), as the freshest of mirror and checks says. */
 /** The stored checks of a PR (JSON text or parsed) as a list; unreadable text is none. */
-function checkList(checks: string | { name: string; state: string }[] | null | undefined): { name: string; state: string }[] {
+export function checkList(checks: string | { name: string; state: string }[] | null | undefined): { name: string; state: string }[] {
   if (Array.isArray(checks)) return checks;
   try { const v = JSON.parse(checks ?? "[]") as unknown; return Array.isArray(v) ? (v as { name: string; state: string }[]) : []; } catch { return []; }
 }

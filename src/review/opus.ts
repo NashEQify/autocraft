@@ -33,7 +33,9 @@ import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { loadOwnDeltas, loadPatchFacts } from "../data/changes/index.ts";
-import { loadItems, loadRepos } from "../data/mirror/index.ts";
+import { loadChecks, loadItems, loadRepos } from "../data/mirror/index.ts";
+import { optionalChecksOf } from "../optional-checks.ts";
+import { checkList } from "../core/facts.ts";
 import { loadReviewRows, loadReviewTexts, saveReviews, type ReviewRow } from "../data/review/index.ts";
 import { mergeApprovedOf, ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundHeadOf } from "../core/author-round.ts";
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
@@ -44,6 +46,14 @@ import { fixesToMake } from "../core/review-blocking.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
 
 const PROMPT = CLAUDE_PROMPTS["review.opus"];
+/** The required checks that fail at `head` (the same list the CI fix reads: facts.ts requiredAt); none when the stored checks are of another head. */
+async function failingRequired(db: Db, repo: string, number: number, head: string): Promise<string[]> {
+  const row = (await loadChecks(db, [{ repo, number }])).get(`${repo}#${number}`);
+  if (row?.head_oid !== head) return [];
+  const optional = (await optionalChecksOf(db))(repo);
+  return checkList(row.checks).filter((x) => x.state === "failure" && !optional.includes(x.name)).map((x) => x.name);
+}
+
 export { MAX_DIFF_CHARS };
 export const TOO_LARGE = "too large to review automatically";
 
@@ -293,12 +303,13 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
     return { kind: "no-threads", error: String((e as Error).message ?? e) };
   }
   const mergeApproved = await mergeApprovedOf(db, c);
+  const failing = ch?.overall === "failure" ? await failingRequired(db, repo, c.number, c.head_oid) : [];
   const unapplied = await unappliedFixes(db, c, rows, workflows.get(ref)?.plan, mergeApproved);
   // Our own commits since the earlier reviewed head, for the reviewer to check against what was asked of them.
   const ours = earlier ? (await ourCommitsSince(db, repo, c.number, earlier.head, c.head_oid)).commits.map(({ from: _from, ...x }) => x) : [];
   const input: OpusPr = {
     ref: refOf(c), title: c.title, body: c.body, author_association: c.author_association, size: c.size, lines_changed: c.lines_changed,
-    ci: ch?.overall ?? "unknown", mergeable: ch?.mergeable ?? null, files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
+    ci: ch?.overall ?? "unknown", ...(failing.length ? { failing_checks: failing } : {}), mergeable: ch?.mergeable ?? null, files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
     mode, earlier_opus: mode === "delta" ? earlier : null, ...(unapplied.length ? { unapplied_fixes: unapplied } : {}),
     ...(accepted ? { author_commits: { approved_head: accepted, new_head: c.head_oid, ...(round ?? {}) } } : {}),
     ...(ours.length ? { pipeline_commits: ours } : {}), ...(mergeApproved ? { merge_approved: true } : {}), diff, discussion,
