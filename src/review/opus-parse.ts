@@ -356,13 +356,14 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
     sure = false;
     notes.push(parsed === null ? "the PR description's claims were not checked" : unknownClaim ? `claim ${unknownClaim.status}, impact unknown: ${unknownClaim.claim}`.slice(0, 300) : `${parsed.rejected} entries of the claims list were not read`);
   }
+  // A take that only code-incomplete fixes made a take-fix keeps the model's recommendation: those fixes do not block.
   // A hold the claims rule made is off-purpose; the model's own hold carries the class it gave, or none (blocking).
   const holdClass = outVerdict !== "hold" ? undefined : verdict === "hold" ? blockingOf(r.blocking) : CLAIM_BLOCKING;
   const hold = holdClass && (REFERENCE_LEAK.test(holdClass.why) || drop.has(holdClass.why)) ? { ...holdClass, why: "" } : holdClass;
   return { ref, verdict: outVerdict, sure, reason: words(outReason, OPUS_REASON_WORDS), fixes: outFixes, risks: [...risks, ...notes], workflow: parseReviewWorkflow(r, (n) => {
     const i = verdict === "take-fix" ? src.indexOf(n) : -1;
     return i < 0 || i + shift >= outFixes.length ? null : i + shift + 1;
-  }, outVerdict === verdict, hold), summary: summary.text, why: oneSentence(why.text), public: parsePublic(r.public, drop), conflicts: parseStatementConflicts(r.conflicts, known), claims: listed, blocked_by: outVerdict === "hold" ? parseBlockedBy(r.blocked_by, ref) : [] };
+  }, outVerdict === verdict || !bad.length, hold), summary: summary.text, why: oneSentence(why.text), public: parsePublic(r.public, drop), conflicts: parseStatementConflicts(r.conflicts, known), claims: listed, blocked_by: outVerdict === "hold" ? parseBlockedBy(r.blocked_by, ref) : [] };
 }
 
 /** The reply's reason before the word cut that the stored review applies. */

@@ -97,6 +97,8 @@ describe("model replies", () => {
     assert.deepEqual([r.verdict, r.sure, r.fixes.map((f) => f.blocking?.class)], ["take-fix", true, [null]]);
     assert.equal(verdictToAct(r.verdict, r.fixes, [], true), "take", "approved: filed as a follow-up, not made");
     assert.equal(verdictToAct(r.verdict, r.fixes, [], false), "take-fix", "not approved: made like any fix");
+    const rec = run({ claims: [{ ...part, fix: { file: "src/panel.rs", change: "queue the open" } }], recommendation: { text: "Merge it.", merge: true } });
+    assert.equal(rec.workflow?.recommendation?.merge, true, "the model's recommendation stays");
     const bare = run({ claims: [part] });
     assert.deepEqual([bare.verdict, bare.sure], ["take", true]);
   });
