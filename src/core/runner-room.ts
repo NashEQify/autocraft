@@ -14,7 +14,7 @@ import { TASK_CHOICES } from "../remote/my-tasks.ts";
 import type { Tier } from "../remote/protocol.ts";
 import { runnerTakes } from "../remote/rules.ts";
 import { startedOf } from "../remote/started.ts";
-import { runnerHoldOf, type RunnerHold } from "../remote/takers.ts";
+import { runnerHoldOf, waitingOnIn, type RunnerHold } from "../remote/takers.ts";
 import { canWriteOf, freshReady, loadView, runnerOf, settingsOf, takersIn, type RemoteView, type Runner } from "../remote/view.ts";
 import { CHAT_AUTHOR } from "../workflow/chat.ts";
 import { runnerLine } from "../workflow/status.ts";
@@ -24,10 +24,10 @@ import { RULE_STARTER } from "../workflow/types.ts";
  * Why no Task Runner can take the work now, the first that holds of: `tier`, a ready runner would take it but serves no model of its
  * tier; `held`, the other runners that would take it are held by their usage limit; `own-*`, the person has a runner credential and their
  * runners are offline, held by their usage limit, cooling off, not ready, or ready but may not take it (`own-denied`: role rules, write
- * permission); `repo`, other ready runners exclude its repo (My repos, write permission, item choices); `none`, no runner that takes work
- * by itself is ready.
+ * permission); `own-none`, work bound to the person (an implementation) and they have no runner credential; `repo`, other ready runners
+ * exclude its repo (My repos, write permission, item choices); `none`, no runner that takes work by itself is ready.
  */
-export type RunnerWhy = "own-off" | "own-held" | "own-cooling" | "own-not-ready" | "own-denied" | "held" | "tier" | "repo" | "none";
+export type RunnerWhy = "own-off" | "own-held" | "own-cooling" | "own-not-ready" | "own-denied" | "own-none" | "held" | "tier" | "repo" | "none";
 
 /** `own`: the person has a live Task Runner credential, connected or not. `until`: when a held runner is free again, when reported. */
 export type RunnerRoom =
@@ -39,7 +39,11 @@ export type RunnerRoom =
  * people of work already started on them count; `started`: that work is in the reading already, so other runners' item choices apply as
  * they stand. Before that the item counts as about to be started work: a runner whose user takes only their own items does not take it.
  */
-export type RoomAsk = { repo: string; login: string; tier?: Tier; step?: string; promptId?: string; refs?: readonly ItemRef[]; started?: boolean };
+export type RoomAsk = {
+  repo: string; login: string; tier?: Tier; step?: string; promptId?: string; refs?: readonly ItemRef[]; started?: boolean;
+  /** Work bound to `login` (an implementation, src/implement/session.ts): only their runners and those of people who took the item's work (started.ts boundTakers) count. */
+  bound?: true;
+};
 
 const OWN: Record<RunnerHold, RunnerWhy> = { offline: "own-off", "usage-limit": "own-held", "cooling-off": "own-cooling", "not-ready": "own-not-ready" };
 
@@ -48,6 +52,20 @@ export function runnerRoomIn(v: RemoteView, a: RoomAsk): RunnerRoom {
   const call = { prompt_id: a.promptId ?? "", repos: [a.repo], ...(a.step !== undefined && { step: a.step }), ...(a.refs && { refs: a.refs }) };
   const tiered = { ...call, ...(a.tier && { tier: a.tier }) };
   const own = v.snapshot.runners.some((r) => r.login.toLowerCase() === self);
+  const no = (why: RunnerWhy, until: number | null = null): RunnerRoom => ({ can: false, own, why, until: until === null ? null : new Date(until).toISOString(), ...(why === "tier" && a.tier && { tier: a.tier }) });
+  const ownWhy = (): RunnerRoom => {
+    // A fresh, ready runner of theirs that still cannot take it is kept off by the role rules or write permission.
+    if (v.snapshot.runners.some((r) => r.login.toLowerCase() === self && r.role !== null && freshReady(v.snapshot, r, v.now))) return no("own-denied");
+    const w = runnerHoldOf(v, self);
+    return no(OWN[w.hold], w.until);
+  };
+  if (a.bound) {
+    const took = a.refs?.length ? s.boundTakers({ prompt_id: call.prompt_id, refs: a.refs, forLogin: self, ...(a.tier && { tier: a.tier }) }) : new Set<string>();
+    const runs = [self, ...took];
+    if (runs.some((l) => s.canTake(l, tiered))) return { can: true, own };
+    if (runs.some((l) => s.canTake(l, call))) return no("tier");
+    return own ? ownWhy() : no("own-none");
+  }
   const people = new Set([self, ...(a.refs ? s.ownersFor(tiered) : [])]);
   if ([...people].some((l) => s.canTake(l, tiered))) return { can: true, own };
   const theirs = (r: Runner): boolean => !people.has(r.login.toLowerCase()) && !settingsOf(v.snapshot, r.login).manualOnly && !(a.step === undefined && r.skip.size >= TASK_CHOICES.length);
@@ -56,7 +74,6 @@ export function runnerRoomIn(v: RemoteView, a: RoomAsk): RunnerRoom {
   const ready = takersIn(v).filter(theirs);
   const forRepo = ready.filter(takes);
   if (forRepo.some(serves)) return { can: true, own };
-  const no = (why: RunnerWhy, until: number | null = null): RunnerRoom => ({ can: false, own, why, until: until === null ? null : new Date(until).toISOString(), ...(why === "tier" && a.tier && { tier: a.tier }) });
   if (forRepo.length || [...people].some((l) => s.canTake(l, call))) return no("tier");
   const held = v.snapshot.runners
     .filter((r) => r.role !== null && r.readiness === "quota-held" && r.reportedAt !== null && r.reportedAt >= v.now - STATUS_FRESH_MS)
@@ -65,12 +82,7 @@ export function runnerRoomIn(v: RemoteView, a: RoomAsk): RunnerRoom {
     const ends = held.flatMap((r) => (r.row.until !== null && Date.parse(r.row.until) > v.now ? [Date.parse(r.row.until)] : []));
     return no("held", ends.length ? Math.min(...ends) : null);
   }
-  if (own) {
-    // A fresh, ready runner of theirs that still cannot take it is kept off by the role rules or write permission.
-    if (v.snapshot.runners.some((r) => r.login.toLowerCase() === self && r.role !== null && freshReady(v.snapshot, r, v.now))) return no("own-denied");
-    const w = runnerHoldOf(v, self);
-    return no(OWN[w.hold], w.until);
-  }
+  if (own) return ownWhy();
   return no(ready.length ? "repo" : "none");
 }
 
@@ -86,13 +98,14 @@ export const connectUrl = (): string => `${envVar("BASE_URL")?.replace(/\/+$/, "
 const reasonOf = (room: Extract<RunnerRoom, { can: false }>): string => (room.why === "tier" ? `tier:${room.tier ?? ""}` : room.why);
 
 /** A stalled call as stallNotices reads it (the sweep's queued call). */
-export type StalledCall = { prompt_id: string; repos: readonly string[]; refs: readonly ItemRef[]; step: string; tier: Tier };
+export type StalledCall = { prompt_id: string; repos: readonly string[]; refs: readonly ItemRef[]; step: string; tier: Tier; /** The user a bound call (an implementation) runs for. */ forLogin: string | null };
 
 /**
  * For calls no Task Runner can take (src/remote/takers.ts sweepTakers), the Task Runner line (runnerLine) in the chat of each live workflow
- * the calls work for, about the person who approved it, else the one who started it, named by that role (others read it too): once per
- * workflow and reason, and not when the latest command on the item was answered with the same line. Work only the automatic merge rule
- * started tells nobody. Returns the number of notices written.
+ * the calls work for, named by their role in the work (others read it too): the person a bound call runs for; else the first of the people
+ * whose runners alone may take it, none of which can claim (src/remote/takers.ts waitingOnIn); else the person who approved the work, else
+ * the one who started it. Once per workflow and reason, and not when the latest command on the item was answered with the same line. Work
+ * only the automatic merge rule started tells nobody. Returns the number of notices written.
  */
 export async function stallNotices(db: Db, v: RemoteView, calls: readonly StalledCall[]): Promise<number> {
   const refs = [...new Map(calls.flatMap((c) => c.refs).map((r) => [`${r.repo}#${r.number}`, r])).values()];
@@ -110,14 +123,17 @@ export async function stallNotices(db: Db, v: RemoteView, calls: readonly Stalle
   const out: (NewChatMessage & { kind: "notice"; workflowId: number })[] = [];
   for (const [id, { wf, call }] of work) {
     const approver = wf.approvedBy && wf.approvedBy !== RULE_STARTER ? wf.approvedBy : null;
-    const person = approver ?? (wf.startedBy !== RULE_STARTER ? wf.startedBy : null);
-    if (!person) continue;
+    const starter = wf.startedBy !== RULE_STARTER ? wf.startedBy : null;
+    if (!approver && !starter) continue;
+    const person = call.forLogin ?? waitingOnIn(v, call)[0]?.login ?? approver ?? starter!;
+    const same = (l: string | null): boolean => l !== null && l.toLowerCase() === person.toLowerCase();
+    const whose = same(starter) ? "starter" : same(approver) ? "approver" : "taker";
     const repo = call.repos[0] ?? wf.repo;
-    const room = runnerRoomIn(v, { repo, login: person, tier: call.tier, step: call.step, promptId: call.prompt_id, refs: call.refs, started: true });
+    const room = runnerRoomIn(v, { repo, login: person, tier: call.tier, step: call.step, promptId: call.prompt_id, refs: call.refs, started: true, ...(call.forLogin && { bound: true as const }) });
     if (room.can) continue;
     const reason = reasonOf(room);
     if (sent.get(id)?.some((n) => n.reason === reason)) continue;
-    const line = runnerLine(room, repo, connect, undefined, approver ? "approver" : "starter");
+    const line = runnerLine(room, repo, connect, undefined, whose);
     const told = runnerLine(room, repo, connect);
     if (!line || (told && events.get(`${wf.repo}#${wf.number}`)?.at(-1)?.line?.includes(told))) continue;
     out.push({ repo: wf.repo, number: wf.number, author: CHAT_AUTHOR, via: "autocraft", kind: "notice", body: line, payload: { workflowId: id, reason }, workflowId: id });

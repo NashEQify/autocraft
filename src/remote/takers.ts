@@ -23,7 +23,7 @@ import { itemsFit, TASK_ITEMS, TASK_ITEMS_TITLE, type TaskItems } from "./task-i
 import type { ItemRef } from "../../web/src/api/types.ts";
 import { scaled } from "./time-scale.ts";
 import type { Db } from "../db/index.ts";
-import { loadSweepState, loadTakerSignature, loadUserSettings, pickerLoginsOf, saveTakerSweep, withdrawGoneCalls } from "../data/runners/index.ts";
+import { loadSweepState, loadTakerSignature, loadUserSettings, pickerLoginsOf, saveTakerSweep, takeableBound, withdrawGoneCalls } from "../data/runners/index.ts";
 import { canWriteOf, itemFilterIn, loadView, settingsOf, takersIn, type RemoteView, type Runner } from "./view.ts";
 import { itemFilterOf } from "./task-items.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
@@ -238,9 +238,12 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now(), o: { stall
   const withdrawn = await saveTakerSweep(db, plan, nowMs);
   if (o.stalled) {
     const cleared = new Set(plan.clear), marking = new Set(plan.mark);
-    // Without a taker; or started work past its owners' hold that waits for their runners, none of which can claim it (waitingOnIn).
-    const stalled = orderedOf(st.queue, nowMs).all.filter((c) => c.forLogin === null && c.parent_id === null && c.seen_at >= nowMs - CALLER_STALE_MS && (
-      (!cleared.has(c.id) && (st.marked.has(c.id) || marking.has(c.id))) || (c.since < nowMs - STARTED_HOLD_MS && waitingOnIn(v, c).length > 0)));
+    // Without a taker (a bound call only when it is an item workflow's implementation, whose people are told); or started work past its
+    // owners' hold that waits for their runners, none of which can claim it (waitingOnIn).
+    const untaken = (c: Cand): boolean => !cleared.has(c.id) && (st.marked.has(c.id) || marking.has(c.id));
+    const stalled = orderedOf(st.queue, nowMs).all.filter((c) => c.parent_id === null && c.seen_at >= nowMs - CALLER_STALE_MS && (c.forLogin !== null
+      ? takeableBound(c.prompt_id) && untaken(c)
+      : untaken(c) || (c.since < nowMs - STARTED_HOLD_MS && waitingOnIn(v, c).length > 0)));
     if (stalled.length) await o.stalled(v, stalled);
   }
   return gone + withdrawn;
@@ -248,7 +251,7 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now(), o: { stall
 
 /**
  * What the sweep hands on: queued calls with a live caller that have no taker (marked or withdrawn this pass, or marked before), and calls
- * of started work queued longer than STARTED_HOLD_MS that wait only for their people's runners, none of which can claim now. Bound calls
- * and follow-ups are left out.
+ * of started work queued longer than STARTED_HOLD_MS that wait only for their people's runners, none of which can claim now. Of the bound
+ * calls only an item workflow's implementation calls with no taker; follow-ups are left out.
  */
 export type StalledHook = (v: RemoteView, calls: readonly Cand[]) => Promise<void>;

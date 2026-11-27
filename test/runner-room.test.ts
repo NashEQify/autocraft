@@ -55,6 +55,11 @@ test("a person's command finds whether a Task Runner can take its repo and tier 
   assert.deepEqual(runnerRoomIn(denied, ask), { can: false, own: true, why: "own-denied", until: null });
   assert.deepEqual(runnerRoomIn(view([row(3, "mira", { reportedAt: NOW - 3_600_000 })]), ask), { can: false, own: true, why: "own-off", until: null });
 
+  // An implementation runs only on the person's own runner: someone else's ready runner does not help.
+  const implement = { ...ask, bound: true as const, promptId: "implement.session" };
+  assert.deepEqual(runnerRoomIn(view([row(1, "ana"), row(3, "mira", { reportedAt: NOW - 3_600_000 })]), implement), { can: false, own: true, why: "own-off", until: null });
+  assert.deepEqual(runnerRoomIn(view([row(1, "ana")]), implement), { can: false, own: false, why: "own-none", until: null });
+
   // Someone else's ready runner takes it, though the person has none of their own; their own takes it outside their My repos.
   assert.deepEqual(runnerRoomIn(view([row(1, "ana")]), ask), { can: true, own: false });
   assert.deepEqual(runnerRoomIn(view([row(3, "mira", { idleRepos: ["other"] })], { mira: { repos: ["other"] } }), ask), { can: true, own: true });
@@ -71,12 +76,14 @@ test("the sweep tells the person whose started work waits for their offline or h
       storeStatus(db, token, "mira", parseStatus({ slots: 1, busy: 0, readiness, ...(until && { until }), harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }), at);
     await report("ready", t0);
     await startWorkflows(db, [
-      { repo: "photocraft", number: 7, kind: "pr", entry: "review", weight: 5, startedBy: "mira", startedVia: "discord" },
+      { repo: "photocraft", number: 7, kind: "pr", entry: "review", weight: 5, startedBy: "mira", startedVia: "discord", approvedBy: "olu", approvedVia: "github" },
+      { repo: "photocraft", number: 9, kind: "issue", entry: "implement", weight: 5, startedBy: "mira", startedVia: "discord" },
       { repo: "photocraft", number: 8, kind: "pr", entry: "merge", weight: 5, startedBy: RULE_STARTER, startedVia: "github" },
     ]);
-    const enqueue = (number: number) => enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", items: [{ repo: "photocraft", number }], level: 0, maxAttempts: 1,
-      bundle: { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } }, t0);
-    const ids = [await enqueue(7), await enqueue(8)];
+    const enqueue = (number: number, promptId = "review.opus", forLogin?: string) => enqueueCall(db, { promptId, promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", items: [{ repo: "photocraft", number }], level: 0, maxAttempts: 1, ...(forLogin && { forLogin }),
+      bundle: { promptId, promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } }, t0);
+    // An implementation's call is bound to the person who started it.
+    const ids = [await enqueue(7), await enqueue(8), await enqueue(9, "implement.session", "mira")];
     const sweep = async (at: number) => {
       await db.run(db.k.updateTable("remote_calls").set({ seen_at: at }).where("id", "in", ids));
       await sweepTakers(db, at, { stalled: async (v, calls) => { await stallNotices(db, v, calls); } });
@@ -88,13 +95,15 @@ test("the sweep tells the person whose started work waits for their offline or h
 
     // Within the hold the work waits for mira's runner without a word.
     await sweep(t0 + 1000);
-    assert.deepEqual(await notices(7), []);
-    // Past the hold her runner has gone quiet: one notice, naming her role, and not again on the next pass.
+    assert.deepEqual([...await notices(7), ...await notices(9)], []);
+    // Past the hold her runner has gone quiet: one notice about her runner, though the approver has none, naming her role, and not again
+    // on the next pass. The implementation bound to her says the same.
     const t1 = t0 + STARTED_HOLD_MS + STATUS_FRESH_MS + 1000;
     await sweep(t1);
     await sweep(t1 + 60_000);
     assert.deepEqual(await notices(7), ["No Task Runner can take this right now (the starter's Task Runner is not connected). It starts when one is free."]);
     assert.deepEqual(await notices(8), [], "the automatic rule's work tells nobody");
+    assert.deepEqual(await notices(9), ["No Task Runner can take this right now (the starter's Task Runner is not connected). It starts when one is free."]);
     // It comes back held by its usage limit: a different reason, one more notice.
     await report("quota-held", t1 + 120_000, new Date(t1 + 3_600_000).toISOString());
     await sweep(t1 + 120_000);

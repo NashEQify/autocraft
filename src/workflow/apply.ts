@@ -337,7 +337,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
 
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}), ...(input.keepBatch ? { keepBatch: true } : {}) };
   try {
-    const runners = via === "cli" || login === RULE_STARTER || !needsRunner(r.run) ? null : await runnerNotice(db, on, login, input.clock);
+    const runners = via === "cli" || login === RULE_STARTER || !needsRunner(r.run) ? null : await runnerNotice(db, on, login, r.run.start === "implement" || r.run.implements, input.clock);
     // A close names the item it was written on; a yes to a recommended close is the issue's, as it would be there.
     const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
@@ -417,10 +417,17 @@ const needsRunner = (r: Run): boolean =>
 /** The tier of the workflow's model steps (review, fix-up, implement), which run on Opus. */
 const WORKFLOW_TIER: Tier = "top";
 
-/** The Task Runner line for work `login` started or approved on an item (runnerLine); null when there is nothing to say or the runners could not be read. */
-async function runnerNotice(db: Db, item: { repo: string; number: number }, login: string, clock: Clock = utcClock): Promise<string | null> {
+/** The prompt of an implementation's calls, which are bound to the person who started it (src/implement/session.ts). */
+const IMPLEMENT_PROMPT = "implement.session";
+
+/**
+ * The Task Runner line for work `login` started or approved on an item (runnerLine); null when there is nothing to say or the runners could
+ * not be read. `implementing`: the work begins with an implementation, which runs only on the person's own runners or a taker's.
+ */
+async function runnerNotice(db: Db, item: { repo: string; number: number }, login: string, implementing: boolean, clock: Clock = utcClock): Promise<string | null> {
   try {
-    return runnerLine(await loadRunnerRoom(db, { repo: item.repo, login, tier: WORKFLOW_TIER, refs: [{ repo: item.repo, number: item.number }] }), item.repo, connectUrl(), clock);
+    const ask = { repo: item.repo, login, tier: WORKFLOW_TIER, refs: [{ repo: item.repo, number: item.number }], ...(implementing && { bound: true as const, promptId: IMPLEMENT_PROMPT }) };
+    return runnerLine(await loadRunnerRoom(db, ask), item.repo, connectUrl(), clock);
   } catch {
     return null;
   }
