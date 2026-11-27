@@ -1062,6 +1062,30 @@ export const STEPS: StepDef[] = [
       return `${r.repo}: queued ${r.queued}, skipped ${r.skipped}, collected ${r.collected}`;
     },
   },
+  {
+    name: "eval",
+    title: "Self-evaluation",
+    description: "Looks for stalls, loops, repeated failures and cost outliers in AutoCraft's own records, groups them by cause, and has Opus investigate each new or grown cause in the eval repo's code. Each real defect becomes one issue on the eval repo (setting eval_repo), new evidence a comment on it at most once a day. Runs once an hour while the setting is set; implements nothing.",
+    stage: runStage("eval"),
+    requires: "operator",
+    models: ["opus"],
+    params: [{ name: "repo", label: "Repo", kind: "repo", required: true, help: "the eval repo (setting eval_repo)" }],
+    check: async (db, p) => {
+      const { evalRepo } = await import("../eval/schedule.ts");
+      return await evalRepo(db) === String(p.repo) ? null : `${p.repo} is not the eval repo (autocraft-server eval repo <name>)`;
+    },
+    run: async (ctx) => {
+      const { runEval } = await import("../eval/run.ts");
+      const r = await runEval(ctx.db, { repo: String(ctx.params.repo), by: byOfJob(ctx.job.requestedBy), onHandled: ctx.handled, stopping: ctx.stopping }, ctx.log);
+      if (r.note) throw new Error(r.note);
+      ctx.usageRun(r.runId);
+      const f = r.filing;
+      ctx.acted(r.added + (f ? f.filed.length + f.commented.length + f.declined : 0));
+      const line = `${r.groups} candidate groups, ${r.added} new pieces of evidence, ${r.investigated} investigated (${r.defects} real defects), ${r.waiting} waiting; ${f ? `${f.filed.length} issues filed, ${f.commented.length} comments${f.note ? ` (${f.note})` : ""}` : "nothing filed"}`;
+      if (f?.later) throw new Error(`${f.later}; ${line}`);
+      return line;
+    },
+  },
 ];
 
 let loaded: Promise<Map<string, StepDef>> | null = null;

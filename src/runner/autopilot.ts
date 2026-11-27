@@ -38,6 +38,7 @@ import { isWork } from "../core/assignment.ts";
 import { collectDue } from "../verify/results.ts";
 import { featureRepos } from "../build/features.ts";
 import { nightlyRepos } from "../nightly/index.ts";
+import { EVAL_EVERY_MS, evalRepo } from "../eval/schedule.ts";
 import { prBuildsDue } from "../prbuild/index.ts";
 import { actLimit, actUsedToday } from "../conversations/usage.ts";
 import { queueHead } from "../conversations/queue.ts";
@@ -61,7 +62,7 @@ import { refreshOutsideHolds } from "../outside.ts";
 import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadTrips, readSettingsSnapshot, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withSettingsSnapshot, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
 import { prLease } from "../prepush/settle.ts";
-import { enqueueJobs, itemFpStep, loadDeadlineStops, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, markCancelQueued, pruneItemFps, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
+import { enqueueJobs, itemFpStep, loadLastJobPerStep, loadDeadlineStops, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, markCancelQueued, pruneItemFps, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
 import { loadTakerSignature } from "../data/runners/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
@@ -882,6 +883,21 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => ((await featureRepos(db, "nightly")).length ? String(Math.floor(Date.now() / 3_600_000)) : ""),
     detect: async (db, { tracked }) => (await nightlyRepos(db, tracked)).map((repo) => ({ step: "nightly", params: { repo } })),
   },
+  {
+    // The hourly self-evaluation of AutoCraft's own records, while the setting eval_repo names a tracked repo (also one whose Pipeline switch is off).
+    name: "eval",
+    topics: [],
+    // The hour moves with the clock, not with a change in the data.
+    extra: async (db) => ((await evalRepo(db)) ? String(Math.floor(Date.now() / 300_000)) : ""),
+    detect: async (db, ctx) => {
+      const repo = await evalRepo(db);
+      if (!repo) return [];
+      const last = (await loadLastJobPerStep(db, ["eval"])).get("eval");
+      const due = last ? Date.parse(last.requested_at) + EVAL_EVERY_MS : 0;
+      if (due > Date.now()) { ctx.wake?.push(due); return []; }
+      return [{ step: "eval", params: { repo } }];
+    },
+  },
 ];
 
 export const LANES: Lane[] = buildLanes(LANE_CODE);
@@ -1505,7 +1521,7 @@ export const LANE_KINDS: Record<string, ActionKind[]> = {
 };
 
 /** Lanes whose jobs are not about listed items (counters, collection, operator messages, per-repo scans); every other lane needs a LANE_KINDS entry. */
-export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversation", "conversation-maintainer", "postmerge", "postmerge-file", "main-fix", "cifix-rerun", "nightly", "pr-status"];
+export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversation", "conversation-maintainer", "postmerge", "postmerge-file", "main-fix", "cifix-rerun", "nightly", "eval", "pr-status"];
 
 export type LaneItem = {
   repo: string; number: number; kind: "pr" | "issue"; action: string; bucket: string | null;

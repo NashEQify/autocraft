@@ -40,6 +40,8 @@ export const GITHUB_ACTIONS: Record<string, string> = {
   "cifix-comment": "Commented",
   "autorepin-push": "Pushed",
   "postmerge-file": "Opened issue",
+  "eval-issue": "Opened issue",
+  "eval-comment": "Commented",
   "act-open-issue": "Opened issue",
   "premerge-followup": "Filed follow-ups",
   "discord-issue-open": "Opened issue",

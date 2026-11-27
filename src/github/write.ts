@@ -759,14 +759,14 @@ function issueFailed(r: ExecResult): IssueError {
  * Opens an issue; returns its number and URL. Throws an IssueError when `gh` fails or prints no issue URL; `clear` tells
  * whether the failure certainly left no issue behind. `target` is the item the issue follows up.
  */
-export async function createIssue(w: Writer, g: Grant | Guarded<"followups">, exec: Exec, o: { repo: string; target: string; title: string; body: string; /** The audit action; the post-merge step's by default. */ action?: string }, note: Note, details: Details = {}): Promise<{ number: number; url: string }> {
+export async function createIssue(w: Writer, g: Grant | Guarded<"followups">, exec: Exec, o: { repo: string; target: string; title: string; body: string; /** The audit action; the post-merge step's by default. */ action?: string; /** Labels the issue gets; each must exist in the repo (ensureLabel). */ labels?: string[] }, note: Note, details: Details = {}): Promise<{ number: number; url: string }> {
   covers(g, o.repo);
   const body = posted(note, o.body);
   let r: ExecResult;
   try {
     const run = await laneExec(w, g, exec);
     r = await viaGh(w, idOf(w, g), run, o.action ?? "postmerge-file", o.target, { ...details, title: scrub(o.title), text: body },
-      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body,
+      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), ...(o.labels ?? []).flatMap((l) => ["--label", l]), "--body-file", "-"], body,
       { key: onceKey(o.repo, scrub(o.title), body), find: async (since, taken) => { const made = await issueMade(ghRead(run), { repo: o.repo, title: scrub(o.title), body, since, mine: await byUs(w.db), taken }); return made === null ? null : { url: made.url }; } });
   } catch (e) {
     throw issueErrorOf(e);
@@ -775,6 +775,15 @@ export async function createIssue(w: Writer, g: Grant | Guarded<"followups">, ex
   if (r.code !== 0) throw issueFailed(r);
   if (!url) throw new IssueError(oneLine(r.stderr || r.stdout) || "gh printed no issue URL", false);
   return { number: Number(url[1]), url: url[0] };
+}
+
+/** Creates a label in the repo, or updates its colour and description when it exists (`gh label create --force`); audited as `label-create`. Throws when gh fails. */
+export async function ensureLabel(w: Writer, g: GuardedRepo, exec: Exec, o: { repo: string; name: string; color: string; description: string }): Promise<void> {
+  covers(g, o.repo);
+  const run = await laneExec(w, g, exec);
+  const r = await viaGh(w, idOf(w, g), run, "label-create", o.repo, { name: o.name },
+    ["label", "create", o.name, "--repo", `${slugOf(o.repo)}`, "--color", o.color, "--description", o.description, "--force"]);
+  if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
 }
 
 /** `found`: an earlier press made the issue and lost its answer; when that press's write began. */

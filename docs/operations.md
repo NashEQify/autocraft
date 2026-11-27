@@ -578,6 +578,22 @@ To run it as a systemd user service, fill in the placeholders of `deploy/craft-r
 
 From a shell: `autocraft-server pipeline on [--if-draining]|off|drain|status` flips the switch and `pipeline limit <step> --per-day N|none` sets a stage's daily limit (both recorded as `cli`). `autocraft-server runner steps` lists steps and their params, `runner enqueue <step> [--<param> <value> ...]` queues a job by hand for debugging (recorded as `cli`), `runner jobs [--state S]` lists jobs, `runner cancel <id>` cancels one.
 
+### Self-evaluation
+
+The hourly self-evaluation (step `eval`, [docs/pipeline.md](docs/pipeline.md#self-evaluation)) is off until an operator names the repo it reads and files on, normally the AutoCraft repository itself:
+
+1. Track the repo (`autocraft-server repos track <name>`, or the Repos page). Its Pipeline switch may stay off: the evaluation reads and files whatever the switch says, but the global pipeline switch must be On.
+2. Make sure a Task Runner takes the repo (its user's My repos include it) and the Opus tier, so the investigation calls have a taker.
+3. `autocraft-server eval repo <name>` stores the instance setting `eval_repo` (audited as `eval-repo`); `autocraft-server eval repo` shows it, `--clear` switches the evaluation off.
+
+From then on the runner queues one `eval` job an hour. What it posts on that repo, as the instance's GitHub identity:
+
+- the label `autocraft-eval` (created or updated before the first issue of a job);
+- one issue per cause the investigation found a real defect, with the label: the detector's rule, severity, cause key and counts, the cause and its path:line evidence in the repo's code, the records by kind, id and time (an item named only when its repo is public), and the proposed fix. Audited as `eval-issue`;
+- at most one comment a day on an open eval issue whose cause has new evidence, audited as `eval-comment`.
+
+Nothing else: no logins, e-mail addresses, host names, dashboard links or private repository names appear in the text (a last pass replaces known logins with role words and takes the rest out), and nothing is implemented until a maintainer gives the issue a command. `autocraft-server eval run` runs one evaluation at once; `autocraft-server eval run --dry` shows what a run would find and file without saving, posting or calling a model (`--investigate` makes the investigation calls, `--text` prints the drafted text); `autocraft-server eval status` lists the causes and their issues.
+
 ### Build environments and the worker API
 
 The runner also serves the worker API on its own listener, for workers that run untrusted code (concept and trust rules: [docs/pipeline.md](docs/pipeline.md#build-environments-and-tasks)). It is separate from the dashboard; expose it to remote workers only behind TLS (for example a tailnet-only proxy).
