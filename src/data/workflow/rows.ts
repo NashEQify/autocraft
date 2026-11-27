@@ -10,7 +10,7 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
 import { weightOfScore } from "../../core/work-score.ts";
-import { goOnAt, isGoOn, linkRows, LIVE_LINKS, LIVE_STATES, notArchived, prIssueWorkflows, seenAt, withLiveLinks, workScore } from "./fragments.ts";
+import { endedByMerge, goOnAt, isGoOn, linkRows, LIVE_LINKS, LIVE_STATES, MERGED_WORK_MS, notArchived, prIssueWorkflows, seenAt, withLiveLinks, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
 import { patchRows } from "./update.ts";
 import { loadChatBefore, patchTalks, recordWorkflowMessages, retitleConversations } from "../chat/workflow.ts";
@@ -522,17 +522,25 @@ export async function loadStartedRefs(db: Db, f: StartedFilter = {}): Promise<Se
   return out;
 }
 
-/** The Task Runner snapshot's input: live workflows and the PRs live implement workflows work on; two result sets in one wave. */
-export async function loadStartedWork(db: Db): Promise<StartedWork> {
+/**
+ * The Task Runner snapshot's input: live workflows, the PRs live implement workflows work on, and the merged PRs of workflows that ended
+ * done through that merge within MERGED_WORK_MS of `now` (endedByMerge); three result sets in one wave.
+ */
+export async function loadStartedWork(db: Db, now: number = Date.now()): Promise<StartedWork> {
   const q = queryDb(db);
   const k = q.k as any;
-  const [live, prs] = await db.together(() => Promise.all([
+  const since = new Date(now - MERGED_WORK_MS).toISOString();
+  const [live, prs, merged] = await db.together(() => Promise.all([
     q.all(k.selectFrom("main.item_workflows as w").select(["w.repo", "w.number", "w.entry", "w.state", "w.started_by", "w.approved_by"]).where("w.state", "in", LIVE_STATES).orderBy("w.id")),
     q.all(k.selectFrom(linkRows(db, LIVE_STATES).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select(["l.repo as repo", "l.pr as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).orderBy("w.id")),
-  ])) as [{ repo: string; number: number; entry: Entry; state: WorkflowState; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[]];
+    q.all(k.selectFrom("main.item_workflows as w").innerJoin("main.items as m", (j: any) => j.onRef("m.repo", "=", "w.repo").on((x: any) => x.or([x("m.number", "=", x.ref("w.number")), x("m.number", "=", x.ref("w.pr_number"))])))
+      .select(["m.repo as repo", "m.number as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).where("w.state", "=", "done").where("w.updated_at", ">=", since)
+      .where((eb: any) => endedByMerge(eb, "w", "m.repo", "m.number", since)).orderBy("w.id")),
+  ])) as [{ repo: string; number: number; entry: Entry; state: WorkflowState; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[]];
   return {
     live: live.map((r) => ({ repo: r.repo, number: Number(r.number), entry: r.entry, state: r.state, startedBy: r.started_by, approvedBy: r.approved_by })),
     prs: prs.map((r) => ({ repo: r.repo, pr: Number(r.pr), startedBy: r.started_by, approvedBy: r.approved_by })),
+    merged: merged.map((r) => ({ repo: r.repo, pr: Number(r.pr), startedBy: r.started_by, approvedBy: r.approved_by })),
   };
 }
 

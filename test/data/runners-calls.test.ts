@@ -9,7 +9,9 @@ import { TEST_PG_URL, testDatabase, type TestDatabase } from "../test-db.ts";
 import { enqueueCalls, setCallLevels, withdrawCalls, withdrawItemCalls } from "../../src/data/runners/calls-queue.ts";
 import { loadCallPolls, loadCalls, loadLeaseTurnover, loadRemoteQueueStates } from "../../src/data/runners/calls-read.ts";
 import { expireLeases, loadLeaseState } from "../../src/data/runners/calls-expiry.ts";
-import { failLease, releaseLease, submitLease } from "../../src/data/runners/calls-submit.ts";
+import { discardGoneLease, failLease, releaseLease, submitLease } from "../../src/data/runners/calls-submit.ts";
+import { ITEM_WITHDRAWN_PREFIX } from "../../src/data/runners/calls-shared.ts";
+import { applyLocal } from "../../src/data/mirror/local.ts";
 import { heartbeatLease, loadLiveLease } from "../../src/data/runners/cross.ts";
 import { loadClaimFacts, loadLeaseSource } from "../../src/data/runners/calls-claim.ts";
 import { loadQueueFor } from "../../src/data/runners/calls-queue-load.ts";
@@ -148,6 +150,36 @@ for (const dialect of dialects) {
       assert.equal(Number((await q.get(q.k.selectFrom("main.remote_calls").select("level").where("id", "=", ids[2]!)))!.level), 3);
       assert.deepEqual([...(await loadRemoteQueueStates(db, [1], late)).keys()], []);
       assert.equal((await loadLeaseTurnover(db, ["USER1"])).get("user1"), "0:");
+    } finally { await t.close(); }
+  });
+
+  test(`a call whose items all merged or closed is withdrawn, never leased, and a result for it is discarded; a post-merge review still runs (${dialect})`, async () => {
+    const { t, db } = await fresh(dialect);
+    try {
+      const [a] = await runners(db, 1);
+      const q = queryDb(db);
+      await q.run(q.k.insertInto("main.items").values([1, 2, 3].map((number) => ({ repo: "app", number, kind: "pr", state: "OPEN" }))));
+      const postmerge = (n: number) => call(n, { promptId: "postmerge.opus", job: { jobId: null, step: "postmerge", stage: 0, cls: 0, repo: "app" } });
+      const [queued, running, review] = await enqueueCalls(db, [call(1), call(2), call(3)], NOW);
+      const lease = async (id: number) => await leaseCall(db, { id, caller: { ...a!, role: "maintainer" }, claim: { harness: "claude", harnessVersion: "1" }, model: "m", now: NOW, caps: { perLogin: null, interactive: null },
+        started: false, clearIdle: false, source: (await loadLeaseSource(db, id))!, prompt: packPrompt("p", (x) => x), rewrite: null, live: () => true });
+      const leased = await lease(running!);
+      assert.ok(typeof leased === "object" && leased !== null);
+      await applyLocal(db, [{ kind: "state", repo: "app", number: 1, state: "CLOSED" }, { kind: "merged", repo: "app", number: 2, at: "2026-11-27T04:56:00Z" }]);
+      const after = await loadCalls(db, [queued!, running!, review!]);
+      assert.equal(after.get(queued!)!.state, "failed");
+      assert.ok(after.get(queued!)!.error!.startsWith(ITEM_WITHDRAWN_PREFIX), "the job awaiting it skips the item");
+      assert.equal(after.get(running!)!.state, "leased", "a running call finishes");
+      assert.equal(after.get(review!)!.state, "queued", "a call on an open item stays");
+      // The running call's reply comes back after the merge: accepted, and nothing applies it.
+      assert.equal(await discardGoneLease(db, (await loadLiveLease(db, leased.secret, NOW))!, { usage: null, duration: 1 }, NOW), true);
+      assert.ok((await loadCalls(db, [running!])).get(running!)!.error!.startsWith(ITEM_WITHDRAWN_PREFIX));
+      assert.equal(await discardGoneLease(db, (await loadLiveLease(db, (await lease(review!) as { secret: string }).secret, NOW))!, { usage: null, duration: 1 }, NOW), false, "an open item's result is kept");
+      // A call queued for a merged item is not leased; its post-merge review is.
+      const [late, pm] = await enqueueCalls(db, [call(2, { bundle: { stdin: "y", timeoutSeconds: 60, mcpServers: [], hints: {} } as unknown as NewCall["bundle"] }), postmerge(2)], NOW);
+      assert.equal(await lease(late!), null);
+      assert.equal((await loadCalls(db, [late!])).get(late!)!.state, "queued", "refused for its item, not taken");
+      assert.ok(typeof await lease(pm!) === "object");
     } finally { await t.close(); }
   });
 }

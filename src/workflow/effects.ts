@@ -8,7 +8,7 @@ import { resumeStage, setPipelineFlags } from "../data/control/index.ts";
 import { cancelUnopened } from "../data/implement/index.ts";
 import { releaseHeld } from "../data/intake/index.ts";
 import { loadChecks, loadItems, loadRepoCiSignals, loadRepos } from "../data/mirror/index.ts";
-import { withdrawItemCalls } from "../data/runners/index.ts";
+import { withdrawItemCalls, withdrawUnownedItemCalls } from "../data/runners/index.ts";
 import { adoptLegs, endFixupRequests, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadLegs, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -23,7 +23,7 @@ import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIO
 import { parseBranch, parsePrRef } from "../repin/manifest.ts";
 import { requestRepin } from "../repin/index.ts";
 import { markReviewsStale } from "../review/discussion.ts";
-import type { ItemKind, ItemWorkflow, PlanPart, Surface } from "./types.ts";
+import { RULE_STARTER, type ItemKind, type ItemWorkflow, type PlanPart, type Surface } from "./types.ts";
 
 /** A legacy step refused the command; its message says why, translated (`effectText`). */
 export class EffectError extends Error {}
@@ -270,6 +270,18 @@ export async function stopAll(c: Ctx): Promise<string[]> {
   }
   await withdrawItemCalls(db, ref(item), why);
   return failed;
+}
+
+/** The steps with an approved lane (src/runner/steps.ts hasApprovedLane): their jobs outside that lane are the automatic path's work on a PR. */
+const LANE_STEPS = ["opus-review", "premerge", "fixup", "cifix"] as const;
+
+/**
+ * A person started or approved work on the item: the automatic path's queued calls for it alone are withdrawn, as the person's lane works it
+ * from now on. A leased call finishes, and its result applies.
+ */
+export async function takeOver(c: Pick<Ctx, "db" | "by">, item: { repo: string; number: number }): Promise<void> {
+  if (c.by === RULE_STARTER) return;
+  await withdrawUnownedItemCalls(c.db, { ref: ref(item), steps: LANE_STEPS, reason: `a workflow ${c.by} started or approved works it` });
 }
 
 /** Cancels the PR's merge leg, out of its batch first. The pre-approval pass may have ended it a moment ago, with its workflow. */

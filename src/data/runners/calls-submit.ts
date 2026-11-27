@@ -3,7 +3,8 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { finishRuns, saveTools, setReportedModel } from "../inference/index.ts";
 import { noteFailure, noteSuccess } from "./cooloffs.ts";
-import { REFUSED_PREFIX, dropQueueCache, sha256hex } from "./calls-shared.ts";
+import { ITEM_WITHDRAWN_PREFIX, REFUSED_PREFIX, dropQueueCache, sha256hex } from "./calls-shared.ts";
+import { itemsGoneExpr } from "./cross.ts";
 import { bury, requeue, unlease } from "./calls-unlease.ts";
 import type { LiveLease, ParsedSubmit, RefusalRetry, SubmitResult } from "./types.ts";
 
@@ -98,6 +99,27 @@ export async function returnLease(db: Db, lease: LiveLease, reason: string, a: {
   return await db.write(async () => {
     if (!(await unlease(db, { id: lease.id, runId: null, hash: lease.secretHash }, reason, now))) return false;
     if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", error: reason, summary: "returned to the queue", ...(a.usage && { tokens: a.usage }), ...(a.output && { output: a.output }) }]);
+    return true;
+  });
+}
+
+/**
+ * Ends a lease whose call's items all merged or closed since it was leased (itemsGoneExpr), whatever the helper sent: the call fails with an
+ * ITEM_WITHDRAWN_PREFIX error, so its job skips the item, and nothing of the result is applied, asked again or counted against the login. The
+ * run keeps the tokens the attempt used. One compare-and-set, tombstone and run finish in one transaction; false when the lease is not the one
+ * named or an item is still open.
+ */
+export async function discardGoneLease(db: Db, lease: LiveLease, a: { usage: Tokens | null; duration: number }, now: number): Promise<boolean> {
+  const q = queryDb(db);
+  const reason = `${ITEM_WITHDRAWN_PREFIX}every item it names was merged or closed while it ran; its result was discarded`;
+  return await db.write(async () => {
+    const up = await q.run(q.k.updateTable("main.remote_calls").set({ state: "failed", error: reason, ended_at: now, progress: null, usage: a.usage ? JSON.stringify(a.usage) : null, duration_ms: a.duration })
+      .where("id", "=", lease.id).where("state", "=", "leased").where("lease_secret_hash", "=", lease.secretHash)
+      .where((eb) => itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login" })));
+    if (Number(up.changes) !== 1) return false;
+    await bury(db, [{ id: lease.id, hash: lease.secretHash }], now);
+    if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", error: reason, summary: "result discarded", ...(a.usage && { tokens: a.usage }) }]);
+    dropQueueCache(db);
     return true;
   });
 }

@@ -6,15 +6,21 @@
 // token whose model did not decline it), other users' runners pass the call over, for at most STARTED_HOLD_MS from its
 // queueing (calls.ts claimOrder, takers.ts sweepTakers). Then, or when no owner can take it, any runner takes it under all
 // its own limits. For the taker rule (takers.ts) an owner's runner counts connected or not, ready or not: the work waits for
-// it rather than being reported as having no taker. Registered as a wait in src/stages/registry.ts.
+// it rather than being reported as having no taker. Registered as a wait in src/stages/registry.ts. A post-merge review call
+// on a merged PR is such work too: of the starter and approver of the workflow that ended done through that merge, for
+// MERGED_WORK_MS after its last write (src/data/workflow/fragments.ts endedByMerge, which the lease's condition reads too).
 import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
 import type { Entry } from "../workflow/types.ts";
 import { judges, roleFits } from "./rules.ts";
 import { taskOfStep } from "./my-tasks.ts";
 import type { Tier } from "./protocol.ts";
+import { POSTMERGE_PROMPTS } from "../data/runners/index.ts";
 import { scaled } from "./time-scale.ts";
 import { canWriteOf, freshReady, loadView, tiersOf, type RemoteView } from "./view.ts";
+
+/** The step of post-merge reviews: a call of it on a merged PR is work of the workflow that merged it (StartedCalls.owners). */
+const POSTMERGE_STEP = "postmerge";
 
 /** How long other users' runners pass a started call over for its owner, from its queueing. */
 export const STARTED_HOLD_MS = scaled(10 * 60_000);
@@ -30,8 +36,11 @@ const ENTRY_TASKS: Record<Entry, ReadonlySet<string>> = {
 const WORKING = new Set(["running", "waiting"]);
 
 export type StartedCalls = {
-  /** The lowercase logins whose call one with these items is: those that started or approved work on every one of them. */
-  owners: (refs: readonly ItemRef[]) => ReadonlySet<string>;
+  /**
+   * The lowercase logins whose call one with these items is: those that started or approved work on every one of them. For a post-merge
+   * review call (`promptId` postmerge.*), a merged PR's workflow that ended done through that merge lately counts as such work.
+   */
+  owners: (refs: readonly ItemRef[], promptId?: string) => ReadonlySet<string>;
   /** The tiers the lowercase login's fresh, ready Task Runners offer while the login is not cooling off (empty: none). */
   tiersOf: (login: string) => ReadonlySet<Tier>;
   /** Whether one of the login's such runners, of a credential other than `refusedToken`, may take a call on `repos` of `prompt_id`. */
@@ -43,7 +52,7 @@ export type StartedCalls = {
    * items are known), the logins with such a runner that have, in every one of `repos`, a live workflow AutoCraft is working
    * on (running or waiting) whose steps include `step`'s task. No step: none.
    */
-  ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string }) => ReadonlySet<string>;
+  ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; prompt_id?: string }) => ReadonlySet<string>;
   /**
    * The lowercase logins whose started work a call or job is (as ownersFor) and who have a runner token, connected or not, ready
    * or not, cooling off or not, that may take it once it claims: the role rules, write permission, and its tier among the models
@@ -70,16 +79,17 @@ export function startedOf(v: RemoteView): StartedCalls {
 
 function buildStarted(v: RemoteView): StartedCalls {
   const { snapshot, accepted, now: nowMs } = v;
-  const { live, prs } = snapshot.started;
-  const byItem = new Map<string, Set<string>>();
-  const add = (repo: string, number: number, logins: (string | null)[]) => {
+  const { live, prs, merged } = snapshot.started;
+  const byItem = new Map<string, Set<string>>(), byMerged = new Map<string, Set<string>>();
+  const add = (to: Map<string, Set<string>>, repo: string, number: number, logins: (string | null)[]) => {
     const key = `${repo}#${number}`;
-    let s = byItem.get(key);
-    if (!s) byItem.set(key, (s = new Set()));
+    let s = to.get(key);
+    if (!s) to.set(key, (s = new Set()));
     for (const l of logins) if (l) s.add(l.toLowerCase());
   };
-  for (const w of live) add(w.repo, w.number, [w.started_by, w.approved_by]);
-  for (const p of prs) add(p.repo, p.prNumber, [p.started_by, p.approved_by]);
+  for (const w of live) add(byItem, w.repo, w.number, [w.started_by, w.approved_by]);
+  for (const p of prs) add(byItem, p.repo, p.prNumber, [p.started_by, p.approved_by]);
+  for (const p of merged) add(byMerged, p.repo, p.prNumber, [p.started_by, p.approved_by]);
   const runnersOf = new Map<string, { role: string; tokens: Map<number, Set<Tier>> }>();
   for (const r of snapshot.runners) {
     if (r.role === null || !freshReady(snapshot, r, nowMs)) continue;
@@ -100,15 +110,20 @@ function buildStarted(v: RemoteView): StartedCalls {
   const tokenLogins = [...tokensOf.keys()];
   // The room's write rule: only a non-write permission confirmed within the cache's lifetime leaves a login out.
   const canWrite = canWriteOf(snapshot);
-  const owners = (refs: readonly ItemRef[]): ReadonlySet<string> => {
-    if (!refs.length || !byItem.size) return NONE;
-    const [first, ...rest] = refs.map((r) => byItem.get(`${r.repo}#${r.number}`));
+  const owners = (refs: readonly ItemRef[], promptId?: string): ReadonlySet<string> => {
+    const postmerge = promptId?.startsWith(POSTMERGE_PROMPTS) ?? false;
+    if (!refs.length || (!byItem.size && !(postmerge && byMerged.size))) return NONE;
+    const of = (r: ItemRef): ReadonlySet<string> | undefined => {
+      const key = `${r.repo}#${r.number}`, a = byItem.get(key), b = postmerge ? byMerged.get(key) : undefined;
+      return a && b ? new Set([...a, ...b]) : a ?? b;
+    };
+    const [first, ...rest] = refs.map(of);
     if (!first || rest.some((s) => !s)) return NONE;
     return new Set([...first].filter((l) => rest.every((s) => s!.has(l))));
   };
   /** owners(refs) with `refs`; without, those of `logins` with a working live workflow in every repo whose steps include the step's task. */
-  const startedBy = (logins: readonly string[], c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string }): ReadonlySet<string> => {
-    if (c.refs) return owners(c.refs);
+  const startedBy = (logins: readonly string[], c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; prompt_id?: string }): ReadonlySet<string> => {
+    if (c.refs) return owners(c.refs, c.prompt_id || (c.step === POSTMERGE_STEP ? POSTMERGE_PROMPTS : undefined));
     if (c.step === undefined || !c.repos.length) return NONE;
     const task = taskOfStep(c.step);
     const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
@@ -142,6 +157,6 @@ export function heldForOwner(s: StartedCalls, c: { forLogin: string | null; refs
   if (c.forLogin !== null || c.since < nowMs - STARTED_HOLD_MS) return false;
   const self = login?.toLowerCase() ?? null;
   const judging = judges(c.prompt_id);
-  for (const o of s.owners(c.refs)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return true;
+  for (const o of s.owners(c.refs, c.prompt_id)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return true;
   return false;
 }

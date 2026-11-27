@@ -56,6 +56,8 @@ export type QueuePosition = { position: number; of: number; weight: number; star
 export type StartedWork = {
   live: { repo: string; number: number; entry: Entry; state: WorkflowState; startedBy: string; approvedBy: string | null }[];
   prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[];
+  /** Merged PRs whose workflow ended done through the merge lately (fragments.ts endedByMerge): their post-merge review is that workflow's work. */
+  merged: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[];
 };
 export type StartedFilter = { /** Live states only. */ states?: WorkflowState[]; refs?: { repo: string; number: number }[]; login?: string; repos?: string[]; openOnly?: boolean };
 

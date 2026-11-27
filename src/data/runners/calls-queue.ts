@@ -2,12 +2,13 @@
 import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
-import { batches, greatest, inList, least, schemaEb, valuesTable, ciEq, ref, type Eb } from "../../db/kx.ts";
-import { resumingJobs } from "../jobs/fragments.ts";
+import { batches, greatest, inList, least, schemaEb, tupleIn, valuesTable, ciEq, ref, type Eb } from "../../db/kx.ts";
+import { approvedLaneJob, resumingJobs } from "../jobs/fragments.ts";
 import { loadJobs } from "../jobs/index.ts";
 import { adoptableCall } from "./fragments.ts";
 import { finishCalls } from "./calls-unlease.ts";
-import { dropQueueCache, judges, queuedMsAfter } from "./calls-shared.ts";
+import { ITEM_WITHDRAWN_PREFIX, dropQueueCache, judges, queuedMsAfter } from "./calls-shared.ts";
+import { itemsGoneExpr } from "./cross.ts";
 import { reuseKey } from "../../remote/reuse-key.ts";
 import { loadItemAuthors } from "../mirror/authors.ts";
 import type { NewCall } from "./types.ts";
@@ -153,13 +154,44 @@ export async function withdrawJobCalls(db: Db, reason: string, jobId?: number): 
 
 const splitRef = (r: string): { repo: string; number: number } => ({ repo: r.slice(0, r.lastIndexOf("#")), number: Number(r.slice(r.lastIndexOf("#") + 1)) });
 
-/** Withdraws the open queued calls whose only item is `ref`. */
+const onlyItem = (eb: Eb, it: { repo: string; number: number }): Expression<SqlBool> => {
+  const items = () => schemaEb(eb).selectFrom("main.remote_call_items as ci").where("ci.call_id", "=", ref<number>("remote_calls.id"));
+  return eb.and([eb.exists(items().select(eb.lit(1).as("one")).where("ci.repo", "=", it.repo).where("ci.number", "=", it.number)),
+    eb(items().select((e) => e.fn.countAll<number>().as("n")), "=", 1)]);
+};
+
+/**
+ * Withdraws the open queued calls whose only item is `ref`. The error of those not bound to a person starts with ITEM_WITHDRAWN_PREFIX, so the
+ * jobs awaiting them skip the item; a call bound to a person (a maintainer's conversation turn) fails with `reason`, as its job handles.
+ */
 export async function withdrawItemCalls(db: Db, refStr: string, reason: string): Promise<number> {
-  const it = splitRef(refStr);
-  const items = (eb: Eb) => schemaEb(eb).selectFrom("main.remote_call_items as ci").where("ci.call_id", "=", ref<number>("remote_calls.id"));
-  return (await withdrawWhere(db, reason, Date.now(), (eb) => eb.and([eb("state", "=", "queued"),
-    eb.exists(items(eb).select(eb.lit(1).as("one")).where("ci.repo", "=", it.repo).where("ci.number", "=", it.number)),
-    eb(items(eb).select((e) => e.fn.countAll<number>().as("n")), "=", 1)]))).length;
+  const it = splitRef(refStr), now = Date.now();
+  const [free, bound] = [await withdrawWhere(db, `${ITEM_WITHDRAWN_PREFIX}${reason}`, now, (eb) => eb.and([eb("state", "=", "queued"), eb("for_login", "is", null), onlyItem(eb, it)])),
+    await withdrawWhere(db, reason, now, (eb) => eb.and([eb("state", "=", "queued"), eb("for_login", "is not", null), onlyItem(eb, it)]))];
+  return free.length + bound.length;
+}
+
+/**
+ * Withdraws the queued calls of the automatic path whose only item is `ref`, once a person started or approved its workflow: calls of jobs of
+ * `steps` (the steps with an approved lane) outside that lane, not bound to a person. The person's lane works the item from then on.
+ */
+export async function withdrawUnownedItemCalls(db: Db, a: { ref: string; steps: readonly string[]; reason: string }): Promise<number> {
+  if (!a.steps.length) return 0;
+  const it = splitRef(a.ref);
+  return (await withdrawWhere(db, `${ITEM_WITHDRAWN_PREFIX}${a.reason}`, Date.now(), (eb) => eb.and([eb("state", "=", "queued"), eb("job_id", "is not", null),
+    eb("for_login", "is", null), inList(db, "step", [...a.steps]), eb.not(approvedLaneJob(db, eb, "remote_calls.job_id")), onlyItem(eb, it)]))).length;
+}
+
+/**
+ * Withdraws the queued calls that name one of `refs` and whose items all merged or closed (itemsGoneExpr): sync calls it for the items it
+ * saw merge or close. Returns the ids withdrawn.
+ */
+export async function withdrawGoneItemCalls(db: Db, refs: readonly { repo: string; number: number }[], now: number = Date.now()): Promise<number[]> {
+  if (!refs.length) return [];
+  const named = (eb: Eb) => eb.exists(schemaEb(eb).selectFrom("main.remote_call_items as ni").select(eb.lit(1).as("one")).where("ni.call_id", "=", ref<number>("remote_calls.id"))
+    .where(tupleIn(db, ["ni.repo", "ni.number"], refs.map((r) => [r.repo, r.number] as const), ["text", "bigint"])));
+  return await withdrawWhere(db, `${ITEM_WITHDRAWN_PREFIX}every item it names was merged or closed`, now, (eb) => eb.and([eb("state", "=", "queued"), named(eb),
+    itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login" })]));
 }
 
 /** Withdraws queued or leased `conversation.turn` calls bound to `forLogin` that name `ref`. */

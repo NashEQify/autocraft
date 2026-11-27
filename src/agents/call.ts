@@ -72,6 +72,12 @@ export class StoppedError extends Error {}
  * is skipped and left for a later pass, with no failure counted (pool skips it; a job it ends finishes as done).
  */
 export class NoTakerError extends Error {}
+/**
+ * A user-local call withdrawn because of its item (src/data/runners ITEM_WITHDRAWN_PREFIX): the item merged or closed, a person ended its
+ * work, or a person's workflow took it over. Handled as a NoTakerError (the unit is skipped, no failure counted, no model asked again),
+ * without the skip that makes the planner plan the step again.
+ */
+export class ItemWithdrawnError extends NoTakerError {}
 /** True for an error that ends a step's work, or a unit of it (NoTakerError), without a failure row. */
 export const isHalt = (e: unknown): boolean => e instanceof CancelledError || e instanceof StoppedError || e instanceof NoTakerError;
 
