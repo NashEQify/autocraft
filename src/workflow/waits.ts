@@ -34,24 +34,27 @@ function closeWait(a: WorkflowAction | undefined): string | null {
 type Waiter = Pick<ItemWorkflow, "id" | "repo" | "number" | "kind" | "state">;
 
 /** legWaits() of one workflow. */
-export const legWait = async (db: Db, wf: Waiter, nowMs: number = Date.now()): Promise<string | null> => (await legWaits(db, [wf], nowMs)).get(wf.id) ?? null;
+export const legWait = async (db: Db, wf: Waiter, nowMs: number = Date.now(), o: WaitReader = {}): Promise<string | null> => (await legWaits(db, [wf], nowMs, o)).get(wf.id) ?? null;
+
+/** `shown`: the reader may see whose Task Runner the work waits for and why (operators and maintainers); false gives "Waiting for a Task Runner". Left out: shown. */
+export type WaitReader = { shown?: boolean };
 
 /**
  * Per workflow id the state line of a workflow whose started work waits for the app identity, whose merge leg waits for its approver's
  * sign-in, or for a pre-merge check or the model step of its first due action that no Task Runner can take, or that only the own runners of the people whose work it is take while
  * none of them can claim (offline, held for its usage, cooling off) or each leaves its queued call until its harness login renews, or for the contributor or a person on GitHub, or whose close is not made,
  * and the line of a done workflow whose PR merged with follow-ups filed or not posted; the others are absent. A live workflow whose check
- * failed several passes in a row shows that instead.
+ * failed several passes in a row shows that instead. A reader who may not see whose Task Runner it is (`o.shown` false) reads "Waiting for a Task Runner".
  */
-export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = Date.now()): Promise<Map<number, string>> {
-  const out = await legLines(db, wfs, nowMs), failing = wfs.length ? await loadWorkflowFailures(db) : [];
+export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = Date.now(), o: WaitReader = {}): Promise<Map<number, string>> {
+  const out = await legLines(db, wfs, nowMs, o.shown ?? true), failing = wfs.length ? await loadWorkflowFailures(db) : [];
   // A workflow whose check keeps failing stands still whatever else it waits for (src/workflow/advance.ts FAILING_SHOWN); the error is in the health checks.
   const ids = new Set(wfs.map((w) => w.id));
   for (const f of failing) if (ids.has(f.id)) out.set(f.id, t("AutoCraft has failed to check this item since {time} UTC and keeps trying", { time: f.since.slice(11, 16) }));
   return out;
 }
 
-async function legLines(db: Db, wfs: readonly Waiter[], nowMs: number): Promise<Map<number, string>> {
+async function legLines(db: Db, wfs: readonly Waiter[], nowMs: number, shown: boolean): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   const closed = wfs.filter((w) => w.state === "closed"), moving = wfs.filter((w) => w.state === "running" || w.state === "waiting");
   const ofPrs = moving.filter((w) => w.kind === "pr").map((w) => ({ repo: w.repo, number: w.number }));
@@ -111,9 +114,9 @@ async function legLines(db: Db, wfs: readonly Waiter[], nowMs: number): Promise<
     const call = { prompt_id: "", repos: [w.repo], step, refs: [{ repo: w.repo, number }] };
     if (!takes(call)) { add(w.id, t("Waiting for the {step}: no Task Runner can take it", { step: t(STEP_WORD[step]!) })); continue; }
     const [first] = waitingOnIn(view, call);
-    if (first) { add(w.id, t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) })); continue; }
+    if (first) { add(w.id, shown ? t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) }) : t("Waiting for a Task Runner")); continue; }
     const renew = queued.has(`${w.repo}#${number}`) ? loginWaitIn(view, call) : null;
-    if (renew) add(w.id, t("Waiting for {login}'s Task Runner (login renews at {time} UTC)", { login: renew.login, time: new Date(renew.at).toISOString().slice(11, 16) }));
+    if (renew) add(w.id, shown ? t("Waiting for {login}'s Task Runner (login renews at {time} UTC)", { login: renew.login, time: new Date(renew.at).toISOString().slice(11, 16) }) : t("Waiting for a Task Runner"));
   }
   return out;
 }

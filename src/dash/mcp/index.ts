@@ -323,7 +323,8 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   if (role !== "operator" && role !== "maintainer" && quiet.has(ref)) {
     return show(`${ref}: ${it.state}`, "item", { item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)), workflow: null, latestCommands: [] });
   }
-  const [wait, notPosted, queuedBy] = await Promise.all([wf ? legWait(env.db, wf) : null, wf ? notPostedLine(env.db, wf) : null, queuedOfItems(env.db, [r], { shown: role === "operator" || role === "maintainer" })]);
+  const shown = role === "operator" || role === "maintainer";
+  const [wait, notPosted, queuedBy] = await Promise.all([wf ? legWait(env.db, wf, Date.now(), { shown }) : null, wf ? notPostedLine(env.db, wf) : null, queuedOfItems(env.db, [r], { shown })]);
   // Queued jobs and model calls about the item, with what holds each back, as the item page shows them.
   const queued = (queuedBy.get(ref) ?? []).map((q) => ({ work: q.title, kind: q.kind, since: q.since, why: q.why }));
   const events = (on ? await eventsOf(env.db, wf!.repo, wf!.number) : said).slice(-10);

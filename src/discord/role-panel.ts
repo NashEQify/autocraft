@@ -200,7 +200,7 @@ export type GrantResult = "granted" | "already" | "not-member" | "forbidden" | "
 
 const grantAad = (id: string): string => `discord_role_grants:${id}`;
 
-async function grantOne(db: Db, keys: DiscordKeys, rest: RoleRest, log: (l: string) => void, cfg: RoleConfig | null, g: RoleGrant): Promise<{ result: GrantResult; user: string | null }> {
+async function grantOne(keys: DiscordKeys, rest: RoleRest, log: (l: string) => void, cfg: RoleConfig | null, g: RoleGrant): Promise<{ result: GrantResult; user: string | null }> {
   if (!cfg) return { result: "off", user: null };
   const userId = keys.openText(g.userSealed, grantAad(g.id));
   if (!userId) return { result: "failed", user: null };
@@ -240,7 +240,7 @@ export async function runRoleGrants(db: Db, keys: DiscordKeys, rest: RoleRest, l
   for (;;) {
     const open = await listOpenRoleGrants(db, GRANT_PAGE);
     for (const g of open) {
-      const { result, user } = await grantOne(db, keys, rest, log, cfg, g);
+      const { result, user } = await grantOne(keys, rest, log, cfg, g);
       await db.write(async () => {
         if (!await finishRoleGrant(db, g.id, result, new Date(now()).toISOString())) return;
         n++;

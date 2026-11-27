@@ -112,7 +112,7 @@ export async function item(db: Db, req: Req): Promise<MaintainItem> {
   const leg = wf && facts.leg?.workflow_id === wf.id ? facts.leg.state : null;
   return {
     repo, number: n, kind: facts.kind, canAct: may,
-    status: wf ? statusOf(wf, events, leg, facts.quiet, await legWait(db, wf), await notPostedLine(db, wf)) : null,
+    status: wf ? statusOf(wf, events, leg, facts.quiet, await legWait(db, wf, Date.now(), { shown: staff }), await notPostedLine(db, wf)) : null,
     events: shown,
     duplicates: facts.duplicates.map((d): MaintainDuplicate => ({ repo, number: d.other, kind: d.shown?.kind === "issue" ? "issue" : "pr", state: d.shown?.state ?? "open", title: d.shown?.title ?? "", canonical: d.canonical }))
       .sort((a, b) => a.number - b.number),

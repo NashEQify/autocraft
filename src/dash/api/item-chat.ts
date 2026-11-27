@@ -83,7 +83,7 @@ async function chatFrom(db: Db, b: Base): Promise<ItemChat> {
   const { c } = b;
   const wf = shownWorkflow(b.history);
   const [rows, threads, wait, shots] = await Promise.all([
-    loadTraceRows(c), loadThreads(db, [c.ref]), wf ? legWait(db, wf) : Promise.resolve(null), c.staff && !c.veiled ? shotsOf(db, c) : Promise.resolve(new Map<string, ChatShot[]>()),
+    loadTraceRows(c), loadThreads(db, [c.ref]), wf ? legWait(db, wf, Date.now(), { shown: c.staff }) : Promise.resolve(null), c.staff && !c.veiled ? shotsOf(db, c) : Promise.resolve(new Map<string, ChatShot[]>()),
   ]);
   // The chat veils by entry (who and when stay), so it reads the unveiled events and strips what a viewer may not read itself.
   const events = shape({ ...c, veiled: false }, eventsFrom({ ...c, veiled: false }, rows), null);
