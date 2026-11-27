@@ -3147,6 +3147,7 @@ CREATE TABLE IF NOT EXISTS eval_causes (
   investigated_at TEXT,
   investigated_seen INTEGER NOT NULL DEFAULT 0, -- seen when the last investigation was asked
   verdict TEXT,                       -- defect | not-defect | failed
+  failures INTEGER NOT NULL DEFAULT 0, -- investigations in a row without a valid reply; 3 stop the retries until new evidence
   finding TEXT,                       -- JSON: the investigation's reply as kept
   model TEXT,
   run_id TEXT,
@@ -3154,6 +3155,6 @@ CREATE TABLE IF NOT EXISTS eval_causes (
   filed_at TEXT,
   reported_seen INTEGER NOT NULL DEFAULT 0, -- seen when the issue or its last comment was posted
   commented_at TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0, -- creates of the issue tried
   note TEXT
 ) WITHOUT ROWID;

@@ -18,6 +18,8 @@ export type EvalCause = {
   investigatedAt: string | null;
   investigatedSeen: number;
   verdict: EvalVerdict | null;
+  /** Investigations in a row without a valid reply. */
+  failures: number;
   finding: unknown;
   model: string | null;
   runId: string | null;

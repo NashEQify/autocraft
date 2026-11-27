@@ -1,7 +1,8 @@
 // The last pass over every text the self-evaluation posts on the eval repo (a public repository): known logins become a
-// role word (bare or @-mentioned), unknown mentions become "a user", and e-mail addresses, links to hosts other than
-// github.com, IP addresses, Task Runner machines' host names and labels, the server's own host names and private
-// repository names are taken out. Applied to the model's fields before the template (so a mention of an unknown login is
+// role word (bare, @-mentioned, in code or at a path segment), unknown mentions become "a user", home directories become
+// "~", and e-mail addresses, links to hosts other than github.com, IP addresses, internal names (.local, .internal, .svc),
+// Task Runner machines' host names and labels, the server's own host names with their subdomains and private repository
+// names (with suffixes such as .git) are taken out. Applied to the model's fields before the template (so a mention of an unknown login is
 // still recognisable) and to the whole title, body and comment right before they are posted.
 import { hostname } from "node:os";
 import type { Db } from "../db/index.ts";
@@ -32,9 +33,13 @@ const URL_RE = /(?<![A-Za-z0-9])(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>"'`)\]]+/g
 const EMAIL_RE = /(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g;
 const IPV4_RE = /(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?![\w.])/g;
 const IPV6_RE = /(?<![\w:])(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}(?![\w:])/gi;
-const MENTION_RE = /(?<![\w@`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)(?![\w/-])/g;
-// A login-shaped word that is not part of a path, a dotted name, a hyphenated word or an address.
-const WORD_RE = /(?<![\w./@-])[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?![\w/@-]|\.\w)/g;
+const MENTION_RE = /(?<![\w@])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)(?![\w-])/g;
+// A login-shaped word that is not part of a dotted name or a hyphenated word; path segments count (`/home/x`, `x/repo`).
+const WORD_RE = /(?<![\w.-])[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?![\w-]|\.\w)/g;
+// A home directory names its user: /home/<name>, /Users/<name>, C:\Users\<name>.
+const HOME_RE = /(?:(?<![\w.-])\/(?:home|Users)\/|\b[A-Za-z]:\\(?:Users|Documents and Settings)\\)[^\s/\\`'"()<>]+/g;
+// A cluster- or network-internal name, with or without a port.
+const INTERNAL_RE = /(?<![\w.-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:local|internal|svc|lan|home\.arpa)(?::\d+)?(?![\w-]|\.\w)/gi;
 
 /** A label people gave a Task Runner is replaced when it cannot be an ordinary word (it has a space, digit, dot, dash or apostrophe). */
 const nameLike = (label: string): boolean => label.length >= 3 && /[\s\d.'_-]/.test(label);
@@ -44,11 +49,12 @@ export function publicScrubber(names: PublicNames): Scrub {
   const role = new Map(names.logins.map((l) => [l.login.toLowerCase(), ROLE_WORD[l.role]]));
   const priv = names.repos.filter((r) => !r.public).map((r) => r.name);
   const pubSlugs = names.repos.filter((r) => r.public && r.owner).map((r) => `${r.owner}/${r.name}`);
-  const hosts = names.hosts.filter((h) => h.length >= 3);
+  // A host's domain stands for its siblings too: dash.example.dev also covers k8s.example.dev (never fewer than two labels).
+  const hosts = [...new Set(names.hosts.flatMap((h) => { const p = h.split("."); return p.length > 2 ? [h, p.slice(1).join(".")] : [h]; }))].filter((h) => h.length >= 3 && !GITHUB_HOSTS.has(h.toLowerCase()));
   const labels = names.labels.filter((l) => nameLike(l) && !hosts.some((h) => h.toLowerCase() === l.toLowerCase()));
-  const privRe = priv.length ? new RegExp(`(?<![\\w./-])(?:[A-Za-z0-9-]+/)?(?:${alternation(priv)})(?![\\w-]|\\.\\w)`, "gi") : null;
+  const privRe = priv.length ? new RegExp(`(?<![\\w.-])(?:[A-Za-z0-9-]+/)?(?:${alternation(priv)})(?:\\.[A-Za-z0-9]+)*(?![\\w-])`, "gi") : null;
   const slugRe = pubSlugs.length ? new RegExp(`(?<![\\w./-])[A-Za-z0-9-]+/(${alternation(names.repos.filter((r) => r.public).map((r) => r.name))})(?![\\w-]|\\.\\w)`, "gi") : null;
-  const hostRe = hosts.length ? new RegExp(`(?<![\\w.-])(?:${alternation(hosts)})(?:\\.[A-Za-z0-9-]+)*(?::\\d+)?(?![\\w-]|\\.\\w)`, "gi") : null;
+  const hostRe = hosts.length ? new RegExp(`(?<![\\w.-])(?:[A-Za-z0-9-]+\\.)*(?:${alternation(hosts)})(?:\\.[A-Za-z0-9-]+)*(?::\\d+)?(?![\\w-]|\\.\\w)`, "gi") : null;
   const labelRe = labels.length ? new RegExp(`(?<![\\w.-])(?:${alternation(labels)})(?![\\w-]|\\.\\w)`, "gi") : null;
   const privSet = new Set(priv.map((p) => p.toLowerCase()));
 
@@ -69,12 +75,15 @@ export function publicScrubber(names: PublicNames): Scrub {
         return keepUrl(bare) ? url : `(link removed)${tail}`;
       })
       .replace(IPV4_RE, "(address removed)")
-      .replace(IPV6_RE, "(address removed)");
+      .replace(IPV6_RE, "(address removed)")
+      .replace(HOME_RE, "~")
+      .replace(INTERNAL_RE, "(host removed)");
     if (hostRe) t = t.replace(hostRe, "(host removed)");
     if (labelRe) t = t.replace(labelRe, "a Task Runner");
     if (privRe) t = t.replace(privRe, "a private repository");
     if (slugRe) t = t.replace(slugRe, (m, name: string) => (pubSlugs.some((s) => s.toLowerCase() === m.toLowerCase()) ? name : m));
-    t = t.replace(MENTION_RE, (_m, login: string) => role.get(login.toLowerCase()) ?? "a user");
+    // Known logins everywhere, code included; an unknown name before a slash is a package scope (`@types/node`).
+    t = t.replace(MENTION_RE, (m, login: string, at: number, all: string) => role.get(login.toLowerCase()) ?? (all[at + m.length] === "/" ? m : "a user"));
     return t.replace(WORD_RE, (w) => (w.length >= BARE_LOGIN_MIN && !OWN_WORDS.has(w.toLowerCase()) ? role.get(w.toLowerCase()) ?? w : w));
   };
 }
