@@ -29,8 +29,11 @@ export const readyIn = (v: RemoteView): ReadyRunner[] =>
 
 /** What whyWaiting reads of a queued call. `picked`: its live pick (login null when the viewer may not see it). */
 export type WhyCall = { tier: Tier; promptId: string; step: string; repos: readonly string[]; refs?: readonly ItemRef[]; followUp: boolean; picked: { login: string | null } | null;
-  /** The user whose own runners alone take it; `shown`: the viewer may see the login. */
-  bound?: { login: string; shown: boolean } | null;
+  /**
+   * The user whose own runners take it; `shown`: the viewer may see the logins. `took`: for an item workflow's bound work, the lowercase
+   * logins that took it onto their Task Runner and may run it now, since none of the user's runners is ready with room (started.ts boundTakers).
+   */
+  bound?: { login: string; shown: boolean; took?: readonly string[] } | null;
   /** The one person whose runner it waits for (waitOf); `shown` as for `bound`. */
   waits?: ({ kind: "owner-off" } & RunnerWait | { kind: "owner"; login: string } | { kind: "login"; login: string; renewsAt: number }) & { shown: boolean } | null };
 
@@ -49,7 +52,13 @@ export function whyWaiting(c: WhyCall, runners: readonly ReadyRunner[], ahead: n
   if (c.bound) {
     const whose = c.bound.shown ? `${c.bound.login}'s Task Runner` : "the asker's own Task Runner";
     const own = runners.filter((r) => r.login.toLowerCase() === c.bound!.login.toLowerCase() && r.tiers.has(c.tier));
-    if (!own.length) return { code: "bound-off", text: `Runs only on ${whose}, which is not ready` };
+    const took = runners.filter((r) => c.bound!.took?.includes(r.login.toLowerCase()) && r.tiers.has(c.tier));
+    if (took.length) {
+      const taker = took.find((r) => r.free > 0) ?? took[0]!;
+      const theirs = c.bound.shown ? t("{login}'s Task Runner", { login: taker.login }) : t("the Task Runner of a person who took the work");
+      return { code: "bound", text: taker.free > 0 ? t("Next on {theirs}, which took the work while {whose} is not ready", { theirs, whose }) : t("Waiting for {theirs}, which took the work while {whose} is not ready: it is busy", { theirs, whose }) };
+    }
+    if (!own.length) return { code: "bound-off", text: c.bound.took?.length ? t("Runs on {whose}, or on a Task Runner that took the work; none is ready", { whose }) : `Runs only on ${whose}, which is not ready` };
     return { code: "bound", text: own.some((r) => r.free > 0) ? `Next on ${whose}` : `Waiting for ${whose}: it is busy` };
   }
   const w = c.waits;
@@ -108,7 +117,7 @@ export function queueViewIn(v: RemoteView, queue: QueueSnapshot, showPicker: boo
     const n = ahead.get(r.tier) ?? 0;
     const asked = !about || r.refs.some((x) => about.has(`${x.repo}#${x.number}`));
     const waits = !asked || followUp || picked !== null || r.forLogin !== null ? null : waitOf(v, started, r, nowMs, showPicker);
-    const why = whyWaiting({ tier: r.tier, promptId: r.prompt_id, step: r.step, repos: r.repos, refs: r.refs, followUp, picked: picked === null ? null : { login: showPicker ? picked : null }, bound: r.forLogin === null ? null : { login: r.forLogin, shown: showPicker }, waits }, runners, n, canWrite);
+    const why = whyWaiting({ tier: r.tier, promptId: r.prompt_id, step: r.step, repos: r.repos, refs: r.refs, followUp, picked: picked === null ? null : { login: showPicker ? picked : null }, bound: r.forLogin === null ? null : { login: r.forLogin, shown: showPicker, took: [...started.boundTakers({ prompt_id: r.prompt_id, refs: r.refs, forLogin: r.forLogin, tier: r.tier })] }, waits }, runners, n, canWrite);
     // A call of repos or a task no ready runner takes is passed over, so it is no call ahead of the next; nor is one bound to a user.
     if (!followUp && picked === null && r.forLogin === null && why.code !== "task-off" && why.code !== "items-off" && why.code !== "no-repo-access") ahead.set(r.tier, n + 1);
     if (!asked) continue;

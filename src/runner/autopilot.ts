@@ -933,6 +933,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // The hourly self-evaluation of AutoCraft's own records, while the setting eval_repo names a tracked repo (also one whose Pipeline switch is off).
     name: "eval",
     topics: [],
+    // Every tracked repo: the eval repo's Pipeline switch is usually off (its merges wait for a maintainer).
+    scope: "cleanup",
     // The hour moves with the clock, not with a change in the data.
     extra: async (db) => ((await evalRepo(db)) ? String(Math.floor(Date.now() / 300_000)) : ""),
     detect: async (db, ctx) => {

@@ -472,6 +472,30 @@ describe("picks and Manual only", async () => {
     await clear();
   });
 
+  test("the implement step's calls bound to its starter: a taker's runner leases them while the starter's cannot, its session's next turn too, never a conversation turn, and none once the starter's runner is ready with room", async () => {
+    const wf = await insertWorkflow(db, { repo: "photocraft", number: 42, kind: "issue", entry: "implement", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });
+    await takeItemRunner(db, { workflowId: wf, repo: "photocraft", number: 42, login: "bob", at: new Date().toISOString() });
+    await ready("bob");
+    await unfresh("alice", "olga");
+    const item = [{ repo: "photocraft", number: 42 }];
+    const turn = await q({ promptId: "conversation.turn", items: item, forLogin: "alice", ageMs: 60_000 });
+    const plan = await q({ promptId: "implement.plan", items: item, forLogin: "alice", boundSlot: true });
+    assert.ok(await takerTest(db, Date.now())({ prompt_id: "implement.plan", repos: ["photocraft"], refs: item, forLogin: "alice", tier: "top" }), "bob's runner is a taker, so the call is not withdrawn");
+    assert.equal(await leased("bob"), plan, "alice's runner is gone: bob's takes the plan call bound to her");
+    assert.equal(await leased("bob"), null, "never her conversation turn");
+    const next = await q({ promptId: "implement.plan", items: item, parentId: plan });
+    assert.equal(await leased("bob", { sessions: [plan] }), next, "the session's next turn stays on bob's runner");
+    await ready("alice");
+    await db.run(db.k.updateTable("remote_helpers").set({ idle_claim_at: Date.now() }).where("login", "=", "alice"));
+    dropQueueCache(db);
+    const session = await q({ promptId: "implement.session", items: item, forLogin: "alice", boundSlot: true });
+    assert.equal(await leased("bob"), null, "alice's runner could run it now: bob's passes it over");
+    assert.ok([turn, session].includes((await leased("alice"))!));
+    await updateWorkflow(db, wf, { state: "done" });
+    await ready("olga");
+    await clear();
+  });
+
   test("a starter's runner on Manual only, not taking the repo, is room and a taker for their started item alone", async () => {
     await db.run(db.k.updateTable("tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
     const wf = await insertWorkflow(db, { repo: "photocraft", number: 7, kind: "pr", entry: "review", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });

@@ -200,10 +200,11 @@ function idleOthers(db: Db, v: RemoteView, login: string): (c: Cand) => Promise<
  * Who may take a call: a maintainer or operator with write permission on every repo of the call (which covers reading a
  * private one); discord.* calls and calls that name no repo go to operators only. An author or co-author of an item a judging
  * prompt judges is passed over only while another helper that could take the call is asking for work (idleOthers). A call
- * bound to a user (NewCall.forLogin) goes to that user alone, author or not.
+ * bound to a user (NewCall.forLogin) goes to that user alone, author or not; an item workflow's bound work (takeableBound) also to
+ * a person who took it, as claimOrder offers it and the lease checks it (boundTakeAllows).
  */
 async function mayTake(caller: Caller, c: Cand, canWrite: (repo: string) => Promise<boolean>, othersIdle: (c: Cand) => Promise<boolean>): Promise<boolean> {
-  if (c.forLogin !== null && !sameLogin(c.forLogin, caller.login)) return false;
+  if (c.forLogin !== null && !sameLogin(c.forLogin, caller.login) && !runners.takeableBound(c.prompt_id)) return false;
   if (!roleFits(caller.role, c)) return false;
   for (const repo of c.repos) if (!(await canWrite(repo))) return false;
   // A call bound to the caller is theirs whatever they authored: nobody else may take it.
@@ -290,8 +291,9 @@ const orderReadsOf = (v: RemoteView, login: string): OrderReads => {
  * picks (picks.ts) oldest first, then the model queue's order without other users' live picks or the started calls of other
  * users who can take them, filtered by tiers and repos (every repo a call names must be in the set; picks do not go by it);
  * the queue's order also by the user's tasks (my-tasks.ts) and items (task-items.ts), which picks, started calls and
- * follow-ups do not go by. Calls bound to the caller (NewCall.forLogin) come after its follow-ups, like picks; calls bound to
- * another user are not offered. `bound` says where the caller's bound calls and their follow-ups go: an own-lane claim
+ * follow-ups do not go by. Calls bound to the caller (NewCall.forLogin) come after its follow-ups, like picks; then calls bound to
+ * another user for an item workflow's work the caller took while that user's runners cannot run them (started.ts boundTakers);
+ * other calls bound to another user are not offered. `bound` says where the caller's bound calls and their follow-ups go: an own-lane claim
  * (Claim.ownLane) gets only them ("only"), the slots of a Task Runner that has an own lane (Claim.withOwnLane) none of them
  * ("without"), and other Task Runners' slots take them with the rest ("with"). Bound calls that run in a slot
  * (NewCall.boundSlot) and their follow-ups go with the slots' calls. A fast-lane claim gets only what fastLaneFits. A Manual
@@ -320,6 +322,9 @@ function claimOrderAll(q: ReturnType<typeof orderedOf>, reads: OrderReads, calle
   if (bound === "only") return [...allFollowUps.filter((r) => r.forLogin === login && !r.boundSlot), ...own.filter((r) => !r.boundSlot)];
   const followUps = bound === "without" ? allFollowUps.filter((r) => r.forLogin === null || r.boundSlot) : allFollowUps;
   const ownHere = bound === "with" ? own : own.filter((r) => r.boundSlot);
+  // Bound work of a workflow the caller took, in the same lanes as the caller's own bound calls.
+  const took = q.ordered.filter((r) => r.forLogin !== null && r.forLogin !== login && (bound === "with" || r.boundSlot) && live(r) && !released(r) && tiers.has(r.tier) && fast(r)
+    && started.boundTakers({ prompt_id: r.prompt_id, refs: r.refs, forLogin: r.forLogin, tier: r.tier }).has(login));
   // The caller's own picks count for it; other pickers' while they can take them.
   const counts = (r: Cand): boolean => pickCounts(r, nowMs, (who) => who === login || pickers.has(who));
   // Calls for work the caller started or approved come next, in queue order (started.ts): like picks, they go by no repo, task,
@@ -332,10 +337,10 @@ function claimOrderAll(q: ReturnType<typeof orderedOf>, reads: OrderReads, calle
     else if (live(r) && tiers.has(r.tier) && fast(r)) mine.push(r);
   }
   mine.sort((a, b) => a.pickedAt! - b.pickedAt! || a.id - b.id);
-  if (manual) return [...followUps, ...ownHere, ...startedHere, ...mine];
+  if (manual) return [...followUps, ...ownHere, ...took, ...startedHere, ...mine];
   // The queue's order leaves out the caller's started calls (above) and other users' while one of theirs can take them.
   const held = (r: Cand): boolean => startedBy(started, r, login) || heldForOwner(started, r, login, nowMs);
-  return [...followUps, ...ownHere, ...startedHere, ...mine, ...q.ordered.filter((r) => r.forLogin === null && fits(r) && !held(r) && !skip.has(taskOfStep(r.step)) && itemsFit(items, r) && !(r.pickedBy !== null && counts(r)) && fast(r))];
+  return [...followUps, ...ownHere, ...took, ...startedHere, ...mine, ...q.ordered.filter((r) => r.forLogin === null && fits(r) && !held(r) && !skip.has(taskOfStep(r.step)) && itemsFit(items, r) && !(r.pickedBy !== null && counts(r)) && fast(r))];
 }
 
 /** The logins (lowercase) whose picks count now. */
@@ -535,6 +540,8 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     const lease = async (): Promise<ClaimReply | null | undefined> => {
       for (const r of order) {
         const started = startedBy(reads.started, r, login);
+        // A call bound to another person reaches here only as their workflow's work the caller took (claimOrder).
+        const took = r.forLogin !== null && !sameLogin(r.forLogin, login);
         if (cooled && !started) continue;
         // Only follow-ups of the helper's own sessions carry a parent here (claimOrder). The own lane's calls count toward no
         // calls at once: it takes them at the limit too, with no limit of its own. An older helper runs them in a slot, as any call.
@@ -549,7 +556,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
         if (cut && room < LOGIN_CUT_MIN_MS) { tooLong++; continue; }
         const got = await leaseOne(db, caller, claim, r, cut ? Math.floor(room / 1000) * 1000 : null, {
           perLogin: lane || max === null || own ? null : r.parent_id !== null ? max + 1 : max, interactive: lane ? slots : null,
-        }, started ? tierTokens(w.view, r.tier) : null, !fast && !own && !lane && f.idle, live);
+        }, started, started || took ? tierTokens(w.view, r.tier) : null, !fast && !own && !lane && f.idle, live);
         // The client left, or shutdown answered the claim: nothing is leased to nobody.
         if (got === "gone") return null;
         if (got === "old") { oldHelper++; continue; }
@@ -591,10 +598,11 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
 /**
  * Leases call `r` to the caller (runners.leaseCall: one transaction under the login's lease lock, every condition in its
  * compare-and-set). The run's stored prompt is built before: scrubbing and compressing a large prompt takes milliseconds. A
- * call whose bundle lists the workspace server goes only to the claude harness, with the resume note of its workspace. `tiered`: for
- * work the caller started, approved or took, the credentials that serve its tier (started.ts tierTokens); null for other work.
+ * call whose bundle lists the workspace server goes only to the claude harness, with the resume note of its workspace. `started`: work
+ * the caller started, approved or took (started.ts); `tiered`: for that work or a call bound to another person, the credentials that
+ * serve its tier (started.ts tierTokens); null for other work.
  */
-async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs: number | null, caps: { perLogin: number | null; interactive: number | null }, tiered: readonly number[] | null, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | "old" | null> {
+async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs: number | null, caps: { perLogin: number | null; interactive: number | null }, started: boolean, tiered: readonly number[] | null, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | "old" | null> {
   const source = await runners.loadLeaseSource(db, r.id);
   if (!source) return null;
   const bundle = JSON.parse(source.bundle) as Omit<TaskBundle, "callId">;
@@ -611,7 +619,7 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs
   const l = await runners.leaseCall(db, {
     id: r.id, caller: { tokenId: caller.tokenId, login: caller.login, role: caller.role, claimId: claim.requestId },
     claim: { harness: claim.harness, harnessVersion: claim.harnessVersion, root: claim.root ?? null, requestId: claim.requestId, ownLane: claim.ownLane === true },
-    model: claim.tiers[r.tier]!, now: Date.now(), caps, started: tiered !== null, ...(tiered && { tierTokens: tiered }), clearIdle, timeoutMs, source, prompt, rewrite: rewritten ? { bundle: JSON.stringify(bundle), baseStdin: base } : null, live,
+    model: claim.tiers[r.tier]!, now: Date.now(), caps, started, ...(tiered && { tierTokens: tiered }), clearIdle, timeoutMs, source, prompt, rewrite: rewritten ? { bundle: JSON.stringify(bundle), baseStdin: base } : null, live,
   });
   if (l === null || l === "limit" || l === "gone") return l;
   return { id: l.id, secret: l.secret, title: titleOf(source.promptId, source.items), requiredHelper: REQUIRED_HELPER };

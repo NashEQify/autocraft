@@ -7,7 +7,8 @@
 // dashboard's minute maintenance runs sweepTakers: a queued call with no taker for NO_TAKER_MS is withdrawn, and pipeline-on
 // repos with no taker are recorded for the remote-no-taker health check. Follow-up turns and calls with a pick that counts
 // keep their own rules (calls.ts awaitCall, picks). A call bound to a user (a maintainer's conversation turn) has a taker only
-// in that user's runners.
+// in that user's runners; an item workflow's bound work (the implement step's calls) also in the runners of a person who took
+// the workflow's work while that user's runners cannot run it (started.ts boundTakers).
 import { NO_TAKER_PREFIX } from "./calls.ts";
 import { t, tk } from "../i18n/index.ts";
 import { orderedOf, type Cand } from "./cands.ts";
@@ -63,8 +64,12 @@ export async function takerSignature(db: Db, nowMs: number = Date.now()): Promis
 /** The taker rule over one reading of the runners. */
 export function takerTestIn(v: RemoteView): (c: TakerCall) => boolean {
   const runners = takersIn(v), canWrite = canWriteOf(v.snapshot), owner = startedOf(v);
+  const bound = (r: Runner, login: string, c: TakerCall): boolean =>
+    r.login.toLowerCase() === login && (c.tier === undefined || r.tiers.has(c.tier)) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x));
   return (c) => c.forLogin
-    ? runners.some((r) => r.login.toLowerCase() === c.forLogin!.toLowerCase() && (c.tier === undefined || r.tiers.has(c.tier)) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x)))
+    ? runners.some((r) => bound(r, c.forLogin!.toLowerCase(), c))
+      // An item workflow's bound work also has a taker in the runners of a person who took it (started.ts boundTakers).
+      || (!!c.refs?.length && [...owner.boundTakers({ prompt_id: c.prompt_id, refs: c.refs, forLogin: c.forLogin, ...(c.tier && { tier: c.tier }) })].some((l) => runners.some((r) => bound(r, l, c))))
     : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite)) || owner.waitersFor(c).size > 0;
 }
 
