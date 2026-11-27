@@ -1241,7 +1241,8 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
         if (!warned.has(key)) { warned.add(key); log(`autopilot: ${stepName}: failed ${b.failures} times in a row; retry at ${hhmm(b.until)}`); }
         return null;
       }
-      if (!poll && await unchangedSinceIdle(db, stepName, repo, fp, pr, refs !== undefined)) { note(stepName, "nothing to do: its input has not changed since the last run"); return null; }
+      const idle = poll ? null : await unchangedSinceIdle(db, stepName, repo, fp, { lane: pr, byRefs: refs !== undefined, topics: lane.topics ?? INPUT_TOPICS });
+      if (idle) { note(stepName, idle); return null; }
       if (lane.minGapMs) {
         const last = await lastJobEnd(db, stepName, repo, AUTOPILOT_USER);
         const next = last ? Date.parse(last.endedAt) + lane.minGapMs : 0;
@@ -1335,8 +1336,8 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
 }
 
 /**
- * A job that acted on nothing and whose every handled item was skipped because its call was withdrawn for want of a taker: it did
- * nothing either, so like an idle job it runs again only once its input or the Task Runners change.
+ * A job that acted on nothing and whose every handled item was skipped for want of a taker (its call withdrawn, or its pool unit
+ * left unstarted): it did nothing either, so like an idle job it runs again only once its input or the Task Runners change.
  */
 function onlyUntaken(j: { items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null }): boolean {
   if (j.acted || !j.lease_skips || (j.items ?? 0) > j.lease_skips || !j.lease_skip_keys) return false;
@@ -1359,20 +1360,47 @@ async function skippedLeaseHeld(db: Db, keys: string[] | null): Promise<boolean>
 }
 
 /**
- * True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it.
+ * The topics that move which items a person's Task Runner takes beyond its repos: the work they started or approved
+ * (src/remote/started.ts). The taker signature names repos only, so their counters stand in for the items.
+ */
+const STARTED_TOPICS = ["workflows", "preapprovals"];
+
+/**
+ * The part of a fingerprint without a PR (fingerprintOf: step, repo, one counter per topic of `topics`, the extra reading, the taker
+ * signature) that decides whether work left for want of a taker can run now: all of it but the counters outside STARTED_TOPICS.
+ * Null for a fingerprint without that layout.
+ */
+function takerPartOf(fp: string, topics: readonly string[]): string | null {
+  const parts = fp.split("|"), n = topics.length;
+  if (parts.length < n + 4) return null;
+  return [parts[0], parts[1], ...topics.flatMap((t, i) => (STARTED_TOPICS.includes(t) ? [parts[2 + i]] : [])), ...parts.slice(2 + n)].join("|");
+}
+
+/**
+ * Why the step is not queued again, or null: the last autopilot job of the step (and repo) handled nothing and saw the input `fp`
+ * still describes. An operator release since then ends it. `lane`: the lane PR (lanePrOf) of a per-item job; `topics`: the lane's.
  * A job proposed for its items (`byRefs`) whose calls were only withdrawn for want of a taker is not idle: the gate on its items' takers already
  * holds it back while nobody can take them, and the same Task Runner coming back leaves the taker signature as it was.
+ * A job without items that handled nothing and only left work no Task Runner takes waits for the takers, not for the rest of its
+ * input: it runs again once the taker signature, the work people started or approved (STARTED_TOPICS) or the lane's extra reading
+ * changes. On a busy repo the other counters move on every pass, while the work it left stays untaken.
  */
-async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp: string, lane: number | null = null, byRefs = false): Promise<boolean> {
+async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp: string, o: { lane?: number | null; byRefs?: boolean; topics?: readonly string[] } = {}): Promise<string | null> {
+  const lane = o.lane ?? null;
   const last = await lastJobEnd(db, step, repo, AUTOPILOT_USER, lane);
-  if (!last || last.state !== "done" || !(wasIdle(last) || (!byRefs && onlyUntaken(last)))) return false;
+  const onlyLeft = !!last && !o.byRefs && onlyUntaken(last);
+  if (!last || last.state !== "done" || !(wasIdle(last) || onlyLeft)) return null;
   // A job that skipped items another job was working retries once no running job holds a lease on any of them. While one does, the step stays parked, so the planner does not queue it in a loop.
   // Skips for want of a taker do not count: such a step is woken by the taker signature in its fingerprint.
   const leaseKeys = leaseSkipKeys(last.lease_skip_keys);
-  if (last.lease_skips && leaseKeys?.length !== 0 && !await skippedLeaseHeld(db, leaseKeys)) return false;
+  if (last.lease_skips && leaseKeys?.length !== 0 && !await skippedLeaseHeld(db, leaseKeys)) return null;
   const rec = await fpRecord(db, step, repo, lane);
-  if (!rec || rec.job !== last.id || rec.fp !== fp) return false;
-  return !((await releasedAt(db, step) ?? "") > last.endedAt);
+  if (!rec || rec.job !== last.id) return null;
+  const parked = onlyLeft && wasIdle(last) && lane === null;
+  const topics = o.topics ?? INPUT_TOPICS;
+  if (parked ? (takerPartOf(fp, topics) ?? fp) !== (takerPartOf(rec.fp, topics) ?? rec.fp) : rec.fp !== fp) return null;
+  if ((await releasedAt(db, step) ?? "") > last.endedAt) return null;
+  return parked ? "no Task Runner takes the work it left; it runs again when the Task Runners change" : "nothing to do: its input has not changed since the last run";
 }
 
 const warned = new Set<string>();

@@ -226,6 +226,8 @@ export type PoolRoom = {
   round(): void; room(i: number): Promise<number>; taker(i: number): Promise<boolean>;
   /** The units may finish without a model call (poolRoom's `mayNotCall`): the room does not hold them back, only the pool's `max`. */
   mayNotCall?: boolean;
+  /** What unit `i`'s call names (its items, or else its repos), for the skip record of a unit the pool left for want of a taker. */
+  untaken?(i: number): string;
   /**
    * Resolves once the room may differ from the last reading: a change topic it reads moved, the moment the reading says it rises
    * with time alone came (roomRisesAt), or ROOM_REFRESH_MS passed; never before one pause of at most `pollMs`. Reads only the
@@ -285,6 +287,10 @@ export function poolRoom(db: Db, reposOf: (i: number) => readonly string[] | und
   };
   return {
     ...(opts.mayNotCall && { mayNotCall: true }),
+    untaken: (i) => {
+      const refs = refsOf(i);
+      return refs.length ? refs.map((r) => `${r.repo}#${r.number}`).join(",") : [...reposOf(i) ?? []].join(",");
+    },
     round: () => { pass = null; rooms.clear(); takers.clear(); },
     room: async (i) => {
       const k = await keyOf(i);

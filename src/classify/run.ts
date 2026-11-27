@@ -33,6 +33,7 @@ import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import { flagsOf, parseRef, refOf, type Item, type Verdict } from "./parse.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq } from "../async-seq.ts";
+import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { Db } from "../db/index.ts";
 import { loadItems as loadMirrorItems, loadRepos } from "../data/mirror/index.ts";
 import { keepEarlierUsage, loadRunsById, recordUsage, type UsageRow } from "../data/inference/index.ts";
@@ -100,6 +101,8 @@ export type PoolOptions = {
   max?: number;
   /** Told the index of each job a PoolRoom left unstarted (no Task Runner may take it) when the pool ends, and of each job whose model call was withdrawn for lack of a taker (NoTakerError). */
   skipped?: (i: number) => void;
+  /** Where the skip of a job a PoolRoom left unstarted is logged (default console.log, the job's log). */
+  log?: (line: string) => void;
 };
 
 /**
@@ -118,7 +121,9 @@ export type PoolOptions = {
  * finish without a model call (`mayNotCall`) starts jobs up to `max` whatever the room: a call one of them makes waits in the
  * model queue. When none has room and none runs, the first job whose repos have a
  * Task Runner that may take them starts regardless; jobs no Task Runner may take never start, and once only they are left the
- * pool ends without them (a later pass picks them again). With `first`, the first job that has such a Task Runner runs alone first.
+ * pool ends without them. Each is recorded as a skip for want of a taker (skipItem, NO_TAKER_SKIP), like a withdrawn call, so a
+ * step job that only left such units counts as idle until the Task Runners change (src/runner/autopilot.ts unchangedSinceIdle).
+ * With `first`, the first job that has such a Task Runner runs alone first.
  * A job whose model call was withdrawn because no Task Runner could take it (NoTakerError) is skipped the same way; the others go on.
  *
  * The first failure is thrown once the running jobs have ended.
@@ -141,11 +146,18 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
     return p;
   };
   const roomy = typeof width === "object" ? width : null;
+  // The jobs left unstarted once the pool ends: only those no Task Runner may take (a failure throws first).
+  const leftUntaken = (): void => {
+    for (const x of pending) {
+      if (roomy?.untaken) skipItem(`${NO_TAKER_SKIP}${roomy.untaken(x)}`, opts.log ?? console.log, "no Task Runner takes it");
+      opts.skipped?.(x);
+    }
+  };
   const takenBy = async (i: number): Promise<boolean> => !roomy || await roomy.taker(i);
   if (opts.first && jobs.length > 1) {
     roomy?.round();
     const i = await findSeq(pending, takenBy);
-    if (i === undefined) { for (const x of pending) opts.skipped?.(x); return results; }
+    if (i === undefined) { leftUntaken(); return results; }
     await launch(i);
   }
   while (pending.length && !failed) {
@@ -186,7 +198,7 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
   }
   await Promise.all(running);
   if (failed) throw (failed as { e: unknown }).e;
-  for (const x of pending) opts.skipped?.(x);
+  leftUntaken();
   return results;
 }
 
