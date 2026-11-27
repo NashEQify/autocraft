@@ -64,6 +64,8 @@ export type RunnerRow = {
 export type StartedWork = {
   live: { repo: string; number: number; entry: string; state: string; started_by: string; approved_by: string | null }[];
   prs: { repo: string; prNumber: number; started_by: string; approved_by: string | null }[];
+  /** Merged PRs whose workflow ended done through the merge lately: only their post-merge review calls are its work (src/remote/started.ts). */
+  merged: { repo: string; prNumber: number; started_by: string; approved_by: string | null }[];
 };
 export type RunnerSnapshot = {
   at: number; runners: RunnerRow[]; settings: Map<LowerLogin, UserSettings>; cooled: Map<LowerLogin, { until: string; reason: string }>;

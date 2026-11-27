@@ -132,5 +132,11 @@ export function queuedMsAfter(db: Db, eb: Eb, now: number): Expression<number> {
   return w("queued_ms", "+", w.case().when("queued_since", "is", null).then(w.lit(0)).else(greatest(db, [w.lit(0), w(w.val(now), "-", w.ref("queued_since"))])).end());
 }
 
+/**
+ * Starts the error of a call withdrawn because of its item: the item merged or closed, a person ended its work, or a person's workflow
+ * took it over. The job awaiting such a call skips the item without a failure and asks no model again (src/remote/calls.ts awaitCall).
+ */
+export const ITEM_WITHDRAWN_PREFIX = "withdrawn for the item: ";
+
 /** Starts the error of a call that ended because the model's safety filter declined it. */
 export const REFUSED_PREFIX = "refused by the model's safety filter";

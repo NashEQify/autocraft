@@ -2,7 +2,7 @@
 // heartbeats while it runs and submits the reply. The rows and their writers live in the runners module
 // (src/data/runners); this file holds the rules: the claim order, eligibility, the lease routes' checks and the caller's poll.
 import type { ItemRef } from "../../web/src/api/types.ts";
-import { allocation, callQueue, NoTakerError, stepOf, throwIfHalted, unitCalled, WaitLimitError } from "../agents/call.ts";
+import { allocation, callQueue, ItemWithdrawnError, NoTakerError, stepOf, throwIfHalted, unitCalled, WaitLimitError } from "../agents/call.ts";
 import { packPrompt } from "../agents/runs.ts";
 import { scrubError } from "../agents/text.ts";
 import type { Usage } from "../classify/run.ts";
@@ -275,7 +275,7 @@ export const leasedBy = async (db: Db, login: string): Promise<number> => leased
 export const leaseTurnover = async (db: Db, login: string): Promise<string> => (await runners.loadLeaseTurnover(db, [login])).get(login.toLowerCase()) ?? "0:";
 
 /** Whether the queued call is for work the caller started or approved (started.ts): never a call bound to a user. */
-const startedBy = (s: StartedCalls, r: Cand, login: string): boolean => r.forLogin === null && s.owners(r.refs).has(login.toLowerCase());
+const startedBy = (s: StartedCalls, r: Cand, login: string): boolean => r.forLogin === null && s.owners(r.refs, r.prompt_id).has(login.toLowerCase());
 
 /** What the claim order reads of the caller: Manual only, skipped tasks, item filter; whose calls are whose; whose picks count. */
 type OrderReads = { manual: boolean; skip: ReadonlySet<string>; items: ItemFilter; started: StartedCalls; pickers: ReadonlySet<string> };
@@ -687,7 +687,8 @@ const storedTokens = (v: unknown): { input: number; output: number; cacheRead: n
  * answer was lost) is accepted again. A reply from another model than the claim declared for the tier, and a failed reply
  * (`ok: false`), send the call back to the queue with its next attempt, not offered to that login for a while, and count
  * toward the login's cool-off; the call fails once its attempts are used up. A lease cut to its login's room (LOGIN_CUT_MIN_MS)
- * that fails at its cut goes back to the queue without any of these.
+ * that fails at its cut goes back to the queue without any of these. A result for a call whose items all merged or closed while it
+ * ran is accepted and discarded (runners.discardGoneLease): its job skips the item, and the call is neither applied nor asked again.
  */
 export async function submitCall(db: Db, secret: string | undefined, raw: unknown, nowMs: number = Date.now()): Promise<SubmitReply | null> {
   const l = await liveLease(db, secret, nowMs);
@@ -710,6 +711,11 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     }
     try { await expectTranscript(db, secret!, attempt, nowMs + scaledS(TRANSCRIPT_WAIT_S) * 1000, nowMs); } catch (e) { console.log(`transcript of remote call ${l.id} not awaited: ${(e as Error).message}`); }
   };
+  // Every item the call names merged or closed while it ran: the result is accepted and discarded, and nothing runs it again.
+  if (await runners.discardGoneLease(db, l, { usage, duration }, nowMs)) {
+    await keep("failed");
+    return { accepted: true };
+  }
   if (s.ok === true) {
     if (typeof s.text !== "string" || s.text.length > REPLY_MAX) throw new HttpError(400, "text must be the reply as a string");
     if (typeof s.model !== "string") throw new HttpError(400, "model must name the model that ran");
@@ -983,7 +989,9 @@ const pollerOf = (db: Db): CallPoller => {
  * and ends a lost lease. A queued call is withdrawn when the job is cancelled or the pipeline is switched off (the halt is
  * thrown), after `maxWaitMs` in the queue (WaitLimitError), and, for a follow-up, after STICKY_MS while its session's helper
  * runs no live lease, else after STICKY_CAP_MS. A call the dashboard withdrew because no Task Runner could take it
- * (takers.ts) throws a NoTakerError and counts as a skipped item (skipItem), so the planner runs the step again. While the
+ * (takers.ts) throws a NoTakerError and counts as a skipped item (skipItem), so the planner runs the step again. A call withdrawn
+ * because of its item (runners.ITEM_WITHDRAWN_PREFIX: merged or closed, its work ended, or taken over by a person's workflow) throws an
+ * ItemWithdrawnError: the item is skipped without a failure, and nothing plans it again on that account. While the
  * call is leased, each poll runs the `check` requests the dashboard relayed for it on `check` (src/remote/check-relay.ts)
  * and the tool calls of the workspace bound to the call (src/build/workspace-relay.ts), which also run as soon as their wake
  * arrives. The helper's progress lines go to `onProgress`, each once. `workspace` gives the session they run on (default: the process's session on the workspace, jobSession).
@@ -1034,6 +1042,10 @@ async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceSer
       const named = repos ?? [...new Set((await runners.loadCalls(db, [id])).get(id)?.items.map((i) => i.repo) ?? [])];
       skipItem(`${NO_TAKER_SKIP}${named.join(",")}`, log, r.error);
       throw new NoTakerError(r.error);
+    }
+    if (r.state === "failed" && r.error?.startsWith(runners.ITEM_WITHDRAWN_PREFIX)) {
+      log(`  call ${id} ${r.error}`);
+      throw new ItemWithdrawnError(r.error);
     }
     if (r.state === "failed") return { state: "failed", error: r.error ?? "failed", tokens: r.usage ? storedTokens(parseJson(r.usage)) : null, runId: r.runId };
     if (r.state === "queued") {

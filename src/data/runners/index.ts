@@ -3,7 +3,7 @@ export * from "./calls-expiry.ts";
 export * from "./calls-lease.ts";
 export * from "./calls-queue.ts";
 export * from "./calls-read.ts";
-export { CALLER_GONE_MS, LEASE_IDLE_MS, LEASE_MARGIN_MS, QUEUE_CACHE_MS, REFUSED_PREFIX, judges } from "./calls-shared.ts";
+export { CALLER_GONE_MS, ITEM_WITHDRAWN_PREFIX, LEASE_IDLE_MS, LEASE_MARGIN_MS, QUEUE_CACHE_MS, REFUSED_PREFIX, judges } from "./calls-shared.ts";
 export * from "./calls-submit.ts";
 export * from "./checks.ts";
 export * from "./cooloffs.ts";

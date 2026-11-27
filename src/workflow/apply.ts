@@ -520,6 +520,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
         if (id === undefined) throw new fx.EffectError(t("{ref} was started a moment ago. Send the command again.", { ref: refText(pr.repo, pr.number) }));
         // Work started on the item takes back a close nobody carried out yet.
         if (o.closing) await fx.stopCloses({ ...c, workflowId: o.closing.workflow_id });
+        await fx.takeOver(c, pr);
         await write(id);
         return id;
       },
@@ -577,6 +578,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
       if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
       if (r.merges && o.waiting.length) await retryActions(db, { ids: o.waiting.map((a) => a.id) });
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
+      if (r.approve) await fx.takeOver(c, on.item);
       if (r.retryPremerge && live.recHead !== null) await retryPremergeAt(db, [{ repo: on.item.repo, number: on.item.number, head: live.recHead }]);
       if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));
       await work?.write(live.id);
@@ -632,6 +634,7 @@ async function resume(c: fx.Ctx, r: Run, held: ItemWorkflow): Promise<Done> {
         },
       }]);
       if (waiting.length) await retryActions(db, { ids: waiting.map((a) => a.id) });
+      if (pr) await fx.takeOver(c, pr);
       await fixes(held.id);
       return held.id;
     },

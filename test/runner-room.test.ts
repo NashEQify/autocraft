@@ -12,7 +12,7 @@ const row = (tokenId: number, login: string, o: Partial<RunnerRow> = {}): Runner
   lastError: null, idleClaimAt: NOW - 1000, idleTiers: null, idleRepos: null, leased: 0, ownLaneLeased: 0, beatAt: null, ...o,
 });
 const snap = (runners: RunnerRow[], settings: Record<string, Partial<UserSettings>> = {}): RunnerSnapshot => ({
-  at: NOW, runners, cooled: new Map(), denied: new Set(), leasedByLogin: new Map(), started: { live: [], prs: [] },
+  at: NOW, runners, cooled: new Map(), denied: new Set(), leasedByLogin: new Map(), started: { live: [], prs: [], merged: [] },
   settings: new Map(Object.entries(settings).map(([l, s]) => [l as never, { reserve: { fiveHour: 20, weekly: 20 }, repos: [], maxCalls: null, interactiveSlots: null, manualOnly: false, skipTasks: [], taskItems: "all", runnerPrivate: false, ...s }])),
 });
 

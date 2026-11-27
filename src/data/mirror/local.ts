@@ -5,6 +5,7 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { addAudit } from "../control/audit.ts";
 import { addStageEvents } from "../planner/stages.ts";
+import { withdrawGoneItemCalls } from "../runners/index.ts";
 import { advanceOrgHighWater } from "./sync.ts";
 import { keepKnownMergeableExpr } from "./fragments.ts";
 import { refKey, splitKey } from "./shared.ts";
@@ -41,7 +42,7 @@ const keyedCols = ({ repo, number, ...rest }: Parameters<typeof kx.valuesTable>[
 /**
  * The one writer for local state after a GitHub write: one `db.write`, one statement per patch kind present, the audit rows of base changes
  * through `control.addAudit`, the stage rows of label patches through `planner.addStageEvents`, and a `diff_facts` delete for a `base` patch
- * without `keepDiff`. Each patch writes only while its guard holds (`merged`, `state`: the item is OPEN; `live`: the PR's head); `changed`
+ * without `keepDiff`, and the withdrawal of the queued model calls whose items it merged or closed (runners withdrawGoneItemCalls). Each patch writes only while its guard holds (`merged`, `state`: the item is OPEN; `live`: the PR's head); `changed`
  * lists the items a statement matched. A patch of an item given twice in one kind: the last wins.
  */
 export async function applyLocal(db: Db, patches: LocalPatch[]): Promise<{ changed: RefKey[] }> {
@@ -54,10 +55,14 @@ export async function applyLocal(db: Db, patches: LocalPatch[]): Promise<{ chang
     const add = (refs: RefKey[]) => refs.forEach((r) => changed.add(r));
     const open = (eb: kx.AnyEb) => [eb("it.state", "=", "OPEN")];
 
-    if (merged.length) add(await updateItemsFrom(db, merged.map((p) => ({ repo: p.repo, number: p.number, at: p.at })), { ...ONE, at: "text" },
+    const ended: RefKey[] = [];
+    if (merged.length) ended.push(...await updateItemsFrom(db, merged.map((p) => ({ repo: p.repo, number: p.number, at: p.at })), { ...ONE, at: "text" },
       (eb) => ({ state: eb.val("MERGED"), merged_at: eb.fn.coalesce("it.merged_at", eb.ref("v.at")), closed_at: eb.fn.coalesce("it.closed_at", eb.ref("v.at")) }), open));
-    if (state.length) add(await updateItemsFrom(db, state.map((p) => ({ repo: p.repo, number: p.number, state: p.state, at: p.at ?? null })), { ...ONE, state: "text", at: "text" },
+    if (state.length) ended.push(...await updateItemsFrom(db, state.map((p) => ({ repo: p.repo, number: p.number, state: p.state, at: p.at ?? null })), { ...ONE, state: "text", at: "text" },
       (eb) => ({ state: eb.ref("v.state"), closed_at: eb.fn.coalesce("it.closed_at", eb.ref("v.at")) }), open));
+    add(ended);
+    // The queued model calls of items that left the pipeline go with them.
+    await withdrawGoneItemCalls(db, ended.map(splitKey));
     if (labels.length) {
       add(await updateItemsFrom(db, labels.map((p) => ({ repo: p.repo, number: p.number, labels: JSON.stringify(p.labels) })), { ...ONE, labels: "text" }, (eb) => ({ labels: eb.ref("v.labels") })));
       const stages = labels.flatMap((p) => (p.stage ? [{ repo: p.repo, number: p.number, stage: "labeled", ...p.stage }] : []));
@@ -113,13 +118,14 @@ export async function applyLocal(db: Db, patches: LocalPatch[]): Promise<{ chang
   });
 }
 
-/** Items GitHub no longer returns: CLOSED (closed_at kept when set) with an `item-gone` audit row for each item that was still OPEN. Returns the items closed. */
+/** Items GitHub no longer returns: CLOSED (closed_at kept when set) with an `item-gone` audit row for each item that was still OPEN, and their queued model calls withdrawn. Returns the items closed. */
 export async function closeGoneItems(db: Db, refs: RefKey[], now: string): Promise<number> {
   if (!refs.length) return 0;
   return await db.write(async () => {
     const closed = await updateItemsFrom(db, lastOf(refs.map(splitKey)).map((r) => ({ repo: r.repo, number: r.number, now })), { ...ONE, now: "text" },
       (eb) => ({ state: eb.val("CLOSED"), closed_at: eb.fn.coalesce("it.closed_at", eb.ref("v.now")) }), (eb) => [eb("it.state", "=", "OPEN")]);
     await addAudit(db, closed.map((target) => ({ login: "sync", action: "item-gone", target, details: { reason: "not found or transferred on GitHub; marked CLOSED" }, at: now })));
+    await withdrawGoneItemCalls(db, closed.map(splitKey));
     return closed.length;
   });
 }
@@ -132,7 +138,8 @@ const ITEM_UPSERT = ITEM_COLUMNS.filter((c) => c !== "repo" && c !== "number" &&
  * The sync writer: one `db.write`; per chunk of 500 entries a read of the stored rows and read times, an upsert of the changed items, the text
  * refs of changed pull requests, author ids, comments and `item_reads`. The org high water is advanced last, in the same transaction, so what the
  * sync records commits with the items or not at all. An item given twice keeps its last entry. A read never replaces what a later-started read
- * stored; a row equal to the stored one writes nothing unless `force`.
+ * stored; a row equal to the stored one writes nothing unless `force`. The queued model calls of items the write moves from open to merged or
+ * closed are withdrawn in the same transaction (runners withdrawGoneItemCalls).
  */
 export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOptions): Promise<{ stored: number }> {
   const page = [...new Map(entries.map((e) => [refKey(e.repo, e.row.number), e])).values()];
@@ -141,6 +148,8 @@ export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOption
   const isRef = (xs: readonly ItemEntry[]) => kx.tupleIn(db, ["repo", "number"], xs.map((x) => [x.repo, x.row.number] as const), ["text", "bigint"]);
   return await db.write(async () => {
     let stored = 0;
+    // Items this write moves from open to merged or closed: their queued model calls are withdrawn with it.
+    const ended: { repo: string; number: number }[] = [];
     for (const chunk of kx.batches(page)) {
       const readAt = (e: ItemEntry): string => e.readAt ?? o.readAt;
       const ref = (e: ItemEntry): RefKey => refKey(e.repo, e.row.number);
@@ -165,6 +174,7 @@ export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOption
         await q.run(q.k.insertInto("main.items").values(changed.map((e) => Object.fromEntries(ITEM_COLUMNS.map((c) => [c, (e.row as Record<string, unknown>)[c] ?? null])) as never))
           .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({ ...kx.excluded(ITEM_UPSERT)(eb), mergeable: keepKnownMergeableExpr(eb, "items") }))));
         stored += changed.length;
+        for (const e of changed) if (old.get(ref(e))?.state === "OPEN" && e.row.state !== "OPEN") ended.push({ repo: e.repo, number: e.row.number });
         // After the upsert, which keeps the stored refs but clears them where the text changed (schema trigger items_text_refs_stale).
         const refs = changed.filter((e) => {
           const s = old.get(ref(e));
@@ -202,6 +212,7 @@ export async function saveItems(db: Db, entries: ItemEntry[], o: SaveItemsOption
       }
     }
     if (o.advanceOrgHighWater !== undefined) await advanceOrgHighWater(db, o.advanceOrgHighWater);
+    await withdrawGoneItemCalls(db, ended);
     return { stored };
   });
 }

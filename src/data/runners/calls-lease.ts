@@ -7,7 +7,7 @@ import { ciEq, indexedBy, literal, schemaEb } from "../../db/kx.ts";
 import { openRun } from "../inference/index.ts";
 import { manualOnlyExpr } from "./fragments.ts";
 import { INTERACTIVE_PROMPTS, LEASE_PREFIX, queuedMsAfter, remoteLeaseLock, sha256hex, takeFromQueueCache } from "./calls-shared.ts";
-import { leasedCountExpr, pickLapsedExpr, startedWorkAllows } from "./cross.ts";
+import { itemsGoneExpr, leasedCountExpr, pickLapsedExpr, startedWorkAllows } from "./cross.ts";
 import type { Lease, LeaseRequest } from "./types.ts";
 
 /** Thrown in the lease transaction when the update took no row: the run opened for the call goes with the rollback. */
@@ -24,8 +24,8 @@ const interactiveCount = (db: Db, eb: any, login: string) => schemaEb(eb).select
 
 /**
  * Leases a call inside one transaction under the module lock `remote-lease:<login>`: opens the agent run, then one compare-and-set
- * `UPDATE remote_calls ... WHERE state = 'queued'` with every condition in the statement (pick, refused token, bound login, Manual only or the
- * started-work check, the credential still valid, the caps), then clears the helper's idle mark. A miss runs one diagnostic read and rolls back.
+ * `UPDATE remote_calls ... WHERE state = 'queued'` with every condition in the statement (pick, refused token, bound login, items not all merged or
+ * closed, Manual only or the started-work check, the credential still valid, the caps), then clears the helper's idle mark. A miss runs one diagnostic read and rolls back.
  * Two claims of one call: the update changes one row for exactly one of them. Must not be called inside an outer `db.write`.
  */
 export async function leaseCall(db: Db, req: LeaseRequest): Promise<Lease | "limit" | "gone" | null> {
@@ -50,7 +50,9 @@ export async function leaseCall(db: Db, req: LeaseRequest): Promise<Lease | "lim
         .where((eb) => eb.or([eb("refused_token", "is", null), eb("refused_token", "!=", caller.tokenId)]))
         // Only the user a call is bound to takes it. A Manual only caller takes only follow-ups, its own picks, calls bound to it and calls for work it started or approved.
         .where((eb) => eb.or([eb("for_login", "is", null), eb("for_login", "=", login)]))
-        .where((eb) => (req.started ? startedWorkAllows(db, eb, login, "remote_calls.id")
+        // A call whose items all merged or closed meanwhile is no one's work any more (sync withdraws it).
+        .where((eb) => eb.not(itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login" })))
+        .where((eb) => (req.started ? startedWorkAllows(db, eb, login, "remote_calls.id", { promptRef: "remote_calls.prompt_id", now })
           : eb.or([eb.not(manualOnlyExpr(eb, eb.val(login))), eb("parent_id", "is not", null), eb("picked_by", "=", login), eb("for_login", "=", login)])))
         .where((eb) => eb.exists(schemaEb(eb).selectFrom("main.mcp_tokens as lt").select(eb.lit(1).as("one")).where("lt.id", "=", caller.tokenId).where("lt.kind", "=", "runner").where("lt.expires_at", ">", new Date(now).toISOString())))
         .$if(caps.perLogin !== null, (b) => b.where((eb) => eb(leasedCountExpr(db, eb, eb.val(login)), "<", caps.perLogin!)))

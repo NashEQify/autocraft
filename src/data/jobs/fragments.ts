@@ -4,6 +4,7 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { registerKeySource } from "../keys.ts";
+import { approvedOf } from "./sql.ts";
 
 const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 const ENDED = ["done", "failed", "cancelled"];
@@ -27,6 +28,10 @@ export const liveJobOfFinding = (db: Db, eb: kx.AnyEb, steps: string[], repoRef:
 /** The job in `jobIdRef` has ended (done, failed or cancelled). */
 export const jobEnded = (eb: kx.AnyEb, jobIdRef: kx.Ex): AliasableExpression<SqlBool> =>
   eb.exists(kx.schemaEb(eb).selectFrom("main.jobs as je").select(one(eb)).where("je.id", "=", kx.exprOf(eb, jobIdRef)).where("je.state", "in", ENDED));
+
+/** The job in `jobIdRef` is of the approved lane: a person started or approved the PR it works on (src/runner/concurrency.ts). */
+export const approvedLaneJob = (db: Db, eb: kx.AnyEb, jobIdRef: kx.Ex): AliasableExpression<SqlBool> =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.jobs as ja").select(one(eb)).where("ja.id", "=", kx.exprOf(eb, jobIdRef)).where((e) => approvedOf(db, e, "ja.params")));
 
 /** The repo of the job in `jobIdRef`. */
 export const jobRepoOf = (eb: kx.AnyEb, jobIdRef: kx.Ex): Expression<string | null> =>

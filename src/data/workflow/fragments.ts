@@ -13,6 +13,20 @@ const one = (eb: kx.AnyEb) => eb.lit(1).as("one");
 /** Live states of `item_workflows`, spelled out so the SQL needs no import of the store. */
 export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"];
 
+/** How long after its last write a workflow that ended done through its PR's merge still owns that PR's post-merge review (src/remote/started.ts). */
+export const MERGED_WORK_MS = 3 * 24 * 3600_000;
+
+/**
+ * The workflow `w` ended done through the merge of the PR at `repo`/`number` (column references): its own PR, or the PR an implement workflow
+ * worked on, merged in the mirror, with the workflow's last write at or after `sinceIso`. The Task Runner snapshot and the lease both read it.
+ */
+export const endedByMerge = (eb: kx.AnyEb, w: string, repo: string, number: string, sinceIso: string): Expression<SqlBool> => eb.and([
+  eb(`${w}.state`, "=", "done"), eb(`${w}.repo`, "=", kx.ref<string>(repo)),
+  eb.or([eb(`${w}.number`, "=", kx.ref<number>(number)), eb(`${w}.pr_number`, "=", kx.ref<number>(number))]),
+  eb(`${w}.updated_at`, ">=", sinceIso),
+  eb.exists(kx.schemaEb(eb).selectFrom("main.items as mi").select(one(eb)).where("mi.repo", "=", kx.ref<string>(repo)).where("mi.number", "=", kx.ref<number>(number)).where("mi.state", "=", "MERGED")),
+]);
+
 /**
  * `kind` (a column of workflow_events) is not `archived`: what happened in the maintainer workflow, without the history of the decision system before it,
  * whose rows are written later than what they record. Written as the partial indexes of workflow_events write it.

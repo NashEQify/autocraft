@@ -19,7 +19,7 @@ const INTERACTIVE_LIKE = "discord.%";
 
 /** The reads of other modules the snapshot embeds; tests may pass fixed answers in their place. */
 export type SnapshotDeps = {
-  started: (db: Db) => Promise<{ live: { repo: string; number: number; entry: string; startedBy: string; approvedBy: string | null; state: string }[]; prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[] }>;
+  started: (db: Db, now: number) => Promise<{ live: { repo: string; number: number; entry: string; startedBy: string; approvedBy: string | null; state: string }[]; prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[]; merged?: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[] }>;
   /** Non-write permission checks of every login with a live runner credential, by "login\nrepo", with when each was checked. */
   denials: (db: Db, logins: { runners: true }, now: number) => Promise<Map<string, { checkedAt: string }>>;
 };
@@ -29,6 +29,7 @@ const REAL: SnapshotDeps = { started: loadStartedWork, denials: loadPermissionDe
 const startedOf = (w: Awaited<ReturnType<SnapshotDeps["started"]>>): StartedWork => ({
   live: w.live.map((r) => ({ repo: r.repo, number: r.number, entry: r.entry, state: r.state, started_by: r.startedBy, approved_by: r.approvedBy })),
   prs: w.prs.map((r) => ({ repo: r.repo, prNumber: r.pr, started_by: r.startedBy, approved_by: r.approvedBy })),
+  merged: (w.merged ?? []).map((r) => ({ repo: r.repo, prNumber: r.pr, started_by: r.startedBy, approved_by: r.approvedBy })),
 });
 
 /**
@@ -53,7 +54,7 @@ async function readSnapshot(db: Db, now: number, deps: SnapshotDeps): Promise<Ru
       .select((eb) => ["c.token_id", "c.user_login", "c.own_lane", eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("c.heartbeat_at").as("beat"),
         eb.fn.coalesce(eb.fn.sum<number>(eb.case().when("c.prompt_id", "like", INTERACTIVE_LIKE).then(1).else(0).end()), eb.lit(0)).as("interactive")])
       .where("c.state", "=", kx.literal("leased")).groupBy(["c.token_id", "c.user_login", "c.own_lane"])),
-    deps.started(db),
+    deps.started(db, now),
     deps.denials(db, { runners: true }, now),
   ]));
   const logins = [...new Set(creds.map((r) => r.login))];
@@ -127,7 +128,7 @@ async function readTakerSignature(db: Db, now: number, deps: SnapshotDeps): Prom
     q.all(q.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id")
       .leftJoin("main.user_settings as ti", (j) => j.onRef("ti.login", "=", "t.login").on("ti.key", "=", "task_items"))
       .select(["t.login", "ti.value as items"]).where((eb) => takerExpr(eb, now)).groupBy(["t.login", "ti.value"]).orderBy((eb) => eb.fn("lower", ["t.login"])).orderBy("t.login")),
-    deps.started(db),
+    deps.started(db, now),
     deps.denials(db, { runners: true }, now),
   ]));
   if (!sig?.s) return "";
