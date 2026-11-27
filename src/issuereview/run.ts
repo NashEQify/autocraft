@@ -1,6 +1,7 @@
-// The issue review step (`issue-review`): for each issue of the repo whose review a maintainer asked for, one Opus call on the
-// requester's Task Runner with a read-only checkout of the default branch head, the review stored on its issue_reviews row and
-// posted as one comment on the issue. It also posts a review's question to the reporter once a maintainer said yes to it. What a
+// The issue review step (`issue-review`): for each issue of the repo whose review a maintainer asked for, one Opus call with a
+// read-only checkout of the default branch head, the review stored on its issue_reviews row and posted as one comment on the issue.
+// The call names the issue, so it is the started work of the issue's workflow (src/remote/started.ts): its starter's and approver's
+// Task Runners take it first, and another runner after the hold. It also posts a review's question to the reporter once a maintainer said yes to it. What a
 // person answers to the review is the workflow's (src/workflow/advance.ts makes the recommendation from the stored row).
 import { isHalt } from "../agents/call.ts";
 import { runModelStep } from "../agents/step.ts";
@@ -15,27 +16,29 @@ import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { loadDuplicatesOf } from "../data/triage/index.ts";
 import type { Db } from "../db/index.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
-import { ghComment, type Writer } from "../github/write.ts";
+import { isUnsent, rateLimited } from "../github/unsent.ts";
+import { ghComment, WritePacedError, type Writer } from "../github/write.ts";
+import { unsentAsk } from "../core/rules.ts";
 import { ownerOf } from "../owners.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { discussionOf } from "../review/discussion.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForCommit } from "../sandbox/index.ts";
 import { issueReviewBody, questionBody } from "./comment.ts";
-import { ISSUE_BODY_CHARS, type IssueReview, type IssueReviewInput } from "./prompt.ts";
+import { ISSUE_BODY_CHARS, issueReviewOf, type IssueReview, type IssueReviewInput } from "./prompt.ts";
 
 const PROMPT = CLAUDE_PROMPTS["review.issue"];
 /** The audit login of the step's writes. */
 const ACTOR = "issue-review";
-/** Issues of one job reviewed at once; each call waits for its own requester's Task Runner. */
+/** Issues of one job reviewed at once. */
 const AT_ONCE = 4;
 
 export type IssueReviewParams = { repo: string; number?: number; by: By; jobId?: number; onHandled?: (n: number) => void };
 export type IssueReviewDeps = {
   /** A read-only checkout of the repo's default branch head: its directory, commit and branch; null when none could be made. */
   checkout: (db: Db, repo: string) => Promise<{ dir: string; sha: string; branch: string } | null>;
-  /** The review call; absent: the real model call on the requester's Task Runner. */
-  ask?: (input: IssueReviewInput, forLogin: string) => Promise<{ value: IssueReview; model: string } | null>;
+  /** The review call; absent: the real model call. */
+  ask?: (input: IssueReviewInput) => Promise<{ value: IssueReview; model: string } | null>;
   exec?: Exec;
   /** Replaces the installation-token minter of the writes (tests). */
   mint?: Writer["mint"];
@@ -64,7 +67,7 @@ async function inputOf(db: Db, repo: string, number: number, openPr: { number: n
   const known = others.length ? await loadItems(db, others.map((o) => ({ repo, number: o.n })), "text") : new Map();
   const labels = (() => { try { const v = JSON.parse(it.labels ?? "[]") as unknown; return Array.isArray(v) ? v.map(String) : []; } catch { return []; } })();
   return {
-    ref, title: it.title ?? "", body: (it.body ?? "").slice(0, ISSUE_BODY_CHARS), author: it.author ?? null, author_association: it.author_association ?? null, labels,
+    repo, number, ref, title: it.title ?? "", body: (it.body ?? "").slice(0, ISSUE_BODY_CHARS), author: it.author ?? null, author_association: it.author_association ?? null, labels,
     comments: discussion.entries,
     related: others.flatMap((o) => {
       const x = known.get(`${repo}#${o.n}`);
@@ -88,27 +91,17 @@ export async function runIssueReviews(db: Db, p: IssueReviewParams, log: (l: str
     if ("refused" in g) { s.waiting++; log(`  ${g.refused}`); return; }
     const row = await loadLatestIssueReview(db, repo, number);
     if (!row) { s.waiting++; return; }
-    const w: Writer = { db, login: ACTOR, ...(d.mint && { mint: d.mint }) };
-    if (row.state === "ask") {
-      const author = (await loadItems(db, [{ repo, number }], "card")).get(ref)?.author ?? null;
-      const r = await ghComment(w, g, d.exec ?? defaultExec, "issue-question", { repo, number, pr: false }, { by: "model", kind: "question", model: row.model }, questionBody(row.question ?? "", author, ownerOf(repo)), { review: row.id });
-      if (r.code !== 0) { s.failed++; log(`  ${ref}: the question to the reporter was not posted: ${r.stderr.replace(/\s+/g, " ").slice(0, 200)}`); return; }
-      await saveIssueReview(db, row.id, { state: "reporter", askedAt: new Date().toISOString() }, ["ask"]);
-      s.asked++;
-      p.onHandled?.(++handled);
-      log(`  ${ref}: question posted to the reporter`);
-      return;
-    }
+    if (row.state === "ask" || row.state === "posting") { await postOf(db, row, d, { log, summary: s, g }); p.onHandled?.(++handled); return; }
     if (row.state !== "queued" && row.state !== "reporter") { s.waiting++; return; }
     const input = await inputOf(db, repo, number, x.facts.openPr);
     if (!input) { s.waiting++; return; }
     const co = d.ask ? null : await (checkout ??= d.checkout(db, repo));
     let got: { value: IssueReview; model: string } | null;
     try {
-      if (d.ask) got = await d.ask(input, row.requestedBy);
+      if (d.ask) got = await d.ask(input);
       else {
         const r = await runModelStep(db, ISSUE_REVIEW, { ...input, ...(co && { repo_dir: REPO_PATH }) }, {
-          model: PROMPT.models[0]!, ...(co && { checkout: co.dir }), forLogin: row.requestedBy,
+          model: PROMPT.models[0]!, ...(co && { checkout: co.dir }),
           usage: { run: runId, agent: `issue-review-${repo}-${number}`, stage: "review", items: (ok) => (ok ? 1 : 0) },
         });
         got = r.ok ? { value: r.value, model: r.model || PROMPT.models[0]! } : null;
@@ -116,7 +109,7 @@ export async function runIssueReviews(db: Db, p: IssueReviewParams, log: (l: str
     } catch (e) {
       if (!isHalt(e)) throw e;
       s.waiting++;
-      log(`  ${ref}: ${row.requestedBy}'s Task Runner did not take the review; it waits`);
+      log(`  ${ref}: no Task Runner took the review; it waits`);
       return;
     }
     p.onHandled?.(++handled);
@@ -126,9 +119,10 @@ export async function runIssueReviews(db: Db, p: IssueReviewParams, log: (l: str
   return s;
 }
 
-/** Stores the call's outcome on the row and posts a valid review on the issue. */
-async function record(db: Db, row: IssueReviewRow, got: { value: IssueReview; model: string } | null, co: { sha: string; branch: string } | null, d: IssueReviewDeps,
-  o: { log: (l: string) => void; summary: IssueReviewSummary; jobId: number | null; g: Parameters<typeof ghComment>[1] }): Promise<void> {
+type Outcome = { log: (l: string) => void; summary: IssueReviewSummary; g: Parameters<typeof ghComment>[1] };
+
+/** Stores the call's outcome on the row; a valid review is stored to be posted, and posted at once. */
+async function record(db: Db, row: IssueReviewRow, got: { value: IssueReview; model: string } | null, co: { sha: string } | null, d: IssueReviewDeps, o: Outcome & { jobId: number | null }): Promise<void> {
   const ref = `${row.repo}#${row.number}`, at = new Date().toISOString(), expect = ["queued", "reporter"] as const;
   if (!got) {
     const tries = row.tries + 1, failed = tries >= ISSUE_REVIEW_TRIES;
@@ -137,13 +131,50 @@ async function record(db: Db, row: IssueReviewRow, got: { value: IssueReview; mo
     o.log(`  ${ref}: no valid review (call ${tries} of ${ISSUE_REVIEW_TRIES})${failed ? "; the maintainer is asked whether to try again" : ""}`);
     return;
   }
-  const r = await ghComment({ db, login: ACTOR, ...(d.mint && { mint: d.mint }) }, o.g, d.exec ?? defaultExec, "issue-review-comment", { repo: row.repo, number: row.number, pr: false }, { by: "model", kind: "review", model: got.model },
-    issueReviewBody(got.value, { owner: ownerOf(row.repo), head: co?.sha ?? null, branch: co?.branch ?? null }), { review: row.id, recommendation: got.value.recommendation });
-  const url = r.code === 0 ? /https:\/\/\S+#issuecomment-\d+/.exec(r.stdout)?.[0] ?? null : null;
-  if (r.code !== 0) o.log(`  ${ref}: the review comment was not posted: ${r.stderr.replace(/\s+/g, " ").slice(0, 200)}`);
-  await saveIssueReview(db, row.id, {
-    state: "done", review: got.value, model: got.model, commitSha: co?.sha ?? null, reviewedAt: at, tries: 0, error: r.code === 0 ? null : "the review comment was not posted", commentUrl: url, jobId: o.jobId,
-  }, expect);
+  const stored = { state: "posting" as const, review: got.value, model: got.model, commitSha: co?.sha ?? null, reviewedAt: at, tries: 0, error: null, postTries: [], jobId: o.jobId };
+  if (!await saveIssueReview(db, row.id, stored, expect)) return;
   o.summary.reviewed++;
   o.log(`  ${ref}: reviewed, recommends ${got.value.recommendation}`);
+  await postOf(db, { ...row, ...stored }, d, o);
+}
+
+/**
+ * Posts the row's review comment (state posting) or its question to the reporter (state ask). A post that sent nothing (no app token,
+ * write pacing, GitHub's rate limit) is tried again after the unsent writes' backoff (src/core/rules.ts unsentAsk); after those tries, or
+ * a post GitHub refused, the review's question goes on without it: the comment is final as not posted, the question to the reporter
+ * comes back to the maintainer.
+ */
+async function postOf(db: Db, row: IssueReviewRow, d: IssueReviewDeps, o: Outcome): Promise<void> {
+  const ref = `${row.repo}#${row.number}`, ask = row.state === "ask";
+  const review = issueReviewOf(row.review);
+  let body: string;
+  if (ask) body = questionBody(row.question ?? "", (await loadItems(db, [{ repo: row.repo, number: row.number }], "card")).get(ref)?.author ?? null, ownerOf(row.repo));
+  else if (review) body = issueReviewBody(review, { owner: ownerOf(row.repo), head: row.commitSha, branch: row.commitSha ? (await loadRepos(db, { names: [row.repo], all: true })).get(row.repo)?.default_branch ?? null : null });
+  else return;
+  const w: Writer = { db, login: ACTOR, ...(d.mint && { mint: d.mint }) };
+  let url: string | null = null, error: string | null = null, again = false;
+  try {
+    const r = await ghComment(w, o.g, d.exec ?? defaultExec, ask ? "issue-question" : "issue-review-comment", { repo: row.repo, number: row.number, pr: false },
+      { by: "model", kind: ask ? "question" : "review", model: row.model }, body, { review: row.id, ...(review && !ask && { recommendation: review.recommendation }) });
+    if (r.code === 0) url = /https:\/\/\S+#issuecomment-\d+/.exec(r.stdout)?.[0] ?? "";
+    else { error = r.stderr.replace(/\s+/g, " ").slice(0, 200); again = r.sent === false || rateLimited(error); }
+  } catch (e) {
+    error = String((e as Error).message ?? e).replace(/\s+/g, " ").slice(0, 200);
+    again = isUnsent(e) || e instanceof WritePacedError;
+  }
+  const what = ask ? "question to the reporter" : "review comment";
+  const at = new Date().toISOString(), tries = [...row.postTries, at];
+  if (url !== null) {
+    await saveIssueReview(db, row.id, ask ? { state: "reporter", askedAt: at, postTries: [] } : { state: "done", commentUrl: url || null, postTries: [] }, [row.state]);
+    if (ask) o.summary.asked++;
+    o.log(`  ${ref}: ${what} posted`);
+  } else if (again && unsentAsk(tries, Date.parse(at)) !== "final") {
+    await saveIssueReview(db, row.id, { postTries: tries, error: `${what} not sent: ${error}` }, [row.state]);
+    o.summary.waiting++;
+    o.log(`  ${ref}: ${what} not sent, tried again later: ${error}`);
+  } else {
+    await saveIssueReview(db, row.id, { state: "done", postTries: [], error: `${what} not posted: ${error}` }, [row.state]);
+    o.summary.failed++;
+    o.log(`  ${ref}: ${what} not posted: ${error}`);
+  }
 }

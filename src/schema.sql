@@ -3160,14 +3160,15 @@ CREATE TABLE IF NOT EXISTS eval_causes (
 ) WITHOUT ROWID;
 
 -- The issue reviews a maintainer asked for (`review` on an issue, src/issuereview): one row per review of an issue's workflow.
--- state: queued (due), done (the review is stored and posted), failed (no valid review after ISSUE_REVIEW_TRIES calls), ask (the
--- reporter's question waits to be posted), reporter (the question is posted; the review runs again on this row once the reporter answers).
+-- state: queued (due), posting (the review is stored, its comment waits to be posted), done (the comment is posted, or its tries are
+-- final), failed (no valid review after ISSUE_REVIEW_TRIES calls), ask (the reporter's question waits to be posted), reporter (the
+-- question is posted; the review runs again on this row once the reporter answers).
 CREATE TABLE IF NOT EXISTS issue_reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   workflow_id INTEGER NOT NULL,
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
-  requested_by TEXT NOT NULL,         -- whose Task Runner runs the review: who started it or answered the question that asked for it
+  requested_by TEXT NOT NULL,         -- who asked for the review: who started it, or answered the question that asked for it
   requested_at TEXT NOT NULL,
   then_implement INTEGER NOT NULL DEFAULT 0, -- `review and implement`: an implement recommendation starts the implementation without a question
   state TEXT NOT NULL,
@@ -3179,6 +3180,7 @@ CREATE TABLE IF NOT EXISTS issue_reviews (
   review TEXT,                        -- JSON IssueReview (src/issuereview/prompt.ts)
   reviewed_at TEXT,
   comment_url TEXT,
+  post_tries TEXT,                    -- JSON [ISO]: posts of the comment or the question that sent nothing (src/core/rules.ts unsentAsk)
   question TEXT,                      -- state ask or reporter: the question for the reporter
   asked_at TEXT,                      -- when that question was posted
   job_id INTEGER

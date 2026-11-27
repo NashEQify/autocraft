@@ -472,10 +472,11 @@ export type ItemFacts = {
   openPr: { number: number; closes: boolean } | null;
 
   /**
-   * The newest review row of an issue whose workflow is live (src/data/issuereview): its state, whose Task Runner runs it, the calls that gave
-   * no valid review since it was due and the last one's time, and whether the issue's author commented after its question was posted.
+   * The newest review row of an issue whose workflow is live (src/data/issuereview): its state, who asked for it, the calls that gave no
+   * valid review since it was due and the last one's time, the posts that sent nothing, and whether the issue's author commented after its
+   * question was posted.
    */
-  issueReview?: { id: number; state: "queued" | "done" | "failed" | "ask" | "reporter"; requestedBy: string; tries: number; triedAt: string | null; reporterAnswered: boolean } | null;
+  issueReview?: { id: number; state: "queued" | "posting" | "done" | "failed" | "ask" | "reporter"; requestedBy: string; tries: number; triedAt: string | null; postTries: string[]; reporterAnswered: boolean } | null;
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */
   implement: {

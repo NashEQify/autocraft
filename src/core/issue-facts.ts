@@ -8,7 +8,7 @@ import type { KeySource, Ref } from "../data/keys.ts";
 import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { plainLogin } from "../github/identity.ts";
-import { PIPELINE_LOGIN_KEY, pipelineWrites } from "./rules.ts";
+import { PIPELINE_LOGIN_KEY, pipelineWrites, unsentAsk } from "./rules.ts";
 import { assignmentIn, ownPrSet, queuerIn, refreshTimes, standingIn, workflowFactOf, type FactsOf } from "./facts.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { issueReviewDelayMs } from "./backoff.ts";
@@ -172,6 +172,8 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     if (a?.startRetry) refresh.soon(ref, a.startRetry.dueAt);
     const ir = r.kind === "issue" ? d.issueReviews.get(ref) : undefined;
     if (ir?.state === "queued" && ir.tries > 0 && ir.triedAt) refresh.soon(ref, Date.parse(ir.triedAt) + issueReviewDelayMs(ir.tries));
+    const unsent = ir && (ir.state === "posting" || ir.state === "ask") ? unsentAsk(ir.postTries, now) : null;
+    if (unsent !== null && unsent !== "final") refresh.soon(ref, unsent.until);
     const refreshAt = refresh.at(ref);
     return {
       repo: r.repo, number: r.number, kind: r.kind as ItemFacts["kind"], open: true, assignment: assignmentIn(pipelineLogin, d.assignments.get(ref), r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}),

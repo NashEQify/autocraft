@@ -1068,7 +1068,7 @@ export const STEPS: StepDef[] = [
   {
     name: "issue-review",
     title: "Review issues",
-    description: "Reviews the issues maintainers started with review: Opus reads each issue, its discussion and the repository at the default branch, posts one review comment with a recommendation (implement, close, needs info, backlog), and the maintainer answers it. Also posts a review's question to the reporter after a maintainer's yes. Every model call runs on the Task Runner of the person who asked for the review",
+    description: "Reviews the issues maintainers started with review: Opus reads each issue, its discussion and the repository at the default branch, posts one review comment with a recommendation (implement, close, needs info, backlog), and the maintainer answers it. Also posts a review's question to the reporter after a maintainer's yes. A call is the started work of the issue's workflow: its starter's and approver's Task Runners take it first",
     stage: runStage("issue-review"),
     requires: "operator",
     models: ["opus"],

@@ -8,6 +8,7 @@ import { permitted } from "./authority.ts";
 import type { WaitCode } from "./codes.ts";
 import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
 import { REFEREE_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
+import { unsentAsk } from "./rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts } from "./plan.ts";
 
 const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
@@ -61,8 +62,9 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
 
 /**
  * The issue review step of an issue whose live workflow is a review, or the wait that holds it; null when nothing of it is due. A queued
- * review is due, after a backoff when its last call gave no valid review; a question for the reporter is due to be posted; once posted, the
- * review runs again after the issue's author commented.
+ * review is due, after a backoff when its last call gave no valid review; a stored review's comment and a question for the reporter are due
+ * to be posted, after the unsent writes' backoff when a post sent nothing; once the question is posted, the review runs again after the
+ * issue's author commented.
  */
 export function issueReviewStep(f: ItemFacts): { due: true } | { wait: Wait } | null {
   const r = f.issueReview;
@@ -71,7 +73,11 @@ export function issueReviewStep(f: ItemFacts): { due: true } | { wait: Wait } | 
     const due = r.tries > 0 && r.triedAt ? Date.parse(r.triedAt) + issueReviewDelayMs(r.tries) : 0;
     return f.now < due ? { wait: system("issue-review-retry", `the next issue review at ${new Date(due).toISOString().slice(11, 16)} UTC (call ${r.tries + 1})`) } : { due: true };
   }
-  if (r.state === "ask") return { due: true };
+  // A comment or question whose post sent nothing is posted again after the backoff of the unsent writes.
+  if (r.state === "posting" || r.state === "ask") {
+    const next = unsentAsk(r.postTries, f.now);
+    return next !== null && next !== "final" ? { wait: system("ask-unsent", `the post of the issue review's ${r.state === "ask" ? "question" : "comment"}, tried again at ${new Date(next.until).toISOString().slice(11, 16)} UTC`) } : { due: true };
+  }
   if (r.state === "reporter") return r.reporterAnswered ? { due: true } : { wait: { code: "issue-reporter", who: "contributor", text: "the reporter's answer" } };
   return null;
 }

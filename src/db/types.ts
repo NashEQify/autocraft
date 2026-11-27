@@ -1140,6 +1140,7 @@ export interface IssueReviews {
   review: string | null;
   reviewed_at: string | null;
   comment_url: string | null;
+  post_tries: string | null;
   question: string | null;
   asked_at: string | null;
   job_id: number | null;
@@ -3279,7 +3280,7 @@ export const COLUMNS = {
   held_followups: ["id", "card_id", "choice_id", "decision_id", "answer_seq", "preapproval_id", "repo", "number", "issue_repo", "title", "body", "by", "at", "state", "issue_number", "url", "reason", "attempts", "updated_at", "workflow_id", "approved_at"],
   implementation_rounds: ["id", "implementation_id", "kind", "call_id", "result", "at"],
   implementations: ["id", "repo", "number", "queued_by", "state", "attempt", "text_hash", "base_sha", "workspace_id", "plan_json", "plan_md", "plan_call_id", "session_call_id", "report_json", "diff_hash", "diff_stat", "branch", "pr_number", "pr_url", "decision_id", "reason", "created_at", "updated_at"],
-  issue_reviews: ["id", "workflow_id", "repo", "number", "requested_by", "requested_at", "then_implement", "state", "tries", "tried_at", "error", "commit_sha", "model", "review", "reviewed_at", "comment_url", "question", "asked_at", "job_id"],
+  issue_reviews: ["id", "workflow_id", "repo", "number", "requested_by", "requested_at", "then_implement", "state", "tries", "tried_at", "error", "commit_sha", "model", "review", "reviewed_at", "comment_url", "post_tries", "question", "asked_at", "job_id"],
   item_activity: ["repo", "number", "id", "kind", "at", "actor", "label", "before_oid", "after_oid"],
   item_areas: ["repo", "number", "area", "source", "confidence", "list_version", "at"],
   item_changes: ["seq", "repo", "number"],

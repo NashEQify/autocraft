@@ -21,6 +21,9 @@ export const ISSUE_BODY_CHARS = 8000;
 
 /** The issue as the prompt shows it. */
 export type IssueReviewInput = {
+  /** The issue the call names (its work is the started work of the issue's workflow); not part of the quoted JSON, which has `ref`. */
+  repo: string;
+  number: number;
   ref: string;
   title: string;
   body: string;
@@ -33,6 +36,7 @@ export type IssueReviewInput = {
   related: { ref: string; kind: "issue" | "pull request"; state: string; title: string; relation: "duplicate" | "closes" | "mentions" }[];
   /** Where the call may read the repository at the default branch head; not part of the quoted JSON. */
   repo_dir?: string;
+  repo_docs?: boolean;
 };
 
 export type IssueClaim = { claim: string; status: (typeof CLAIM_STATUSES)[number]; where: string };
@@ -146,7 +150,7 @@ export function lintIssueReview(text: string): LintProblem[] | null {
 }
 
 export const SAMPLE_ISSUE_REVIEW: IssueReviewInput[] = [{
-  ref: "photocraft#412", title: "Export to PNG drops the alpha channel", body: "Exporting a layer with transparency to PNG gives a white background. Seen since 0.9.",
+  repo: "photocraft", number: 412, ref: "photocraft#412", title: "Export to PNG drops the alpha channel", body: "Exporting a layer with transparency to PNG gives a white background. Seen since 0.9.",
   author: "reporter", author_association: "NONE", labels: ["bug"],
   comments: [{ kind: "comment", author: "mira", at: "2026-11-26T10:00:00Z", body: "Does this happen with a single layer too?" }],
   related: [{ ref: "#398", kind: "issue", state: "OPEN", title: "PNG export loses transparency", relation: "duplicate" }],

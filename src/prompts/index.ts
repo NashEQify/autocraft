@@ -1864,7 +1864,7 @@ const VALUES: { [K in ClaudePromptId]: (input: ClaudeInput[K]) => Record<string,
     return { cause: untrustedJson(rest), repo_access: repoAccess(repo_dir, "the AutoCraft source at the default branch head", "Judge from the records; say in cause that the code could not be read.") };
   },
   "review.issue": ([c]) => {
-    const { repo_dir, ...rest } = c!;
+    const { repo_dir, repo_docs: _d, repo: _repo, number: _number, ...rest } = c!;
     return { issue: untrustedJson(rest), repo_access: repoAccess(repo_dir, "the default branch head, to check the issue's claims and find what a fix touches", "You cannot read the repository: every claim is unclear, and where names the file the issue points to with line 1.") };
   },
 };

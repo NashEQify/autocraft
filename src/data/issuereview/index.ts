@@ -5,29 +5,32 @@ import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 
-export type IssueReviewState = "queued" | "done" | "failed" | "ask" | "reporter";
+export type IssueReviewState = "queued" | "posting" | "done" | "failed" | "ask" | "reporter";
 
 export type IssueReviewRow = {
   id: number; workflowId: number; repo: string; number: number; requestedBy: string; requestedAt: string; thenImplement: boolean;
   state: IssueReviewState; tries: number; triedAt: string | null; error: string | null; commitSha: string | null; model: string | null;
   /** The stored review (src/issuereview/prompt.ts IssueReview), as JSON. */
   review: unknown; reviewedAt: string | null; commentUrl: string | null; question: string | null; askedAt: string | null;
+  /** Posts of the comment or the question that sent nothing, oldest first. */
+  postTries: string[];
 };
 
 /** The newest row of an issue whose workflow is live, as the planner reads it; `reporterAnswered`: the issue's author commented after the question was posted. */
-export type IssueReviewFact = { id: number; workflowId: number; state: IssueReviewState; requestedBy: string; tries: number; triedAt: string | null; reporterAnswered: boolean };
+export type IssueReviewFact = { id: number; workflowId: number; state: IssueReviewState; requestedBy: string; tries: number; triedAt: string | null; postTries: string[]; reporterAnswered: boolean };
 
 export type NewIssueReview = { workflowId: number; repo: string; number: number; by: string; at: string; thenImplement: boolean; state?: "queued" | "ask"; question?: string | null };
-export type IssueReviewPatch = Partial<Pick<IssueReviewRow, "state" | "tries" | "triedAt" | "error" | "commitSha" | "model" | "reviewedAt" | "commentUrl" | "askedAt">> & { review?: unknown; jobId?: number | null };
+export type IssueReviewPatch = Partial<Pick<IssueReviewRow, "state" | "tries" | "triedAt" | "error" | "commitSha" | "model" | "reviewedAt" | "commentUrl" | "askedAt" | "postTries">> & { review?: unknown; jobId?: number | null };
 
 const LIVE = ["running", "waiting", "blocked", "recommending"];
-const COLUMNS = ["r.id", "r.workflow_id", "r.repo", "r.number", "r.requested_by", "r.requested_at", "r.then_implement", "r.state", "r.tries", "r.tried_at", "r.error", "r.commit_sha", "r.model", "r.review", "r.reviewed_at", "r.comment_url", "r.question", "r.asked_at"] as const;
+const COLUMNS = ["r.id", "r.workflow_id", "r.repo", "r.number", "r.requested_by", "r.requested_at", "r.then_implement", "r.state", "r.tries", "r.tried_at", "r.error", "r.commit_sha", "r.model", "r.review", "r.reviewed_at", "r.comment_url", "r.post_tries", "r.question", "r.asked_at"] as const;
 
 const json = (s: string | null): unknown => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
-const rowOf = (r: { id: number | string; workflow_id: number | string; repo: string; number: number | string; requested_by: string; requested_at: string; then_implement: number | string; state: string; tries: number | string; tried_at: string | null; error: string | null; commit_sha: string | null; model: string | null; review: string | null; reviewed_at: string | null; comment_url: string | null; question: string | null; asked_at: string | null }): IssueReviewRow => ({
+const times = (s: string | null): string[] => { const v = json(s); return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []; };
+const rowOf = (r: { id: number | string; workflow_id: number | string; repo: string; number: number | string; requested_by: string; requested_at: string; then_implement: number | string; state: string; tries: number | string; tried_at: string | null; error: string | null; commit_sha: string | null; model: string | null; review: string | null; reviewed_at: string | null; comment_url: string | null; post_tries: string | null; question: string | null; asked_at: string | null }): IssueReviewRow => ({
   id: Number(r.id), workflowId: Number(r.workflow_id), repo: r.repo, number: Number(r.number), requestedBy: r.requested_by, requestedAt: r.requested_at, thenImplement: Number(r.then_implement) === 1,
   state: r.state as IssueReviewState, tries: Number(r.tries), triedAt: r.tried_at, error: r.error, commitSha: r.commit_sha, model: r.model, review: json(r.review), reviewedAt: r.reviewed_at,
-  commentUrl: r.comment_url, question: r.question, askedAt: r.asked_at,
+  commentUrl: r.comment_url, question: r.question, askedAt: r.asked_at, postTries: times(r.post_tries),
 });
 
 /** Adds review rows in the caller's transaction. */
@@ -48,7 +51,7 @@ export async function saveIssueReview(db: Db, id: number, p: IssueReviewPatch, e
     ...(p.state !== undefined && { state: p.state }), ...(p.tries !== undefined && { tries: p.tries }), ...(p.triedAt !== undefined && { tried_at: p.triedAt }),
     ...(p.error !== undefined && { error: p.error }), ...(p.commitSha !== undefined && { commit_sha: p.commitSha }), ...(p.model !== undefined && { model: p.model }),
     ...(p.review !== undefined && { review: p.review === null ? null : JSON.stringify(p.review) }), ...(p.reviewedAt !== undefined && { reviewed_at: p.reviewedAt }),
-    ...(p.commentUrl !== undefined && { comment_url: p.commentUrl }), ...(p.askedAt !== undefined && { asked_at: p.askedAt }), ...(p.jobId !== undefined && { job_id: p.jobId }),
+    ...(p.commentUrl !== undefined && { comment_url: p.commentUrl }), ...(p.askedAt !== undefined && { asked_at: p.askedAt }), ...(p.postTries !== undefined && { post_tries: JSON.stringify(p.postTries) }), ...(p.jobId !== undefined && { job_id: p.jobId }),
   };
   if (!Object.keys(set).length) return false;
   return await db.write(async () => {
@@ -80,14 +83,14 @@ export async function loadIssueReviewFacts(db: Db, keys: KeySource): Promise<Map
   const rows = await q.all(q.k.selectFrom("main.issue_reviews as r")
     .innerJoin(resolveKeys(db, keys, "kk"), (j) => j.onRef("kk.repo", "=", "r.repo").onRef("kk.number", "=", "r.number"))
     .innerJoin("main.item_workflows as w", "w.id", "r.workflow_id")
-    .select((eb) => ["r.id", "r.workflow_id", "r.repo", "r.number", "r.state", "r.requested_by", "r.tries", "r.tried_at",
+    .select((eb) => ["r.id", "r.workflow_id", "r.repo", "r.number", "r.state", "r.requested_by", "r.tries", "r.tried_at", "r.post_tries",
       eb.exists(eb.selectFrom("main.comments as c").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "c.number"))
         .select(eb.lit(1).as("one")).whereRef("c.repo", "=", "r.repo").whereRef("c.number", "=", "r.number").whereRef("c.author", "=", "i.author").whereRef("c.created_at", ">", "r.asked_at")).as("answered")])
     .where(kx.inList(db, "w.state", LIVE)).orderBy("r.id"));
   const out = new Map<string, IssueReviewFact>();
   for (const r of rows) {
     out.set(`${r.repo}#${r.number}`, {
-      id: Number(r.id), workflowId: Number(r.workflow_id), state: r.state as IssueReviewState, requestedBy: r.requested_by, tries: Number(r.tries), triedAt: r.tried_at,
+      id: Number(r.id), workflowId: Number(r.workflow_id), state: r.state as IssueReviewState, requestedBy: r.requested_by, tries: Number(r.tries), triedAt: r.tried_at, postTries: times(r.post_tries),
       reporterAnswered: Boolean(Number(r.answered)),
     });
   }
