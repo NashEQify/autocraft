@@ -18,20 +18,17 @@ import type { ItemFilter } from "./task-items.ts";
 import { scaled } from "./time-scale.ts";
 import { startedOf } from "./started.ts";
 import { runnerTakes } from "./rules.ts";
-import { HEARTBEAT_S } from "./protocol.ts";
 import type { Db } from "../db/index.ts";
-import { loadQueue, type RunnerRow } from "../data/runners/index.ts";
+import { IDLE_FRESH_MS, LIVE_LEASE_MS, loadQueue, type RunnerRow } from "../data/runners/index.ts";
 import { canWriteOf, itemFilterIn, loadView, settingsOf, type RemoteView } from "./view.ts";
 
-/** How long an empty claim counts as an idle helper: two claim intervals and some slack. */
-export const IDLE_FRESH_MS = scaled(45_000);
+/** How long an empty claim counts as an idle helper (src/data/runners/calls-shared.ts). */
+export { IDLE_FRESH_MS };
 /** How often a waiting caller stamps its call's `seen_at` (it polls more often, but writes only this often). */
 export const SEEN_EVERY_MS = scaled(30_000);
 /** A queued call whose caller has not stamped it for this long has lost its caller and is not counted or claimed: two stamps and some slack. */
 export const CALLER_STALE_MS = 2 * SEEN_EVERY_MS + scaled(15_000);
 
-/** A lease whose last heartbeat is at most this old shows its helper is running (three heartbeats). */
-const LIVE_LEASE_MS = 3 * scaled(HEARTBEAT_S * 1000);
 
 /**
  * Room for calls of class `cls` that name `repos` (undefined: any repo, every helper counts; empty: no repo, which only

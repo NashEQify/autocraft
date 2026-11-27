@@ -18,7 +18,7 @@ import type { Entry } from "../workflow/types.ts";
 import { judges, roleFits } from "./rules.ts";
 import { taskOfStep } from "./my-tasks.ts";
 import type { Tier } from "./protocol.ts";
-import { POSTMERGE_STEP } from "../data/runners/index.ts";
+import { IDLE_FRESH_MS, LIVE_LEASE_MS, POSTMERGE_STEP } from "../data/runners/index.ts";
 import { scaled } from "./time-scale.ts";
 import { canWriteOf, freshReady, loadView, settingsOf, tiersOf, type RemoteView } from "./view.ts";
 
@@ -41,7 +41,7 @@ export type StartedCalls = {
    * their Task Runner while no runner of those is ready with room. For a call of the
    * post-merge review (`step` postmerge), a merged PR's workflow that ended done through that merge lately counts as such work.
    */
-  owners: (refs: readonly ItemRef[], step?: string) => ReadonlySet<string>;
+  owners: (refs: readonly ItemRef[], step?: string, tier?: Tier) => ReadonlySet<string>;
   /** The tiers the lowercase login's fresh, ready Task Runners offer while the login is not cooling off (empty: none). */
   tiersOf: (login: string) => ReadonlySet<Tier>;
   /** Whether one of the login's such runners, of a credential other than `refusedToken`, may take a call on `repos` of `prompt_id`. */
@@ -53,7 +53,7 @@ export type StartedCalls = {
    * items are known), the logins with such a runner that have, in every one of `repos`, a live workflow AutoCraft is working
    * on (running or waiting) whose steps include `step`'s task. No step: none.
    */
-  ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string }) => ReadonlySet<string>;
+  ownersFor: (c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }) => ReadonlySet<string>;
   /**
    * The lowercase logins whose started work a call or job is (as ownersFor) and who have a runner token, connected or not, ready
    * or not, cooling off or not, that may take it once it claims: the role rules, write permission, and its tier among the models
@@ -78,17 +78,24 @@ export function startedOf(v: RemoteView): StartedCalls {
   return s;
 }
 
+/** The runner credentials whose reported model serves `tier` (an accepted family), for the lease's taker rule (cross.ts readyWithRoomExpr). */
+export const tierTokens = (v: RemoteView, tier: Tier): number[] =>
+  v.snapshot.runners.filter((r) => tiersOf(r.models, v.accepted).has(tier)).map((r) => r.tokenId);
+
 /**
- * Whether some Task Runner of `login` is ready with room: a maintainer's or operator's fresh, ready runner not cooling off with a free
- * slot (its slots, less the fast lane when it has two or more, less its leases outside the own lane), the login under its Max calls at
- * once. The lease's side is readyWithRoomExpr in src/data/runners/cross.ts.
+ * Whether some Task Runner of `login` could run a call of `tier` now (any tier when left out): a maintainer's or operator's fresh,
+ * ready runner not cooling off whose reported model serves the tier, active (a lease heartbeat within LIVE_LEASE_MS or an empty claim
+ * within IDLE_FRESH_MS) and with a free slot (its slots, less the fast lane when it has two or more, less its leases outside the own
+ * lane), the login under its Max calls at once. The lease's side is readyWithRoomExpr in src/data/runners/cross.ts.
  */
-export function readyWithRoom(v: RemoteView, login: string): boolean {
+export function readyWithRoom(v: RemoteView, login: string, tier?: Tier): boolean {
   const { snapshot, now } = v;
   const key = login.toLowerCase();
   const max = settingsOf(snapshot, key).maxCalls;
   if (max !== null && (snapshot.leasedByLogin.get(key)?.leased ?? 0) >= max) return false;
   return snapshot.runners.some((r) => r.login.toLowerCase() === key && (r.role === "maintainer" || r.role === "operator") && freshReady(snapshot, r, now)
+    && (tier === undefined || tiersOf(r.models, v.accepted).has(tier))
+    && ((r.beatAt ?? -Infinity) >= now - LIVE_LEASE_MS || (r.idleClaimAt ?? -Infinity) >= now - IDLE_FRESH_MS)
     && (r.slots ?? 1) - ((r.slots ?? 1) >= 2 ? 1 : 0) > r.leased);
 }
 
@@ -102,13 +109,22 @@ function buildStarted(v: RemoteView): StartedCalls {
     if (!s) to.set(key, (s = new Set()));
     for (const l of logins) if (l) s.add(l.toLowerCase());
   };
-  // A workflow's people: its starter and approver, and the logins that took its work while none of those has a runner ready with room.
+  // A workflow's people: its starter and approver, and the logins that took its work while none of those could run the call now.
+  type Row = { started_by: string; approved_by: string | null; taken_by?: string[] };
   const ready = new Map<string, boolean>();
-  const readyOf = (l: string): boolean => ready.get(l) ?? ready.set(l, readyWithRoom(v, l)).get(l)!;
-  const peopleOf = (w: { started_by: string; approved_by: string | null; taken_by?: string[] }): (string | null)[] =>
-    w.taken_by?.length && ![w.started_by, w.approved_by].some((l) => l && readyOf(l.toLowerCase())) ? [w.started_by, w.approved_by, ...w.taken_by] : [w.started_by, w.approved_by];
-  for (const w of live) add(byItem, w.repo, w.number, peopleOf(w));
-  for (const p of prs) add(byItem, p.repo, p.prNumber, peopleOf(p));
+  const readyOf = (l: string, tier?: Tier): boolean => {
+    const k = `${l}\n${tier ?? ""}`;
+    return ready.get(k) ?? ready.set(k, readyWithRoom(v, l, tier)).get(k)!;
+  };
+  const takersOf = (w: Row, tier?: Tier): string[] =>
+    w.taken_by?.length && ![w.started_by, w.approved_by].some((l) => l && readyOf(l.toLowerCase(), tier)) ? w.taken_by : [];
+  const peopleOf = (w: Row, tier?: Tier): (string | null)[] => [w.started_by, w.approved_by, ...takersOf(w, tier)];
+  const taken = new Map<string, Row[]>();
+  for (const { repo, number, w } of [...live.map((w) => ({ repo: w.repo, number: w.number, w })), ...prs.map((w) => ({ repo: w.repo, number: w.prNumber, w }))]) {
+    add(byItem, repo, number, [w.started_by, w.approved_by]);
+    const key = `${repo}#${number}`;
+    if (w.taken_by?.length) (taken.get(key) ?? taken.set(key, []).get(key)!).push(w);
+  }
   for (const p of merged) add(byMerged, p.repo, p.prNumber, [p.started_by, p.approved_by]);
   const runnersOf = new Map<string, { role: string; tokens: Map<number, Set<Tier>> }>();
   for (const r of snapshot.runners) {
@@ -130,24 +146,25 @@ function buildStarted(v: RemoteView): StartedCalls {
   const tokenLogins = [...tokensOf.keys()];
   // The room's write rule: only a non-write permission confirmed within the cache's lifetime leaves a login out.
   const canWrite = canWriteOf(snapshot);
-  const owners = (refs: readonly ItemRef[], step?: string): ReadonlySet<string> => {
+  const owners = (refs: readonly ItemRef[], step?: string, tier?: Tier): ReadonlySet<string> => {
     const postmerge = step === POSTMERGE_STEP;
     if (!refs.length || (!byItem.size && !(postmerge && byMerged.size))) return NONE;
     const of = (r: ItemRef): ReadonlySet<string> | undefined => {
       const key = `${r.repo}#${r.number}`, a = byItem.get(key), b = postmerge ? byMerged.get(key) : undefined;
-      return a && b ? new Set([...a, ...b]) : a ?? b;
+      const t = (taken.get(key) ?? []).flatMap((w) => takersOf(w, tier));
+      return a && (b || t.length) ? new Set([...a, ...b ?? [], ...t]) : a ?? b;
     };
     const [first, ...rest] = refs.map(of);
     if (!first || rest.some((s) => !s)) return NONE;
     return new Set([...first].filter((l) => rest.every((s) => s!.has(l))));
   };
   /** owners(refs) with `refs`; without, those of `logins` with a working live workflow in every repo whose steps include the step's task. */
-  const startedBy = (logins: readonly string[], c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string }): ReadonlySet<string> => {
-    if (c.refs) return owners(c.refs, c.step);
+  const startedBy = (logins: readonly string[], c: { repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }): ReadonlySet<string> => {
+    if (c.refs) return owners(c.refs, c.step, c.tier);
     if (c.step === undefined || !c.repos.length) return NONE;
     const task = taskOfStep(c.step);
     const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
-    return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && peopleOf(w).some((b) => b?.toLowerCase() === l)))));
+    return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && peopleOf(w, c.tier).some((b) => b?.toLowerCase() === l)))));
   };
   const deniedOn = (login: string, repos: readonly string[]): boolean => repos.some((x) => !canWrite(login, x));
   return {
@@ -184,6 +201,6 @@ export function heldFor(s: StartedCalls, c: HeldCall, login: string | null, nowM
   if (c.forLogin !== null || c.since < nowMs - STARTED_HOLD_MS) return null;
   const self = login?.toLowerCase() ?? null;
   const judging = judges(c.prompt_id);
-  for (const o of s.owners(c.refs, c.step)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return o;
+  for (const o of s.owners(c.refs, c.step, c.tier)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return o;
   return null;
 }

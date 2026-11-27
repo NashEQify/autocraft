@@ -104,6 +104,8 @@ export type LeaseRequest = {
   caps: { perLogin: number | null; interactive: number | null };
   /** The call is for work the caller started or approved: checked in the lease statement; else the Manual only rules apply. */
   started: boolean;
+  /** With `started`: the runner credentials whose reported model serves the call's tier, for the taker rule (cross.ts readyWithRoomExpr). */
+  tierTokens?: readonly number[];
   clearIdle: boolean; source: LeaseSource;
   /** The lease's time limit when it is shorter than the call's own (the room left on the claim's harness login); null or absent: the call's own. */
   timeoutMs?: number | null;

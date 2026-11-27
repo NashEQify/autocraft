@@ -438,7 +438,7 @@ describe("picks and Manual only", async () => {
     await clear();
   });
 
-  test("a maintainer who took a started item's work: their Manual only runner takes its calls while the starter's runner cannot, no other item's, and the starter's runner comes first once it can", async () => {
+  test("a maintainer who took a started item's work: their Manual only runner takes its calls while the starter's runner cannot run them, no other item's, and the starter's runner comes first once it can", async () => {
     await db.run(db.k.updateTable("tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
     const wf = await insertWorkflow(db, { repo: "photocraft", number: 40, kind: "issue", entry: "implement", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });
     await takeItemRunner(db, { workflowId: wf, repo: "photocraft", number: 40, login: "bob", at: new Date().toISOString() });
@@ -452,8 +452,11 @@ describe("picks and Manual only", async () => {
     assert.equal(await leased("bob"), first, "alice's runner is held by its usage limit: bob's takes the item's call");
     assert.equal(await leased("bob"), null, "and no other item on the repo");
     await ready("alice");
+    // Her helper asks for work: its last claim found nothing.
+    await db.run(db.k.updateTable("remote_helpers").set({ idle_claim_at: Date.now() }).where("login", "=", "alice"));
+    dropQueueCache(db);
     const second = await q({ items: item });
-    assert.equal(await leased("bob"), null, "alice's runner is ready with room: bob's passes the call over");
+    assert.equal(await leased("bob"), null, "alice's runner could run it now: bob's passes the call over");
     assert.equal(await leased("alice"), second);
     await setUserMaxCalls(db, "alice", 1);
     const third = await q({ items: item });

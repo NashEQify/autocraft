@@ -7,7 +7,7 @@ import { ciEq, indexedBy, literal, ref, schemaEb, type Eb, type Ex } from "../..
 import { setRunProgress } from "../inference/index.ts";
 import { endedByMerge, LIVE_STATES, MERGE_WAYS, MERGED_WORK_MS, worksOnPr } from "../workflow/fragments.ts";
 import type { ItemRef } from "../../../web/src/api/types.ts";
-import { INTERACTIVE_PROMPTS, MAX_CALLS_KEY, MAX_CALLS_MAX, STATUS_FRESH_MS, lostLeaseExpr, sha256hex } from "./calls-shared.ts";
+import { IDLE_FRESH_MS, INTERACTIVE_PROMPTS, LIVE_LEASE_MS, MAX_CALLS_KEY, MAX_CALLS_MAX, STATUS_FRESH_MS, lostLeaseExpr, sha256hex } from "./calls-shared.ts";
 import type { LiveLease, Tier } from "./types.ts";
 import { expireLeases } from "./calls-expiry.ts";
 import { unlease } from "./calls-unlease.ts";
@@ -16,13 +16,16 @@ import { unlease } from "./calls-unlease.ts";
 export const POSTMERGE_STEP = "postmerge";
 
 /**
- * Some Task Runner of a login the workflow `alias` (an `item_workflows` row) names in `cols` is ready with room at `now`: a live runner
- * credential of a maintainer or operator whose helper reported `ready` within STATUS_FRESH_MS and has a free slot (its slots, less the
- * fast lane when it has two or more, less its leases outside the own lane), its login not cooling off and under its Max calls at once.
- * The Task Runner snapshot's side is readyWithRoom in src/remote/started.ts.
+ * Some Task Runner of a login the workflow `alias` (an `item_workflows` row) names in `cols` could run the call now: a live runner
+ * credential of a maintainer or operator, one of `tierTokens` (the credentials whose reported model serves the call's tier, read by the
+ * caller: src/remote/started.ts tierTokens), whose helper reported `ready` within STATUS_FRESH_MS, is active (a lease heartbeat within
+ * LIVE_LEASE_MS, or an empty claim within IDLE_FRESH_MS) and has a free slot (its slots, less the fast lane when it has two or more,
+ * less its leases outside the own lane), its login not cooling off and under its Max calls at once. The Task Runner snapshot's side is
+ * readyWithRoom in src/remote/started.ts.
  */
-export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly string[], now: number): Expression<SqlBool> {
+export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly string[], now: number, tierTokens: readonly number[]): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
+  if (!tierTokens.length) return w.lit(false);
   const one = w.lit(1).as("one");
   const login = ref<string>("rh.login");
   const slots = w.fn.coalesce("rh.slots", w.lit(1));
@@ -33,7 +36,11 @@ export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly 
   return w.exists(schemaEb(w).selectFrom("main.remote_helpers as rh").innerJoin("main.mcp_tokens as rt", "rt.id", "rh.token_id").innerJoin("main.access as ra", "ra.login", "rt.login").select(one)
     .where("rt.kind", "=", "runner").where("rt.expires_at", ">", new Date(now).toISOString()).where("ra.role", "in", ["maintainer", "operator"])
     .where((x: any) => x.or(cols.map((c) => ciEq(db, login, ref<string>(`${alias}.${c}`)))))
-    .where("rh.readiness", "=", "ready").where("rh.reported_at", ">=", now - STATUS_FRESH_MS)
+    .where("rh.token_id", "in", [...tierTokens]).where("rh.readiness", "=", "ready").where("rh.reported_at", ">=", now - STATUS_FRESH_MS)
+    .where((x: any) => x.or([
+      x.exists(schemaEb(x).selectFrom("main.remote_calls as rb").select(one).where("rb.state", "=", literal("leased")).where("rb.token_id", "=", ref<number>("rh.token_id")).where("rb.heartbeat_at", ">=", now - LIVE_LEASE_MS)),
+      x("rh.idle_claim_at", ">=", now - IDLE_FRESH_MS),
+    ]))
     .where((x: any) => x(free, ">", leased))
     .where((x: any) => x.not(x.exists(schemaEb(x).selectFrom("main.remote_cooloffs as rc").select(one).where(ciEq(db, "rc.login", login)).where("rc.until", ">", now))))
     .where((x: any) => x.not(x.exists(schemaEb(x).selectFrom("main.user_settings as rs").select(one).where(ciEq(db, "rs.login", login)).where("rs.key", "=", MAX_CALLS_KEY)
@@ -43,19 +50,20 @@ export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly 
 /**
  * The started-work condition inside the lease update: every item of the call (`remote_call_items`) has a live workflow started or
  * approved by `login`, or is the PR that one works on. A live workflow whose work `login` took onto their Task Runner (`item_runners`,
- * not released) counts too while no Task Runner of its starter or approver is ready with room (readyWithRoomExpr). With `stepRef` (the
+ * not released) counts too while no Task Runner of its starter or approver could run the call now (readyWithRoomExpr, over `tierTokens`:
+ * the credentials that serve the call's tier; none given, none does). With `stepRef` (the
  * call's `step` column), a call of the post-merge review's item may instead be a merged PR whose workflow, started or approved by
  * `login`, ended done through that merge since `now` less MERGED_WORK_MS (src/data/workflow/fragments.ts endedByMerge, which the Task
  * Runner snapshot reads too).
  */
-export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string, o: { stepRef?: string; now?: number } = {}): Expression<SqlBool> {
+export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string, o: { stepRef?: string; now?: number; tierTokens?: readonly number[] } = {}): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
   const one = w.lit(1).as("one");
   const now = o.now ?? Date.now();
   const by = (x: any, alias: string) => x.or([ciEq(db, `${alias}.started_by`, x.val(login)), ciEq(db, `${alias}.approved_by`, x.val(login))]);
   const took = (x: any, alias: string) => x.and([
     x.exists(schemaEb(x).selectFrom("main.item_runners as tr").select(one).where("tr.workflow_id", "=", ref<number>(`${alias}.id`)).where("tr.login", "=", login.toLowerCase()).where("tr.released_at", "is", null)),
-    x.not(readyWithRoomExpr(db, x, alias, ["started_by", "approved_by"], now)),
+    x.not(readyWithRoomExpr(db, x, alias, ["started_by", "approved_by"], now, o.tierTokens ?? [])),
   ]);
   const since = new Date(now - MERGED_WORK_MS).toISOString();
   const owns = (e: any, item: string) => {
