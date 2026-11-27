@@ -41,8 +41,10 @@ test("a PR on the path to merge keeps the assignment, one that left it loses it"
   assert.equal(unassigns(decidePr(prFacts({ ...held, conflict: { bucket: "merge", base: "main", baseOk: true }, assignment: ours }))), false, "conflict merge due");
 });
 
-test("a fix-up that gave up asks the contributor, then releases the PR, unless it is in a batch", () => {
-  const f = { review: { verdict: "take-fix" }, fixup: spent, assignment: ours };
+test("a fix-up that gave up asks the contributor, then releases the PR, unless it is in a batch; on a PR approved for merge it asks the approver at once", () => {
+  const approved = { review: { verdict: "take-fix" }, fixup: spent, assignment: ours };
+  assert.equal(unassigns(decidePr(prFacts(approved))), true, "approver asked");
+  const f = { ...approved, workflow: { entry: "fixup", approved: false, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } as const };
   assert.equal(unassigns(decidePr(prFacts(f))), false, "ask due");
   const asked = { ...f, fixup: { ...spent, recorded: ["asked"] } };
   assert.equal(unassigns(decidePr(prFacts(asked))), true, "asked");

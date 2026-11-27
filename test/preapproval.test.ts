@@ -111,15 +111,15 @@ describe("pre-approved merge", () => {
     assert.deepEqual(await codes(w, 3), ["ci-failed"]);
   });
 
-  test("fixes on a branch that takes no push are the contributor's: the leg waits, and stops where nobody can be asked", async () => {
+  test("fixes on a branch that takes no push go back to whoever approved the merge, never to the contributor alone", async () => {
     for (const comment of [true, false]) {
       const w = await (await (await (await fresh()).pr(5, { canModify: false })).workflow(5)).review(5, { verdict: "take-fix" });
       await preapproveMerge(w.db, { repo: "app", number: 5, by: OPERATOR });
       await setCommentApproval(w.db, OPERATOR, "app", comment);
       await settle(w);
-      assert.equal((await preapprovalOf(w.db, "app", 5))?.state, comment ? "review" : "failed");
-      if (comment) assert.ok((await w.prPlan(5)).actions.some((a) => a.kind === "fixup" && a.params?.bucket === "ask"));
-      else assert.deepEqual(await codes(w, 5), ["fix-cannot-run"]);
+      assert.equal((await preapprovalOf(w.db, "app", 5))?.state, "failed");
+      assert.deepEqual(await codes(w, 5), ["fix-cannot-run"]);
+      assert.ok(!(await w.prPlan(5)).actions.some((a) => a.kind === "fixup" && a.params?.bucket === "ask"), "no ask to the contributor");
       if (comment) w.close();
     }
   });

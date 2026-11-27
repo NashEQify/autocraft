@@ -226,13 +226,14 @@ test("a fix-up request without a leg whose try another push overtook goes on at 
   assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "fixup" && a.params?.source === "operator"));
 });
 
-test("a conflict merge of ours that was force-pushed away is made again, and after the tries at the head someone else must act", async () => {
+test("a conflict merge of ours that was force-pushed away is made again, and after the tries at the head its approver is asked", async () => {
   const w = (current = await (await (await world()).repo()).acting());
   await approved(w, { n: 1, state: "ci", entry: "review" });
   await w.db.run(w.db.k.updateTable("pr_checks").set({ mergeable: "CONFLICTING" }));
   await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }));
   const conflicts = async () => (await w.prPlan(1)).actions.filter((a) => a.kind === "conflict" && a.params?.bucket === "merge").length;
-  for (const [to, again] of [["sha1b", 1], ["sha1c", 0]] as const) {
+  // After the last try the PR approved for merge is not left to its contributor: the workflow asks its approver, and its leg ends with that question.
+  for (const [to, again, leg] of [["sha1b", 1, "ci"], ["sha1c", 0, "cancelled"]] as const) {
     assert.equal(await conflicts(), 1);
     const at = new Date().toISOString();
     await merged("same")(w, 1, "sha1", to);
@@ -247,8 +248,9 @@ test("a conflict merge of ours that was force-pushed away is made again, and aft
     await w.db.run(w.db.k.updateTable("pr_checks").set({ fetched_at: later }));
     await w.db.run(w.db.k.updateTable("repos").set({ synced_at: later }));
     await tick(w);
-    assert.deepEqual([await conflicts(), (await legOf(w, 1)).state], [again, "ci"], to);
+    assert.deepEqual([await conflicts(), (await legOf(w, 1)).state], [again, leg], to);
   }
+  assert.deepEqual((await w.db.all(w.db.k.selectFrom("item_workflows").select("state"))).map((r) => r.state), ["blocked"]);
   await w.verified(1);
   const plan = await w.prPlan(1);
   assert.ok(["person", "contributor"].includes(plan.waitKind!) && plan.wait, JSON.stringify([plan.wait, plan.actions]));

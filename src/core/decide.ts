@@ -33,6 +33,13 @@ export const workflowOf = (f: Pick<PrFacts, "workflow">): WorkflowFact | null =>
 /** A maintainer approved the PR for merge: its work runs in the approved job of each per-repo step, apart from the repo's other work (src/runner/concurrency.ts). */
 export const approvedForMerge = (f: Pick<PrFacts, "workflow">): boolean => !!workflowOf(f)?.approved;
 /**
+ * Verify may run at the head: always on a merge entry, which has no review; on another PR approved for merge only once, at the head it merges: CI green and its pre-merge review there
+ * without a defect that stops it, or its leg handed it to the merge queue at that head, which a person's answer does past a failed pre-merge review
+ * (src/preapproval). Until then the PR waits for those steps, not for verification.
+ */
+const verifyDue = (f: PrFacts): boolean =>
+  !approvedForMerge(f) || mergeEntry(f) || (ciAllows(f.ci) && (f.handOver || (f.premerge?.head === f.head && f.premerge.hasFindings && f.premerge.defects === 0)));
+/**
  * An unstarted PR that the workflow takes up by itself: a small or medium bug fix on the merge rule's criteria.
  * Not once its workflow (an implementation PR's: its issue's) ended: stopped, sent to the backlog, closed or done with an answer that
  * runs nothing, it means hands off until someone starts it. A question of the rule's that nobody answered before the author pushed
@@ -196,9 +203,10 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: boolean): QueueSta
   };
   if (!e.path && e.premerge === "fix" && ciAllows(f.ci)) return toFix();
   // A maintainer sees the verification result before the item's blocker is shown.
-  if (!e.path) { const v = verifyState(f); return v === "verify-failed" || v === "verify-error" ? "needs-decision" : v ?? "needs-decision"; }
+  // A verification still to come is what the PR waits for only once it may run (verifyDue); before that, the steps that lead to it.
+  const v = verifyState(f) === "waiting-verify" && !verifyDue(f) ? null : verifyState(f);
+  if (!e.path) return v === "verify-failed" || v === "verify-error" ? "needs-decision" : v ?? "needs-decision";
   if (!ciAllows(f.ci) || f.mergeable !== "MERGEABLE") return "waiting-ci";
-  const v = verifyState(f);
   if (v && !(e.path === "operator" && f.verifyOverride && (v === "verify-failed" || v === "verify-error"))) return v;
   if ((e.path === "rule" || e.path === "maintainer") && e.premerge) {
     if (e.premerge === "none" || e.premerge === "retry") return "waiting-premerge";
@@ -425,7 +433,7 @@ export type CifixBucket = "unreviewed" | "comment-wait" | "work" | "unapproved" 
 export const mergeOwned = (f: PrFacts): boolean => { const w = workflowOf(f); return !!w && (w.approved || w.entry === "merge"); };
 
 /** A PR a person approved for merge had PUSHES_PER_APPROVAL pushes of ours that changed its own diff since they last went on with it: the next push waits for their answer. */
-export const pushesUsed = (f: PrFacts): boolean => mergeOwned(f) && (f.ownPushes ?? 0) >= PUSHES_PER_APPROVAL;
+export const pushesUsed = (f: PrFacts): boolean => approvedForMerge(f) && (f.ownPushes ?? 0) >= PUSHES_PER_APPROVAL;
 
 /** A push of ours on a PR approved for merge: the review's fix-up, the pre-merge review's fix-up, the CI fix, the merge of the base branch. */
 export type HeldPush = "fixup" | "premerge" | "cifix" | "conflict";
@@ -442,7 +450,7 @@ export function pushHeld(f: PrFacts): HeldPush | null {
 
 /** A PR approved for merge reached its daily cap of conflict merges today, and on CONFLICT_CAPPED_DAYS days in all since its person last went on with it: they are asked before another day of merges. */
 export const conflictDaysUsed = (f: PrFacts): boolean =>
-  mergeOwned(f) && f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped" && (f.conflict.cappedDays ?? 0) >= CONFLICT_CAPPED_DAYS;
+  approvedForMerge(f) && f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped" && (f.conflict.cappedDays ?? 0) >= CONFLICT_CAPPED_DAYS;
 
 /** The CI fix may have the failed jobs rerun: the repo approves CI reruns, and a review read the head (none at a head the contributor pushed). */
 export const cifixMayRerun = (f: PrFacts): boolean => f.repoFacts.ciApproved && !f.gateRed;
@@ -780,9 +788,8 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   if (!held && reviewFollowUpsDue(f)) actions.push(act("followups", f.head, { source: "review", reviewHead: f.review!.head }));
 
   // Verify: a take at the head (or a merge entry, which has no review), CI not failing, not verified yet (a stale verification does not count).
-  // A PR approved for merge is verified once, at the head it merges: CI green and its pre-merge review there without a defect that stops it.
-  const verifiable = mx ? !!f.head : !!r && r.head === f.head && r.verdict === "take" && !r.stale
-    && (!approvedForMerge(f) || (ciAllows(f.ci) && f.premerge?.head === f.head && f.premerge.hasFindings && f.premerge.defects === 0));
+  // A PR approved for merge is verified once, at the head it merges (verifyDue).
+  const verifiable = mx ? !!f.head : !!r && r.head === f.head && r.verdict === "take" && !r.stale && verifyDue(f);
   if (!held && !f.draft && verifiable && f.ci !== "failure" && (!f.verification || f.verification.state === "stale")) {
     actions.push(act("verify", f.head, { bucket: f.verifyUnavailable ? "unavailable" : "plan" }));
   }
