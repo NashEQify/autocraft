@@ -19,7 +19,11 @@ export type IssueReviewRow = {
 /** The newest row of an issue whose workflow is live, as the planner reads it; `reporterAnswered`: the issue's author commented after the question was posted. */
 export type IssueReviewFact = { id: number; workflowId: number; state: IssueReviewState; requestedBy: string; tries: number; triedAt: string | null; postTries: string[]; reporterAnswered: boolean };
 
-export type NewIssueReview = { workflowId: number; repo: string; number: number; by: string; at: string; thenImplement: boolean; state?: "queued" | "ask"; question?: string | null };
+/** `review`, `model`, `commitSha`, `reviewedAt`: the review a question to the reporter comes from, kept on the row that posts it. */
+export type NewIssueReview = {
+  workflowId: number; repo: string; number: number; by: string; at: string; thenImplement: boolean; state?: "queued" | "ask"; question?: string | null;
+  review?: unknown; model?: string | null; commitSha?: string | null; reviewedAt?: string | null;
+};
 export type IssueReviewPatch = Partial<Pick<IssueReviewRow, "state" | "tries" | "triedAt" | "error" | "commitSha" | "model" | "reviewedAt" | "commentUrl" | "askedAt" | "postTries">> & { review?: unknown; jobId?: number | null };
 
 const LIVE = ["running", "waiting", "blocked", "recommending"];
@@ -40,6 +44,7 @@ export async function queueIssueReviews(db: Db, rows: readonly NewIssueReview[])
   await db.write(async () => {
     await q.run(q.k.insertInto("main.issue_reviews").values(rows.map((r) => ({
       workflow_id: r.workflowId, repo: r.repo, number: r.number, requested_by: r.by, requested_at: r.at, then_implement: r.thenImplement ? 1 : 0, state: r.state ?? "queued", tries: 0, question: r.question ?? null,
+      review: r.review === undefined || r.review === null ? null : JSON.stringify(r.review), model: r.model ?? null, commit_sha: r.commitSha ?? null, reviewed_at: r.reviewedAt ?? null,
     }))));
   });
 }

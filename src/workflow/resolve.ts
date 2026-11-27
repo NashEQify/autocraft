@@ -94,6 +94,8 @@ export type Refusal =
   | { why: "already-held"; by: string; at: string }
   | { why: "not-held" }
   | { why: "already-started"; entry: Entry; by: string; at: string }
+  /** `review and implement` on an issue whose implementation runs already: review alone reviews its pull request. */
+  | { why: "implement-running"; by: string; at: string }
   | { why: "already-approved"; by: string; at: string }
   /** A ready plan's part: the implementation is built from the whole plan, so a part can't be fixed or dropped on its own. */
   | { why: "implement-part"; parts: number[] }
@@ -224,6 +226,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     if (entry === "review") return run({ again: "review", thenImplement: chain, weight, answers, how: answers ? "answered" : null });
   }
   if (entry === "implement") return refused({ why: "already-started", entry: wf.entry, by: wf.startedBy, at: wf.startedAt });
+  if (chain) return refused({ why: "implement-running", by: wf.startedBy, at: wf.startedAt });
 
   // Parts named by number or by words, each matching exactly one part of the plan.
   const fix: number[] = [];

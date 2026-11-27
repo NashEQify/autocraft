@@ -7,18 +7,44 @@ import type { Recommendation } from "./types.ts";
 /** Characters of the review's reason or question the recommendation quotes. */
 const QUOTED = 300;
 
-/** The recommendation of a stored review row (state done or failed); `review`: the row's stored review JSON. */
-export function issueRecommendation(row: { id: number; state: string; tries: number; review: unknown }): Recommendation {
+type Row = { id: number; state: string; tries: number; review: unknown; question: string | null; askedAt: string | null; commentUrl: string | null; error: string | null };
+
+/**
+ * What of the row's posts ended without posting (src/issuereview/run.ts postOf): its question to the reporter, which the row was made
+ * to post and never got to the reporter, or its review comment; null when nothing failed. `error` holds GitHub's answer then.
+ */
+export function unposted(row: Row): "question" | "comment" | null {
+  if (row.state !== "done" || row.commentUrl !== null || row.error === null) return null;
+  return row.question !== null && row.askedAt === null ? "question" : issueReviewOf(row.review) ? "comment" : null;
+}
+
+/**
+ * The recommendation of a stored review row (state done or failed); `review`: the row's stored review JSON. A question to the reporter
+ * that could not be posted comes back as such: a yes posts it again, without a model call. A review comment that could not be posted is
+ * said before the review's own recommendation, which stands.
+ */
+export function issueRecommendation(row: Row): Recommendation {
   const base = { parts: { fix: [], drop: [] }, merges: false };
+  const failed = unposted(row);
+  const error = clipText(row.error ?? "", QUOTED);
+  if (failed === "question") {
+    return { ...base, text: t("The question to the reporter could not be posted: {error}", { error }), issue: { review: row.id, action: "ask", question: row.question ?? "" } };
+  }
   const r = row.state === "done" ? issueReviewOf(row.review) : null;
   if (!r) return { ...base, text: t("The issue review gave no valid review after {n} tries.", { n: Math.max(row.tries, 1) }), again: "review" };
+  const rec = recommendationOf(row.id, r);
+  return failed === "comment" ? { ...rec, text: t("The review comment could not be posted: {error} {recommendation}", { error, recommendation: rec.text }) } : rec;
+}
+
+function recommendationOf(id: number, r: NonNullable<ReturnType<typeof issueReviewOf>>): Recommendation {
+  const base = { parts: { fix: [], drop: [] }, merges: false };
   const reason = clipText(r.reason, QUOTED);
   switch (r.recommendation) {
-    case "implement": return { ...base, text: t("The review recommends implementing it: {reason}", { reason }), issue: { review: row.id, action: "implement" } };
-    case "backlog": return { ...base, text: t("The review recommends the backlog: {reason}", { reason }), issue: { review: row.id, action: "backlog" } };
+    case "implement": return { ...base, text: t("The review recommends implementing it: {reason}", { reason }), issue: { review: id, action: "implement" } };
+    case "backlog": return { ...base, text: t("The review recommends the backlog: {reason}", { reason }), issue: { review: id, action: "backlog" } };
     case "needs-info": {
       const question = r.question ?? "";
-      return { ...base, text: t("The review needs an answer from the reporter: “{question}”", { question: clipText(question, QUOTED) }), issue: { review: row.id, action: "ask", question } };
+      return { ...base, text: t("The review needs an answer from the reporter: “{question}”", { question: clipText(question, QUOTED) }), issue: { review: id, action: "ask", question } };
     }
     case "close": {
       const dup = r.close_as === "duplicate" && r.duplicate_of !== undefined ? r.duplicate_of : null;

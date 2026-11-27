@@ -3,7 +3,7 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
-import { IMPLEMENT_START_RETRIES, issueReviewDelayMs } from "./backoff.ts";
+import { IMPLEMENT_START_RETRIES, issueReviewDueAt } from "./backoff.ts";
 import { permitted } from "./authority.ts";
 import type { WaitCode } from "./codes.ts";
 import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
@@ -62,23 +62,24 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
 
 /**
  * The issue review step of an issue whose live workflow is a review, or the wait that holds it; null when nothing of it is due. A queued
- * review is due, after a backoff when its last call gave no valid review; a stored review's comment and a question for the reporter are due
- * to be posted, after the unsent writes' backoff when a post sent nothing; once the question is posted, the review runs again after the
- * issue's author commented.
+ * review is due (`review`, a model call), after a backoff when its last call gave no valid review; a stored review's comment and a
+ * question for the reporter are due to be posted (`post`, no model call), after the unsent writes' backoff when a post sent nothing; once
+ * the question is posted, the review runs again after the issue's author commented, with the same backoff after a call that gave no
+ * valid review.
  */
-export function issueReviewStep(f: ItemFacts): { due: true } | { wait: Wait } | null {
+export function issueReviewStep(f: ItemFacts): { due: "review" | "post" } | { wait: Wait } | null {
   const r = f.issueReview;
   if (f.kind !== "issue" || !f.open || !f.inScope || f.held || !r || f.workflow?.entry !== "review") return null;
-  if (r.state === "queued") {
-    const due = r.tries > 0 && r.triedAt ? Date.parse(r.triedAt) + issueReviewDelayMs(r.tries) : 0;
-    return f.now < due ? { wait: system("issue-review-retry", `the next issue review at ${new Date(due).toISOString().slice(11, 16)} UTC (call ${r.tries + 1})`) } : { due: true };
+  if (r.state === "queued" || (r.state === "reporter" && r.reporterAnswered)) {
+    const due = issueReviewDueAt(r);
+    return f.now < due ? { wait: system("issue-review-retry", `the next issue review at ${new Date(due).toISOString().slice(11, 16)} UTC (call ${r.tries + 1})`) } : { due: "review" };
   }
   // A comment or question whose post sent nothing is posted again after the backoff of the unsent writes.
   if (r.state === "posting" || r.state === "ask") {
     const next = unsentAsk(r.postTries, f.now);
-    return next !== null && next !== "final" ? { wait: system("ask-unsent", `the post of the issue review's ${r.state === "ask" ? "question" : "comment"}, tried again at ${new Date(next.until).toISOString().slice(11, 16)} UTC`) } : { due: true };
+    return next !== null && next !== "final" ? { wait: system("ask-unsent", `the post of the issue review's ${r.state === "ask" ? "question" : "comment"}, tried again at ${new Date(next.until).toISOString().slice(11, 16)} UTC`) } : { due: "post" };
   }
-  if (r.state === "reporter") return r.reporterAnswered ? { due: true } : { wait: { code: "issue-reporter", who: "contributor", text: "the reporter's answer" } };
+  if (r.state === "reporter") return { wait: { code: "issue-reporter", who: "contributor", text: "the reporter's answer" } };
   return null;
 }
 
@@ -155,9 +156,9 @@ export function decideItem(f: ItemFacts): ItemPlan {
   // implement: a queued issue's next step (implementStep); the breaker is applied by gates().
   const step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
-  // issue-review: the review a maintainer asked for, or its question to the reporter (issueReviewStep).
+  // issue-review: the review a maintainer asked for; issue-review-post: its comment, or its question to the reporter (issueReviewStep).
   const review = issueReviewStep(f);
-  if (review && "due" in review) actions.push(act("issue-review", null));
+  if (review && "due" in review) actions.push(act(review.due === "post" ? "issue-review-post" : "issue-review", null));
 
   // unassign (issues; a PR's is decided with its review-to-merge plan): kept while an implementation is due or runs, or its PR is open;
   // released when the issue waits on a person (a question, a stuck attempt, a switch), was given up or left the scope.

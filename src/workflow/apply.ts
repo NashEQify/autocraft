@@ -409,9 +409,12 @@ function takeRefusalText(r: TakeRefusal, connect: string): string {
 /** The Connect page, where a person sets up a Task Runner. */
 const connectUrl = (): string => `${envVar("BASE_URL")?.replace(/\/+$/, "") ?? ""}/connect`;
 
-/** A run that gives a Task Runner work: anything but an end, an autorepin, a take or release, a weight alone and a resume of what nobody started. */
+/**
+ * A run that gives a Task Runner work: anything but an end, an autorepin, a take or release, a weight alone, a resume of what nobody
+ * started, and a question to an issue's reporter, which only posts.
+ */
 const needsRunner = (r: Run): boolean =>
-  r.end === null && r.autorepin === null && r.runner === null && r.resume !== "unstarted"
+  r.end === null && r.autorepin === null && r.runner === null && r.resume !== "unstarted" && r.asks === null
   && (r.start !== null || r.again !== null || r.approve || r.retryMerge || r.answers || r.resume !== null || r.goesOn || r.pick !== null || r.fix.length > 0 || r.implements);
 
 /** The Task Runner line for work `login` started or approved on `repo` (runnerLine); null when there is nothing to say or the runners could not be read. */
@@ -584,13 +587,14 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (r.weight !== null && r.weight !== live.weight) patch.weight = r.weight;
   const runs = r.again !== null || r.fix.length > 0 || r.approve || r.answers;
   // An implement workflow's steps after the implementation run on its PR: a review again, fix-ups of the review's parts, the merge leg.
+  // An issue's own review has no PR: its review again is a new request row (below).
   let on: fx.Ctx = { ...c, ...shown, workflowId: live.id };
-  if (live.kind === "issue" && !r.pick && (r.again !== null || r.fix.length > 0 || r.merges)) {
+  if (live.kind === "issue" && live.entry !== "review" && !r.pick && (r.again !== null || r.fix.length > 0 || r.merges)) {
     const pr = await issuePr(live);
     // A command written on the PR is about its head then, and about that PR.
     if (o.said.kind === "pr" && (pr?.number !== o.said.number || (o.said.head !== null && pr.head !== o.said.head))) throw new fx.EffectError(CHANGED());
     if (pr) on = { ...c, ...shown, item: pr, workflowId: live.id };
-    else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("{ref} has no open implementation pull request yet.", { ref: refText(item.repo, item.number) }));
+    else if (r.again !== null || r.fix.length) throw new fx.EffectError(t("The implementation of {ref} has no pull request yet.", { ref: refText(item.repo, item.number) }));
   }
   // A new weight also orders the queued calls of the item and of the PR that implements it.
   const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await issuePr(live)] : [])].filter((x) => x !== null);
@@ -621,9 +625,13 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // An issue's review: implementing it makes the workflow an implement one; a question to the reporter waits for their answer.
   if (r.implements) Object.assign(patch, { entry: "implement", state: "running", step: null, plan: [] });
   if (r.asks !== null) patch.state = "waiting";
-  const issueReview = live.kind === "issue" && live.entry === "review" && (r.again === "review" || r.asks !== null)
-    ? { thenImplement: r.asks !== null ? (await loadLatestIssueReview(db, live.repo, live.number))?.thenImplement ?? false : r.thenImplement, ...(r.asks !== null && { state: "ask" as const, question: r.asks }) }
-    : null;
+  // A question to the reporter keeps the review it comes from; a yes to a review again after failed calls keeps what was asked, review and implement too.
+  const reviewsIssue = live.kind === "issue" && live.entry === "review" && (r.again === "review" || r.asks !== null);
+  const latest = reviewsIssue ? await loadLatestIssueReview(db, live.repo, live.number) : null;
+  const issueReview = !reviewsIssue ? null
+    : r.asks !== null
+      ? { thenImplement: latest?.thenImplement ?? false, state: "ask" as const, question: r.asks, ...(latest && { review: latest.review, model: latest.model, commitSha: latest.commitSha, reviewedAt: latest.reviewedAt }) }
+      : { thenImplement: r.thenImplement || (r.answers && live.rec?.again === "review" && (latest?.thenImplement ?? false)) };
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
   return {

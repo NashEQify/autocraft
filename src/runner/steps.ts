@@ -1068,7 +1068,7 @@ export const STEPS: StepDef[] = [
   {
     name: "issue-review",
     title: "Review issues",
-    description: "Reviews the issues maintainers started with review: Opus reads each issue, its discussion and the repository at the default branch, posts one review comment with a recommendation (implement, close, needs info, backlog), and the maintainer answers it. Also posts a review's question to the reporter after a maintainer's yes. A call is the started work of the issue's workflow: its starter's and approver's Task Runners take it first",
+    description: "Reviews the issues maintainers started with review: Opus reads each issue, its discussion and the repository at the default branch and gives one recommendation (implement, close, needs info, backlog), which Post issue reviews posts and the maintainer answers. A call is the started work of the issue's workflow: its starter's and approver's Task Runners take it first",
     stage: runStage("issue-review"),
     requires: "operator",
     models: ["opus"],
@@ -1079,9 +1079,27 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runIssueReviews } = await import("../issuereview/run.ts");
       const r = await runIssueReviews(ctx.db, { repo: String(ctx.params.repo), ...(typeof ctx.params.number === "number" ? { number: ctx.params.number } : {}), by: byOfJob(ctx.job.requestedBy), jobId: ctx.job.id, onHandled: ctx.handled }, ctx.log);
-      ctx.acted(r.reviewed + r.asked);
+      ctx.acted(r.reviewed);
       ctx.usageRun(r.runId);
-      return `${r.reviewed} issues reviewed, ${r.asked} questions posted to reporters, ${r.failed} failed, ${r.waiting} waiting`;
+      return `${r.reviewed} issues reviewed, ${r.failed} failed, ${r.waiting} waiting`;
+    },
+  },
+  {
+    name: "issue-review-post",
+    title: "Post issue reviews",
+    description: "Posts the stored issue reviews as one comment each, and a review's question to the reporter after a maintainer's yes. Calls no model, so it runs without a Task Runner and while models are paused",
+    stage: runStage("issue-review-post"),
+    requires: "operator",
+    models: [],
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, help: "only this issue; empty: every issue of the repo with a post due" },
+    ],
+    run: async (ctx) => {
+      const { runIssueReviews } = await import("../issuereview/run.ts");
+      const r = await runIssueReviews(ctx.db, { repo: String(ctx.params.repo), ...(typeof ctx.params.number === "number" ? { number: ctx.params.number } : {}), by: byOfJob(ctx.job.requestedBy), jobId: ctx.job.id, post: true, onHandled: ctx.handled }, ctx.log);
+      ctx.acted(r.posted + r.asked);
+      return `${r.posted} reviews posted, ${r.asked} questions posted to reporters, ${r.failed} failed, ${r.waiting} waiting`;
     },
   },
   {

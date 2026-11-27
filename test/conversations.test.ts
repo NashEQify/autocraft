@@ -86,7 +86,7 @@ describe("cards", () => {
     assert.deepEqual(await of(2, R([], { settle: { kind: "answer", option: "merge" } })), ["merge"]);
     assert.deepEqual(await of(1, R([], { settle: { kind: "backlog" } })), ["backlog"]);
     assert.deepEqual(await of(1, R([{ kind: "close", reason: "completed" }])), ["close as completed"]);
-    assert.deepEqual(await of(1, R([{ kind: "review" }])), [], "an issue has no review");
+    assert.deepEqual(await of(1, R([{ kind: "review" }])), ["review"], "an issue is reviewed through the issue review");
     assert.deepEqual(await of(1, R([{ kind: "assign", login: "someone" }])), ["assign"]);
     const dup = (await parseReply(db, "app", 1, block([R([{ kind: "comment" }, { kind: "duplicate", of: 3 }], { text: "Thanks." })])))!.cards;
     assert.deepEqual(kinds(dup), ["comment", "close as duplicate of #3"]);

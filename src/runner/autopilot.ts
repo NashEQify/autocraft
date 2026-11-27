@@ -741,13 +741,23 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((j) => j.score)),
   },
   {
-    // The issue reviews a maintainer asked for, and their questions to reporters: one job per repo works every due issue of it.
+    // The issue reviews a maintainer asked for: one job per repo works every due issue of it.
     name: "issue-review",
     perRepo: true,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx);
       const repos = new Set((await plannedItems(db, "issue-review", { plans })).map((p) => p.facts.repo));
       return flightFirst(plans, [...repos].sort()).map((repo) => ({ step: "issue-review", params: { repo } }));
+    },
+  },
+  {
+    // Their review comments and questions to reporters: no model call, so no Task Runner holds them.
+    name: "issue-review-post",
+    perRepo: true,
+    detect: async (db, ctx) => {
+      const plans = await plansOf(db, ctx);
+      const repos = new Set((await plannedItems(db, "issue-review-post", { plans })).map((p) => p.facts.repo));
+      return flightFirst(plans, [...repos].sort()).map((repo) => ({ step: "issue-review-post", params: { repo } }));
     },
   },
   {
@@ -1618,7 +1628,7 @@ export async function stageStatus(db: Db): Promise<Record<string, string>> {
 export const LANE_KINDS: Record<string, ActionKind[]> = {
   classify: ["classify"], priority: ["prioritize"], embed: ["embed"], dupes: ["dupes"], "dupes-compare": ["dupes-compare"],
   review: ["review"], labels: ["label"], merge: ["merge"], act: ["act"], fixup: ["fixup", "conflict"], verify: ["verify"],
-  implement: ["implement"], "issue-review": ["issue-review"], referee: ["referee"], "review-carry": ["carry"], "review-post": ["post-review"],
+  implement: ["implement"], "issue-review": ["issue-review"], "issue-review-post": ["issue-review-post"], referee: ["referee"], "review-carry": ["carry"], "review-post": ["post-review"],
   "ci-approve": ["approve-ci"], cifix: ["cifix", "lint"], unassign: ["unassign"], premerge: ["premerge"], "premerge-followups": ["followups"],
 };
 

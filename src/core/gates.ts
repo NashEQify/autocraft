@@ -71,7 +71,7 @@ export function showsWorkFor(f: Pick<PrFacts, "workflow" | "standing">): string 
 /** Who the implementation (and with it its PR's revisions) runs for, who commanded the close, or whose started item the review post and the follow-up issue show; null for other work. Their command is the approval, in any repo. */
 function commandedBy(f: PrFacts | ItemFacts, a: Want): string | null {
   if (a.kind === "implement") return ("ghState" in f ? ownImplementation(f)?.queuedBy : f.implement.queuedBy) ?? null;
-  if (a.kind === "issue-review") return "ghState" in f ? null : f.issueReview?.requestedBy ?? null;
+  if (a.kind === "issue-review" || a.kind === "issue-review-post") return "ghState" in f ? null : f.issueReview?.requestedBy ?? null;
   if (a.kind === "post-review" || a.kind === "followups") return showsWorkFor(f);
   return a.kind === "act" && !("ghState" in f) ? f.close?.by ?? null : null;
 }
@@ -133,7 +133,7 @@ export function gatePermission(f: PrFacts | ItemFacts, a: Want, by: By): Permiss
   const commander = commandedBy(f, a);
   if (a.kind === "act" && commander !== null) return { ok: true, as: "app", by: { kind: "person", login: commander } };
   if (a.kind === "implement" && commander === null) return refuse("not-approved", "The issue is not queued");
-  if (a.kind === "issue-review" && commander === null) return refuse("not-approved", "Nobody asked for a review of the issue");
+  if ((a.kind === "issue-review" || a.kind === "issue-review-post") && commander === null) return refuse("not-approved", "Nobody asked for a review of the issue");
   // A revision is a push of the implementation session.
   const writes = need === "merge" || need === "push" || a.kind === "implement";
   const gone = GOES_ON.has(a.kind) ? null : standingRefusal(f, a, writes);

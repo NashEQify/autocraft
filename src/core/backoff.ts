@@ -20,6 +20,8 @@ export const IMPLEMENT_START_RETRIES = 3;
 export const ISSUE_REVIEW_TRIES = 3;
 /** The wait before the next issue review call after `tries` calls without a valid review: 10, then 30 minutes. */
 export const issueReviewDelayMs = (tries: number): number => (tries <= 1 ? 10 : 30) * 60_000;
+/** When the issue review's next call is due: at once, or after the backoff of the calls that gave no valid review. */
+export const issueReviewDueAt = (r: { tries: number; triedAt: string | null }): number => (r.tries > 0 && r.triedAt ? Date.parse(r.triedAt) + issueReviewDelayMs(r.tries) : 0);
 const IMPLEMENT_START_DELAYS_MIN = [5, 15, 30] as const;
 
 /** The wait after the `failures`-th failed implementation start in a row: 5, 15, then 30 minutes. */

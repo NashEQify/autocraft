@@ -11,7 +11,7 @@ import { plainLogin } from "../github/identity.ts";
 import { PIPELINE_LOGIN_KEY, pipelineWrites, unsentAsk } from "./rules.ts";
 import { assignmentIn, ownPrSet, queuerIn, refreshTimes, standingIn, workflowFactOf, type FactsOf } from "./facts.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
-import { issueReviewDelayMs } from "./backoff.ts";
+import { issueReviewDueAt } from "./backoff.ts";
 import { needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
 import { embedderId, modelName } from "../embed/model.ts";
@@ -171,7 +171,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     const live = d.implement.liveByRepo.get(r.repo);
     if (a?.startRetry) refresh.soon(ref, a.startRetry.dueAt);
     const ir = r.kind === "issue" ? d.issueReviews.get(ref) : undefined;
-    if (ir?.state === "queued" && ir.tries > 0 && ir.triedAt) refresh.soon(ref, Date.parse(ir.triedAt) + issueReviewDelayMs(ir.tries));
+    if ((ir?.state === "queued" || (ir?.state === "reporter" && ir.reporterAnswered)) && ir.tries > 0 && ir.triedAt) refresh.soon(ref, issueReviewDueAt(ir));
     const unsent = ir && (ir.state === "posting" || ir.state === "ask") ? unsentAsk(ir.postTries, now) : null;
     if (unsent !== null && unsent !== "final") refresh.soon(ref, unsent.until);
     const refreshAt = refresh.at(ref);

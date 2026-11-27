@@ -44,7 +44,7 @@ export type ActionKind =
   | "fixup" | "conflict" | "cifix" | "lint" | "postmerge" | "followups"
   // item steps (issues and PRs)
   | "classify" | "referee" | "prioritize" | "embed" | "dupes" | "dupes-compare" | "label"
-  | "act" | "implement" | "issue-review"
+  | "act" | "implement" | "issue-review" | "issue-review-post"
   // the pipeline's account leaves an item that is off the path to merge (src/core/assignment.ts)
   | "unassign";
 
