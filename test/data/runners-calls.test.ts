@@ -6,7 +6,7 @@ import type { Db, Dialect } from "../../src/db/index.ts";
 import { queryDb } from "../../src/db/query-db.ts";
 import { expectFlat } from "../helpers/query-count.ts";
 import { TEST_PG_URL, testDatabase, type TestDatabase } from "../test-db.ts";
-import { enqueueCalls, setCallLevels, withdrawCalls, withdrawItemCalls } from "../../src/data/runners/calls-queue.ts";
+import { enqueueCalls, setCallLevels, withdrawCalls, withdrawGoneCalls, withdrawItemCalls } from "../../src/data/runners/calls-queue.ts";
 import { loadCallPolls, loadCalls, loadLeaseTurnover, loadRemoteQueueStates } from "../../src/data/runners/calls-read.ts";
 import { expireLeases, loadLeaseState } from "../../src/data/runners/calls-expiry.ts";
 import { discardGoneLease, failLease, releaseLease, submitLease } from "../../src/data/runners/calls-submit.ts";
@@ -153,7 +153,7 @@ for (const dialect of dialects) {
     } finally { await t.close(); }
   });
 
-  test(`a call whose items all merged or closed is withdrawn, never leased, and a result for it is discarded; a post-merge review still runs (${dialect})`, async () => {
+  test(`a call whose items all merged or closed is withdrawn (at the close or by the sweep), never leased, and a result for it is discarded; a post-merge review still runs (${dialect})`, async () => {
     const { t, db } = await fresh(dialect);
     try {
       const [a] = await runners(db, 1);
@@ -180,6 +180,8 @@ for (const dialect of dialects) {
       assert.equal(await lease(late!), null);
       assert.equal((await loadCalls(db, [late!])).get(late!)!.state, "queued", "refused for its item, not taken");
       assert.ok(typeof await lease(pm!) === "object");
+      // A call that was queued on an item before it merged, with no close seen since, goes at the maintenance sweep.
+      assert.deepEqual(await withdrawGoneCalls(db, NOW), [late]);
     } finally { await t.close(); }
   });
 }

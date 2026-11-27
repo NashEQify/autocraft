@@ -134,7 +134,7 @@ function readAt(pass: Pass, ref: string, r: ReviewRow): string {
 }
 
 /** The steps with an approved lane (src/runner/steps.ts hasApprovedLane), by the name a failing step has in the blocker. */
-const LANE_STEPS: Record<string, string> = { "opus-review": "review", premerge: "pre-merge review", fixup: "fix-up", cifix: "CI fix" };
+export const LANE_STEPS: Record<string, string> = { "opus-review": "review", premerge: "pre-merge review", fixup: "fix-up", cifix: "CI fix" };
 
 /** Failed jobs of the PR's approved lane of one step after `since`, since its last job that ran through. */
 function laneStreak(runs: readonly LaneRun[], step: string, since: string): number {

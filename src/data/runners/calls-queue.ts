@@ -190,9 +190,17 @@ export async function withdrawGoneItemCalls(db: Db, refs: readonly { repo: strin
   if (!refs.length) return [];
   const named = (eb: Eb) => eb.exists(schemaEb(eb).selectFrom("main.remote_call_items as ni").select(eb.lit(1).as("one")).where("ni.call_id", "=", ref<number>("remote_calls.id"))
     .where(tupleIn(db, ["ni.repo", "ni.number"], refs.map((r) => [r.repo, r.number] as const), ["text", "bigint"])));
-  return await withdrawWhere(db, `${ITEM_WITHDRAWN_PREFIX}every item it names was merged or closed`, now, (eb) => eb.and([eb("state", "=", "queued"), named(eb),
-    itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login" })]));
+  return await withdrawGone(db, now, named);
 }
+
+/** Withdraws every queued call whose items all merged or closed (itemsGoneExpr), however they got there: the maintenance sweep's backstop for sync. Returns the ids withdrawn. */
+export async function withdrawGoneCalls(db: Db, now: number = Date.now()): Promise<number[]> {
+  return await withdrawGone(db, now, () => null);
+}
+
+const withdrawGone = async (db: Db, now: number, more: (eb: Eb) => Expression<SqlBool> | null): Promise<number[]> =>
+  await withdrawWhere(db, `${ITEM_WITHDRAWN_PREFIX}every item it names was merged or closed`, now, (eb) => eb.and([eb("state", "=", "queued"), ...[more(eb)].filter((x) => x !== null),
+    itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login" })]));
 
 /** Withdraws queued or leased `conversation.turn` calls bound to `forLogin` that name `ref`. */
 export async function withdrawTurnCalls(db: Db, a: { ref: string; forLogin: string; reason: string }): Promise<number> {

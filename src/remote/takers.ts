@@ -21,7 +21,7 @@ import { itemsFit, TASK_ITEMS, TASK_ITEMS_TITLE, type TaskItems } from "./task-i
 import type { ItemRef } from "../../web/src/api/types.ts";
 import { scaled } from "./time-scale.ts";
 import type { Db } from "../db/index.ts";
-import { loadSweepState, loadTakerSignature, loadUserSettings, pickerLoginsOf, saveTakerSweep } from "../data/runners/index.ts";
+import { loadSweepState, loadTakerSignature, loadUserSettings, pickerLoginsOf, saveTakerSweep, withdrawGoneCalls } from "../data/runners/index.ts";
 import { canWriteOf, itemFilterIn, loadView, settingsOf, takersIn, type RemoteView, type Runner } from "./view.ts";
 import { itemFilterOf } from "./task-items.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
@@ -187,9 +187,12 @@ export async function noTakerFor(db: Db, repo: string, step: string, nowMs: numb
  * One maintenance pass at `nowMs`. Each pipeline-on repo with no taker whose user takes some task keeps the time it was first seen so
  * (remote_no_taker); one with a taker loses it. Each queued call with a live caller that is no follow-up, has no pick
  * that counts and is not held for the user who started its work (started.ts) gets the same mark (no_taker_since), and is withdrawn once
- * the mark is NO_TAKER_MS old. One read wave and one write transaction. Returns the number of calls withdrawn.
+ * the mark is NO_TAKER_MS old. Before that, queued calls whose items all merged or closed are withdrawn (withdrawGoneCalls), so one the sync
+ * did not see close (queued before that rule, say) ends here; their jobs skip the item. One statement, one read wave and one write transaction.
+ * Returns the number of calls withdrawn.
  */
 export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<number> {
+  const gone = (await withdrawGoneCalls(db, nowMs)).length;
   const [st, accepted] = await db.together(() => Promise.all([loadSweepState(db, nowMs), acceptedModels(db)]));
   const v: RemoteView = { now: nowMs, snapshot: st.snapshot, accepted };
   const takes = takerTestIn(v), started = startedOf(v), pickers = pickerLoginsOf(st.snapshot, nowMs);
@@ -203,5 +206,5 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<n
     } else if (since === undefined) plan.mark.push(c.id);
     else if (since <= nowMs - NO_TAKER_MS) plan.withdraw.push({ id: c.id, reason: whyNoTaker(v, takes, c) });
   }
-  return await saveTakerSweep(db, plan, nowMs);
+  return gone + await saveTakerSweep(db, plan, nowMs);
 }
