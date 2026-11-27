@@ -32,7 +32,7 @@ test("job room per user: calls one user or nobody takes leave the others' room, 
   };
   await runner("olga", "operator", ["deckcraft", "photocraft"]);
   await runner("dave", "maintainer", ["photocraft"]);
-  // Nora's runner takes only work she started: her merge workflow on designcraft#3260, whose steps hold no review.
+  // Nora's runner takes only work she started: her merge workflow on designcraft#3260, whose steps include the review of a model-written push.
   await runner("nora", "maintainer", ["designcraft"]);
   await setManualOnly(db, "nora", true);
   const at = new Date().toISOString();
@@ -50,7 +50,7 @@ test("job room per user: calls one user or nobody takes leave the others' room, 
 
   assert.equal(rooms.room(0, job("deckcraft")), 0, "olga's slot goes to the deckcraft calls");
   assert.ok(rooms.room(0, job("photocraft")) > 0, "dave's slot is not used up by calls only olga takes, nor by one nobody takes");
-  assert.equal(rooms.room(0, job("designcraft")), 0, "a repo job is no work nora started");
+  assert.equal(rooms.room(0, job("texturecraft")), 0, "a repo nora started nothing in has none of her room");
   const lane = job("designcraft", { lane: "approved", number: 3260 });
   assert.ok(rooms.room(0, lane) > 0, "the lane job of nora's pull request has her runner's room");
 
