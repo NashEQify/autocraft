@@ -3,7 +3,7 @@ import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
 import type { MadePush, OutcomePush } from "../../core/evidence.ts";
-import { BREAKER_WINDOW, breakerTripped, classifyPush, freshBefore, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Before, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
+import { BREAKER_WINDOW, breakerTripped, classifyPush, freshBefore, latestTime, PUSH_STAGE, requiredResult, tripKey, TRIP_STAGES, type Before, type Outcome, type Required, type TripStage } from "../../core/push-outcome.ts";
 import { resolveKeys, type KeySource } from "../keys.ts";
 import type { RefKey } from "../mirror/types.ts";
 import { loadChecks } from "../mirror/checks.ts";
@@ -54,9 +54,9 @@ function latestMain(heads: MainHeadTime[]): MainHeadTime | undefined {
 /**
  * Records pushes that succeeded: the required-check result at the head before each (from the stored checks, when they are for
  * that head). A green before counts only when the default branch did not move after its run (core `freshBefore`), else it is
- * `stale`: the run is dated by our own push of that head, else by its commit time, and the base by the default branch's newest
- * head; with either time unknown the green counts. A branch the push created has no earlier head: it takes the CI result of the
- * default branch's newest head, the one its run merges with, else (no head, or no check on it) of the commit it was built on
+ * `stale`: the run is dated by the latest of our own push of that head and the sync first seeing its commit, and the base by the
+ * default branch's newest head; with either time unknown the green counts. A branch the push created has no earlier head: it takes
+ * the CI result of the newest default-branch head with a final one (green, optional or red), else of the commit it was built on
  * (`base`); a red or unknown baseline is no baseline for "broke". Actions with no push stage are skipped. A push is recorded
  * once per `(repo, number, to, action)`, also across calls, in one statement.
  */
@@ -83,16 +83,20 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
     let before: Before = "unknown";
     const latest = latestMain(ciHeads.get(p.repo) ?? []);
     if (!p.from) {
-      // The new PR's run merges with the newest default-branch head; its own CI result is unknown only without a head or a check.
-      const m = latest && latest.state !== "none" ? latest.state : p.base ? ciAt.get(`${p.repo}@${p.base}`)?.state : undefined;
+      // The new PR's run merges with the newest default-branch head: the CI result of the newest head with a final one.
+      const final = latestMain((ciHeads.get(p.repo) ?? []).filter((h) => h.state === "green" || h.state === "optional" || h.state === "red"));
+      const m = final?.state ?? (p.base ? ciAt.get(`${p.repo}@${p.base}`)?.state : undefined);
       before = m === "green" || m === "optional" ? "green" : m === "red" ? "red" : "unknown";
     } else if (p.number !== null) {
       const ref = `${p.repo}#${p.number}`;
       const row = stored.get(ref);
       if (row && row.head_oid === p.from) {
         const c = commits.get(ref)?.find((x) => x.oid === p.from);
-        const ranAt = ownPushedAt.get(`${ref}@${p.from}`) ?? (c ? (c.first_seen_at !== null && c.first_seen_at < c.committed_at ? c.first_seen_at : c.committed_at) : null);
-        before = freshBefore(requiredResult(parse(row.checks), optional(p.repo)), ranAt, latest ? latest.committed_at ?? latest.first_seen_at : null);
+        // The run started after its head was pushed: our push of it, or the sync first seeing the commit (its commit time can be
+        // days earlier). The base head landed at its commit time at the earliest. Each bound is taken so that the green counts.
+        const ranAt = latestTime(ownPushedAt.get(`${ref}@${p.from}`), c?.first_seen_at, c?.committed_at);
+        const baseAt = latest ? latestTime(latest.committed_at) ?? latestTime(latest.first_seen_at) : null;
+        before = freshBefore(requiredResult(parse(row.checks), optional(p.repo)), ranAt, baseAt);
       }
     }
     return { at: p.at ?? now, stage: PUSH_STAGE[p.action]!, action: p.action, repo: p.repo, number: p.number, from_oid: p.from, to_oid: p.to, before_res: before };

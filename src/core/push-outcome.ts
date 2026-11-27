@@ -25,12 +25,20 @@ export function requiredResult(checks: { name: string; state: string }[], option
   return req.some((c) => c.state === "success") ? "green" : "none";
 }
 
+/** The latest of some timestamps in milliseconds (ISO with or without milliseconds, `Z` or an offset), or null when none parses. */
+export function latestTime(...times: (string | null | undefined)[]): number | null {
+  let best: number | null = null;
+  for (const s of times) { const n = s ? Date.parse(s) : NaN; if (Number.isFinite(n) && (best === null || n > best)) best = n; }
+  return best;
+}
+
 /**
  * A green result before a push counts only when its run is newer than the base branch head the push's run merges with. `ranAt`:
- * the earliest the run can have started (when its head was pushed or committed); `baseAt`: when the base head at the push landed.
- * Either time unknown: the green counts, so the breaker does not go quiet while those facts are not read yet.
+ * when the run's head was pushed (ms); `baseAt`: when the base head at the push landed (ms). Where the known bounds of either
+ * disagree, the caller picks the one under which the green counts. Either time unknown: the green counts, so the breaker does not
+ * go quiet while those facts are not read yet.
  */
-export function freshBefore(res: Required | "unknown", ranAt: string | null, baseAt: string | null): Before {
+export function freshBefore(res: Required | "unknown", ranAt: number | null, baseAt: number | null): Before {
   if (res !== "green") return res;
   return ranAt !== null && baseAt !== null && baseAt > ranAt ? "stale" : "green";
 }
