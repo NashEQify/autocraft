@@ -23,6 +23,7 @@ import { exec, type Exec } from "../fixup/git.ts";
 import { createIssue, ghFollowupComment, IssueError, type Writer } from "../github/write.ts";
 import { isUnsent } from "../github/unsent.ts";
 import { issueText, issueTitle, refusal } from "../postmerge/template.ts";
+import { CARRIED } from "../review/carry.ts";
 import { pipelineLogin } from "../review/discussion.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { findingsOf, premergeAt } from "./store.ts";
@@ -143,7 +144,8 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
       s.failed.push({ ref, reason: bad });
       continue;
     }
-    const note = { by: "model" as const, kind: "issue", model: row?.model ?? null };
+    // A carried row's findings were written at an earlier head; the note then names no model rather than the carry.
+    const note = { by: "model" as const, kind: "issue", model: row?.model === CARRIED ? null : row?.model ?? null };
     try {
       let made: { number: number; url: string };
       if (issue) {
