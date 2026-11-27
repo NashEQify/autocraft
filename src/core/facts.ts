@@ -22,7 +22,7 @@ import { EXTRAS_PENDING_REASON } from "./sensitive.ts";
 import { CARRIED } from "../review/carry.ts";
 import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
-import { roundWaits } from "./author-round.ts";
+import { personReviews, roundWaits } from "./author-round.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
 import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf, unsentAsk } from "./rules.ts";
 import { workScore } from "./work-score.ts";
@@ -199,7 +199,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
     const ctx: Ctx = {
       now, refresh, stale: await staleOf(false), staleActionable: await staleOf(true), ownPrs, identity: cfg.githubIdentity,
       holdOf: holdsFrom({ ...d.holds, facts: d.review, optional: (repo) => cfg.repo(repo).optionalChecks, interval: minIntervalOf(d.control.settings.get(MIN_INTERVAL_KEY)), reads: d.blockers, edges: new Map([...d.patches].map(([ref, p]) => [ref, p.pushes])), approvals: d.merge.runs,
-        authorRound: (ref, head) => roundWaits(d.workflow.live.get(ref), d.ownPushes.get(ref) ?? [], head) }, now),
+        authorRound: (ref, head) => roundWaits(d.workflow.live.get(ref), d.ownPushes.get(ref) ?? [], head), personReview: (ref) => personReviews(d.workflow.live.get(ref)) }, now),
     };
     const out: PrFacts[] = [];
     for (const ref of rowsOf(d).all) {

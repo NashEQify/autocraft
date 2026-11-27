@@ -50,6 +50,16 @@ test("the planner, the review gate and the stored checks read the same CI", asyn
   }
 });
 
+test("red CI holds an automatic review of a PR with an earlier review, and not one a person's live workflow asks for", async () => {
+  const w = current = await (await (await world()).repo()).pr(1, { ci: "failure" });
+  await (await w.pr(2, { ci: "failure" })).review(1, { head: "old1" });
+  await w.review(2, { head: "old2" });
+  await w.workflow(2, { approved: false });
+  const hold = await reviewHolds(w.db);
+  assert.deepEqual(await hold("app", 1, "sha1"), { kind: "ci", wait: "CI on the latest commit to pass", red: true });
+  assert.equal(await hold("app", 2, "sha2"), null);
+});
+
 test("runs we approved that have not finished hold off the repair of a head our push turned red", async () => {
   const w = current = await (await (await world()).repo()).pr(1, { ci: "failure" });
   await w.review(1);

@@ -1,7 +1,7 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
 import { ciAt } from "../core/evidence.ts";
-import { roundWaits } from "../core/author-round.ts";
+import { personReviews, roundWaits } from "../core/author-round.ts";
 import { optionalChecksOf } from "../optional-checks.ts";
 import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, activeFrom, hasOpenQuestion, loadBlockerReads, type BlockerReads } from "./blockers.ts";
 import { MAX_RERUNS_PER_DAY, maintainerSince, discussionStateOf, nextUtcMidnight, staleMarksOf } from "./discussion.ts";
@@ -75,6 +75,8 @@ export type HoldInputs = Awaited<ReturnType<typeof loadHoldInputs>> & {
   approvals: ReadonlyMap<string, { approved: readonly number[] }>;
   /** Whether the PR ("repo#number") waits at `head` for the review round of its author's new commits (roundWaits). */
   authorRound?: (ref: string, head: string) => boolean;
+  /** Whether a person's live workflow on the PR ("repo#number") asks for a review: red CI does not hold it. */
+  personReview?: (ref: string) => boolean;
 };
 
 
@@ -89,7 +91,8 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
   ]));
   const reads = await loadBlockerReads(db, [...facts.latest.values()].filter((r) => r.verdict === "hold").flatMap((r) => r.blocked_by));
   const authorRound = (ref: string, head: string): boolean => roundWaits(workflows.live.get(ref), pushes.get(ref) ?? [], head);
-  return holdsFrom({ ...inputs, facts, interval, optional, reads, edges, approvals, authorRound }, nowMs);
+  const personReview = (ref: string): boolean => personReviews(workflows.live.get(ref));
+  return holdsFrom({ ...inputs, facts, interval, optional, reads, edges, approvals, authorRound, personReview }, nowMs);
 }
 
 /**
@@ -143,7 +146,7 @@ export function holdsFrom(d: HoldInputs, nowMs: number): HoldCheck {
     }
     const ci = ciAt(checks.get(ref), head, { optional: optional(repo), approvedRuns: d.approvals.get(`${ref}@${head}`)?.approved.length ?? 0 });
     if (ci === "pending") return { kind: "ci", wait: "CI on the latest commit to finish" };
-    if (ci === "failure" && last && !settled) return { kind: "ci", wait: "CI on the latest commit to pass", red: true };
+    if (ci === "failure" && last && !settled && !d.personReview?.(ref)) return { kind: "ci", wait: "CI on the latest commit to pass", red: true };
     const ours = last && last.head !== head ? ourPathIn(d.edges.get(ref) ?? [], last.head, head) : null;
     if (ours?.complete && ours.commits.length) return null;
     const h = history.get(ref) ?? { n: 0, last: null };

@@ -4,10 +4,14 @@ import { authorRound, type OwnPush } from "./evidence.ts";
 import type { Db } from "../db/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { loadPrWorkflows, type WorkflowFact } from "../data/workflow/index.ts";
+import { RULE_STARTER } from "../workflow/types.ts";
 
 /** A running workflow of the PR itself, approved for merge, whose author pushed past the head it accepted: its review is due at once. */
 export const roundWaits = (w: (Pick<WorkflowFact, "approved" | "baseHead" | "own" | "state">) | null | undefined, pushes: readonly OwnPush[], head: string): boolean =>
   !!w && w.own && w.state === "running" && authorRound(w, pushes, head) !== null;
+
+/** A live workflow of the PR itself that a person started with a model review in its plan (entry review or fix-up, approved for merge or not): their request for a review of the current head. */
+export const personReviews = (w: (Pick<WorkflowFact, "entry" | "startedBy">) | null | undefined): boolean => !!w && w.startedBy !== RULE_STARTER && (w.entry === "review" || w.entry === "fixup");
 
 /**
  * Review rounds of the author's commits on the PR made today (UTC) after `since`, the review at `head` left out: reviews by a model at heads our own
