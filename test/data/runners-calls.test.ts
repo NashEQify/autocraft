@@ -180,8 +180,11 @@ for (const dialect of dialects) {
       assert.equal(await lease(late!), null);
       assert.equal((await loadCalls(db, [late!])).get(late!)!.state, "queued", "refused for its item, not taken");
       assert.ok(typeof await lease(pm!) === "object");
-      // A call that was queued on an item before it merged, with no close seen since, goes at the maintenance sweep.
+      // A call that was queued on an item before it merged, with no close seen since, goes at the maintenance sweep; the post-merge
+      // review's own reference check on it, another prompt of that step, stays and is leased.
+      const [check] = await enqueueCalls(db, [call(2, { promptId: "lint.reference.haiku", job: { jobId: null, step: "postmerge", stage: 0, cls: 0, repo: "app" } })], NOW);
       assert.deepEqual(await withdrawGoneCalls(db, NOW), [late]);
+      assert.ok(typeof await lease(check!) === "object");
     } finally { await t.close(); }
   });
 }

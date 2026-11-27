@@ -10,7 +10,7 @@ import { HOLD_MAX } from "../access/permissions.ts";
 import { operatorFixEnded } from "../changes/fragments.ts";
 import { openItem } from "../mirror/fragments.ts";
 import { weightOfScore } from "../../core/work-score.ts";
-import { endedByMerge, goOnAt, isGoOn, linkRows, LIVE_LINKS, LIVE_STATES, MERGED_WORK_MS, notArchived, prIssueWorkflows, seenAt, withLiveLinks, workScore } from "./fragments.ts";
+import { endedByMerge, MERGE_WAYS, goOnAt, isGoOn, linkRows, LIVE_LINKS, LIVE_STATES, MERGED_WORK_MS, notArchived, prIssueWorkflows, seenAt, withLiveLinks, workScore } from "./fragments.ts";
 import { linkWorkflows } from "./link.ts";
 import { patchRows } from "./update.ts";
 import { loadChatBefore, patchTalks, recordWorkflowMessages, retitleConversations } from "../chat/workflow.ts";
@@ -533,9 +533,9 @@ export async function loadStartedWork(db: Db, now: number = Date.now()): Promise
   const [live, prs, merged] = await db.together(() => Promise.all([
     q.all(k.selectFrom("main.item_workflows as w").select(["w.repo", "w.number", "w.entry", "w.state", "w.started_by", "w.approved_by"]).where("w.state", "in", LIVE_STATES).orderBy("w.id")),
     q.all(k.selectFrom(linkRows(db, LIVE_STATES).as("l")).innerJoin("main.item_workflows as w", "w.id", "l.wid").select(["l.repo as repo", "l.pr as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).orderBy("w.id")),
-    q.all(k.selectFrom("main.item_workflows as w").innerJoin("main.items as m", (j: any) => j.onRef("m.repo", "=", "w.repo").on((x: any) => x.or([x("m.number", "=", x.ref("w.number")), x("m.number", "=", x.ref("w.pr_number"))])))
-      .select(["m.repo as repo", "m.number as pr", "w.started_by as started_by", "w.approved_by as approved_by"]).where("w.state", "=", "done").where("w.updated_at", ">=", since)
-      .where((eb: any) => endedByMerge(eb, "w", "m.repo", "m.number", since)).orderBy("w.id")),
+    q.all(MERGE_WAYS.map((via) => k.selectFrom("main.item_workflows as w").innerJoin("main.items as m", (j: any) => j.onRef("m.repo", "=", "w.repo").onRef("m.number", "=", via === "pr" ? "w.number" : "w.pr_number"))
+      .select(["m.repo as repo", "m.number as pr", "w.started_by as started_by", "w.approved_by as approved_by", "w.id as id"]).where("w.state", "=", "done").where("w.updated_at", ">=", since)
+      .where((eb: any) => endedByMerge(eb, "w", "m.repo", "m.number", since, via))).reduce((a: any, b: any) => a.unionAll(b)).orderBy("id")),
   ])) as [{ repo: string; number: number; entry: Entry; state: WorkflowState; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[], { repo: string; pr: number; started_by: string; approved_by: string | null }[]];
   return {
     live: live.map((r) => ({ repo: r.repo, number: Number(r.number), entry: r.entry, state: r.state, startedBy: r.started_by, approvedBy: r.approved_by })),

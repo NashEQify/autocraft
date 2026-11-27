@@ -438,7 +438,7 @@ both("a PR of an issue a person ended is in scope again once someone starts it o
   assert.deepEqual(await scope(), both, "the newest end is not a person's");
 });
 
-both("a post-merge review of a PR whose workflow ended done through its merge is that workflow's work, in the snapshot and the lease alike, and no other call on it is", async ({ db }) => {
+both("the post-merge review step's calls on a PR whose workflow ended done through its merge, a reference check included, are that workflow's work, in the snapshot and the lease alike, and no other step's are", async ({ db }) => {
   const r = rows(db);
   const q = queryDb(db), k = q.k as any;
   const review = (number: number) => ({ ...start(number, 1), kind: "pr" as const, entry: "review" as const, approvedBy: "bob", approvedVia: "cli" as const });
@@ -450,22 +450,22 @@ both("a post-merge review of a PR whose workflow ended done through its merge is
   await end(db, ids.get(`${REPO}#200`)!, 6, "done");
   await end(db, ids.get(`${REPO}#201`)!, 6, "done");
   await end(db, ids.get(`${REPO}#202`)!, 4, "stopped");
-  // The lease's condition on a call whose item is the PR: the call's id is the PR's number, its prompt the item's title.
+  // The lease's condition on a call whose item is the PR: the call's id is the PR's number, its step the item's title.
   for (const pr of [200, 201, 202]) await q.run(k.insertInto("main.remote_call_items").values({ call_id: pr, repo: REPO, number: pr, pos: 0 }));
-  const says = async (pr: number, login: string, prompt: string, now: number): Promise<[boolean, boolean]> => {
-    await q.run(k.updateTable("main.items").set({ title: prompt }).where("number", "=", pr));
+  const says = async (pr: number, login: string, step: string, now: number): Promise<[boolean, boolean]> => {
+    await q.run(k.updateTable("main.items").set({ title: step }).where("number", "=", pr));
     const lease = (await q.all(k.selectFrom("main.items as c").select("c.number").where("c.number", "=", pr)
-      .where((eb: any) => startedWorkAllows(db, eb, login, "c.number", { promptRef: "c.title", now })))).length === 1;
+      .where((eb: any) => startedWorkAllows(db, eb, login, "c.number", { stepRef: "c.title", now })))).length === 1;
     const snapshot = await loadRunnerSnapshot(db, now, { started: loadStartedWork, denials: async () => new Map() });
-    const owners = startedOf({ now, snapshot, accepted: { top: [], mid: [], small: [] } }).owners([{ repo: REPO, number: pr }], prompt);
+    const owners = startedOf({ now, snapshot, accepted: { top: [], mid: [], small: [] } }).owners([{ repo: REPO, number: pr }], step);
     return [owners.has(login), lease];
   };
   const soon = Date.parse(at(60)), later = Date.parse(at(6)) + 4 * 24 * 3600_000;
-  assert.deepEqual(await says(200, "bob", "postmerge.opus", soon), [true, true], "the approver");
-  assert.deepEqual(await says(200, "ann", "postmerge.opus", soon), [true, true], "the starter");
-  assert.deepEqual(await says(200, "cid", "postmerge.opus", soon), [false, false], "nobody else");
-  assert.deepEqual(await says(200, "bob", "review.opus", soon), [false, false], "only the post-merge review");
-  assert.deepEqual(await says(201, "bob", "postmerge.opus", soon), [false, false], "a workflow that ended without a merge");
-  assert.deepEqual(await says(202, "ann", "postmerge.opus", soon), [false, false], "a workflow that did not end through the merge");
-  assert.deepEqual(await says(200, "bob", "postmerge.opus", later), [false, false], "days after the workflow ended");
+  assert.deepEqual(await says(200, "bob", "postmerge", soon), [true, true], "the approver");
+  assert.deepEqual(await says(200, "ann", "postmerge", soon), [true, true], "the starter");
+  assert.deepEqual(await says(200, "cid", "postmerge", soon), [false, false], "nobody else");
+  assert.deepEqual(await says(200, "bob", "opus-review", soon), [false, false], "only the post-merge review step");
+  assert.deepEqual(await says(201, "bob", "postmerge", soon), [false, false], "a workflow that ended without a merge");
+  assert.deepEqual(await says(202, "ann", "postmerge", soon), [false, false], "a workflow that did not end through the merge");
+  assert.deepEqual(await says(200, "bob", "postmerge", later), [false, false], "days after the workflow ended");
 });

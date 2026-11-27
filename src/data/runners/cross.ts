@@ -5,23 +5,23 @@ import type { Db } from "../../db/index.ts";
 import { queryDb } from "../../db/query-db.ts";
 import { ciEq, indexedBy, literal, ref, schemaEb, type Eb, type Ex } from "../../db/kx.ts";
 import { setRunProgress } from "../inference/index.ts";
-import { endedByMerge, LIVE_STATES, MERGED_WORK_MS, worksOnPr } from "../workflow/fragments.ts";
+import { endedByMerge, LIVE_STATES, MERGE_WAYS, MERGED_WORK_MS, worksOnPr } from "../workflow/fragments.ts";
 import type { ItemRef } from "../../../web/src/api/types.ts";
 import { INTERACTIVE_PROMPTS, MAX_CALLS_KEY, MAX_CALLS_MAX, STATUS_FRESH_MS, lostLeaseExpr, sha256hex } from "./calls-shared.ts";
 import type { LiveLease, Tier } from "./types.ts";
 import { expireLeases } from "./calls-expiry.ts";
 import { unlease } from "./calls-unlease.ts";
 
-/** The prompt id prefix of post-merge review calls: work of the workflow that merged their PR (endedByMerge), also once it ended. */
-export const POSTMERGE_PROMPTS = "postmerge.";
+/** The step of the post-merge review: its calls (the review and the calls it makes, a reference check say) are work of the workflow that merged their PR (endedByMerge), also once it ended. */
+export const POSTMERGE_STEP = "postmerge";
 
 /**
  * The started-work condition inside the lease update: every item of the call (`remote_call_items`) has a live workflow started or
- * approved by `login`, or is the PR that one works on. With `promptRef` (the call's `prompt_id` column), a post-merge review call's
+ * approved by `login`, or is the PR that one works on. With `stepRef` (the call's `step` column), a call of the post-merge review's
  * item may instead be a merged PR whose workflow, started or approved by `login`, ended done through that merge since `now` less
  * MERGED_WORK_MS (src/data/workflow/fragments.ts endedByMerge, which the Task Runner snapshot reads too).
  */
-export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string, o: { promptRef?: string; now?: number } = {}): Expression<SqlBool> {
+export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string, o: { stepRef?: string; now?: number } = {}): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
   const one = w.lit(1).as("one");
   const by = (x: any, alias: string) => x.or([ciEq(db, `${alias}.started_by`, x.val(login)), ciEq(db, `${alias}.approved_by`, x.val(login))]);
@@ -30,27 +30,28 @@ export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: stri
     const live = e.exists(schemaEb(e).selectFrom("main.item_workflows as ow").select(one)
       .where("ow.state", "in", LIVE_STATES).where("ow.repo", "=", ref<string>(`${item}.repo`)).where((x: any) => by(x, "ow"))
       .where((x: any) => x.or([x("ow.number", "=", ref<number>(`${item}.number`)), worksOnPr(x, "ow", `${item}.number`)])));
-    if (o.promptRef === undefined) return live;
-    const merged = e.and([e(o.promptRef, "like", `${POSTMERGE_PROMPTS}%`), e.exists(schemaEb(e).selectFrom("main.item_workflows as mw").select(one)
-      .where((x: any) => by(x, "mw")).where((x: any) => endedByMerge(x, "mw", `${item}.repo`, `${item}.number`, since)))]);
-    return e.or([live, merged]);
+    if (o.stepRef === undefined) return live;
+    const merged = MERGE_WAYS.map((via) => e.exists(schemaEb(e).selectFrom("main.item_workflows as mw").select(one)
+      .where((x: any) => by(x, "mw")).where((x: any) => endedByMerge(x, "mw", `${item}.repo`, `${item}.number`, since, via))));
+    return e.or([live, e.and([e(o.stepRef, "=", POSTMERGE_STEP), e.or(merged)])]);
   };
   return w.not(w.exists(schemaEb(w).selectFrom("main.remote_call_items as ci").select(one).where("ci.call_id", "=", ref<number>(callIdRef)).where((e: any) => e.not(owns(e, "ci")))));
 }
 
 /**
  * The call's items all left the pipeline: it names at least one, and every one is merged or closed in the mirror. Calls a person waits for
- * or that are bound to one (Discord and interactive prompts, a maintainer's conversation turn) and post-merge reviews, which run on merged
- * PRs, never count. The lease never takes such a call; sync withdraws it (withdrawClosedItemCalls).
+ * or that are bound to one (Discord and interactive prompts, a maintainer's conversation turn) and the post-merge review step's calls, which
+ * run on merged PRs, never count. The lease never takes such a call; sync withdraws it (withdrawClosedItemCalls).
  */
-export function itemsGoneExpr(eb: Eb, callIdRef: string, cols: { promptId: string; forLogin: string }): Expression<SqlBool> {
+export function itemsGoneExpr(eb: Eb, callIdRef: string, cols: { promptId: string; forLogin: string; step: string }): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
   const one = w.lit(1).as("one");
   const items = () => schemaEb(w).selectFrom("main.remote_call_items as gi").where("gi.call_id", "=", ref<number>(callIdRef));
   const closed = (x: any) => x.exists(schemaEb(x).selectFrom("main.items as gm").select(one).where("gm.repo", "=", ref<string>("gi.repo")).where("gm.number", "=", ref<number>("gi.number")).where("gm.state", "in", ["MERGED", "CLOSED"]));
   return w.and([
     w(cols.forLogin, "is", null),
-    ...[...INTERACTIVE_PROMPTS, POSTMERGE_PROMPTS].map((p) => w.not(w(cols.promptId, "like", `${p}%`))),
+    w(cols.step, "<>", POSTMERGE_STEP),
+    ...INTERACTIVE_PROMPTS.map((p) => w.not(w(cols.promptId, "like", `${p}%`))),
     w.exists(items().select(one)),
     w.not(w.exists(items().select(one).where((x: any) => x.not(closed(x))))),
   ]);

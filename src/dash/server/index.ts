@@ -46,6 +46,7 @@ import { loadToken, pruneTokens, type McpCaller } from "../mcp/tokens.ts";
 import { sha256hex } from "./crypto.ts";
 import * as remote from "../../remote/calls.ts";
 import { sweepTakers } from "../../remote/takers.ts";
+import { withdrawGoneCalls } from "../../data/runners/index.ts";
 import { ClaimWaits, heldMsOf } from "../../remote/claim-wait.ts";
 import { scaled, TIME_SCALE } from "../../remote/time-scale.ts";
 import { isBusy } from "../../db.ts";
@@ -329,6 +330,8 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   });
   const maintenance = setInterval(() => void maintain.skip(), scaled(60_000));
   maintenance.unref();
+  // Calls queued on items that merged or closed while no sync saw it go at the start, not a minute later; their jobs skip the item.
+  void withdrawGoneCalls(rdb).catch((e: Error) => { if (!isBusy(e)) console.log(`withdrawing the calls of merged or closed items failed: ${e.message}`); });
 
   function secure(headers: Record<string, string | string[]>, csp: string): Record<string, string | string[]> {
     headers["content-security-policy"] = csp;

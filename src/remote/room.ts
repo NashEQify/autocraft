@@ -137,7 +137,7 @@ export function roomOf(st: RoomState, cls: number, repos?: readonly string[], st
       && sw.canTake(h.login, { prompt_id: "", repos: on })) : [];
     if (extra.length) {
       const logins = new Set(extra.map((h) => h.login.toLowerCase()));
-      const own = (c: { refs?: readonly { repo: string; number: number }[]; prompt_id?: string }): boolean => !!c.refs && [...sw.owners(c.refs, c.prompt_id)].some((o) => logins.has(o));
+      const own = (c: { refs?: readonly { repo: string; number: number }[]; step?: string }): boolean => !!c.refs && [...sw.owners(c.refs, c.step)].some((o) => logins.has(o));
       // With no other helper counted nothing ahead is theirs.
       const [t0, f0] = takers.length ? [takes, filteredTake] : [() => false, () => false];
       takers = [...takers, ...extra.map((h) => ({ h, filtered: true }))];
@@ -214,7 +214,7 @@ export function jobRoom(st: RoomState): JobRoom {
       : runnerTakes(r, call, t.canWrite)));
     const owners = new Set<string>();
     if (on?.length) {
-      for (const o of sw.ownersFor({ repos: on, prompt_id: call.prompt_id, ...(c.refs && { refs: c.refs }), ...(c.step !== undefined && { step: c.step }) })) {
+      for (const o of sw.ownersFor({ repos: on, ...(c.refs && { refs: c.refs }), ...(c.step !== undefined && { step: c.step }) })) {
         if (base.has(o) && sw.canTake(o, { prompt_id: call.prompt_id, repos: on })) owners.add(o);
       }
     }

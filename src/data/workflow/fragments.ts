@@ -16,13 +16,17 @@ export const LIVE_STATES = ["running", "waiting", "blocked", "recommending"];
 /** How long after its last write a workflow that ended done through its PR's merge still owns that PR's post-merge review (src/remote/started.ts). */
 export const MERGED_WORK_MS = 3 * 24 * 3600_000;
 
+/** The two ways a workflow merges a PR: a PR workflow its own (`number`), an implement workflow of an issue the PR it worked on (`pr_number`). */
+export const MERGE_WAYS = ["pr", "issue"] as const;
+
 /**
- * The workflow `w` ended done through the merge of the PR at `repo`/`number` (column references): its own PR, or the PR an implement workflow
- * worked on, merged in the mirror, with the workflow's last write at or after `sinceIso`. The Task Runner snapshot and the lease both read it.
+ * The workflow `w` ended done through the merge of the PR at `repo`/`number` (column references), the PR it merged in the way `via`
+ * (MERGE_WAYS), merged in the mirror, with the workflow's last write at or after `sinceIso`. One way per statement, so each matches the PR on
+ * an indexed column pair. The Task Runner snapshot and the lease both read it, for both ways.
  */
-export const endedByMerge = (eb: kx.AnyEb, w: string, repo: string, number: string, sinceIso: string): Expression<SqlBool> => eb.and([
-  eb(`${w}.state`, "=", "done"), eb(`${w}.repo`, "=", kx.ref<string>(repo)),
-  eb.or([eb(`${w}.number`, "=", kx.ref<number>(number)), eb(`${w}.pr_number`, "=", kx.ref<number>(number))]),
+export const endedByMerge = (eb: kx.AnyEb, w: string, repo: string, number: string, sinceIso: string, via: (typeof MERGE_WAYS)[number]): Expression<SqlBool> => eb.and([
+  eb(`${w}.state`, "=", "done"), eb(`${w}.repo`, "=", kx.ref<string>(repo)), eb(`${w}.kind`, "=", via),
+  eb(`${w}.${via === "pr" ? "number" : "pr_number"}`, "=", kx.ref<number>(number)),
   eb(`${w}.updated_at`, ">=", sinceIso),
   eb.exists(kx.schemaEb(eb).selectFrom("main.items as mi").select(one(eb)).where("mi.repo", "=", kx.ref<string>(repo)).where("mi.number", "=", kx.ref<number>(number)).where("mi.state", "=", "MERGED")),
 ]);

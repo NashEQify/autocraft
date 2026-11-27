@@ -200,7 +200,7 @@ export async function withdrawGoneCalls(db: Db, now: number = Date.now()): Promi
 
 const withdrawGone = async (db: Db, now: number, more: (eb: Eb) => Expression<SqlBool> | null): Promise<number[]> =>
   await withdrawWhere(db, `${ITEM_WITHDRAWN_PREFIX}every item it names was merged or closed`, now, (eb) => eb.and([eb("state", "=", "queued"), ...[more(eb)].filter((x) => x !== null),
-    itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login" })]));
+    itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login", step: "remote_calls.step" })]));
 
 /** Withdraws queued or leased `conversation.turn` calls bound to `forLogin` that name `ref`. */
 export async function withdrawTurnCalls(db: Db, a: { ref: string; forLogin: string; reason: string }): Promise<number> {
