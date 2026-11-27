@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { afterEach, test } from "node:test";
-import { runnerRoomIn, stallNotices, type StalledCall } from "../src/core/runner-room.ts";
+import { test } from "node:test";
+import { runnerRoomIn, stallNotices } from "../src/core/runner-room.ts";
+import { createToken } from "../src/dash/mcp/tokens.ts";
 import { loadConversationsOfItem, loadMessages } from "../src/data/chat/index.ts";
 import type { RunnerRow, RunnerSnapshot, UserSettings } from "../src/data/runners/index.ts";
 import { startWorkflows } from "../src/data/workflow/index.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
+import { enqueueCall } from "../src/remote/calls.ts";
+import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
+import { STARTED_HOLD_MS } from "../src/remote/started.ts";
+import { sweepTakers } from "../src/remote/takers.ts";
 import type { RemoteView } from "../src/remote/view.ts";
 import { RULE_STARTER } from "../src/workflow/types.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { tmpdir } from "./world-db.ts";
 
 const NOW = Date.parse("2026-06-01T12:00:00.000Z");
@@ -43,34 +47,61 @@ test("a person's command finds whether a Task Runner can take its repo and tier 
   // A ready runner takes the repo but offers no model of the call's tier.
   assert.deepEqual(runnerRoomIn(view([row(1, "ana", { models: { mid: "claude-sonnet-5" } })]), ask), { can: false, own: false, why: "tier", until: null, tier: "top" });
 
+  // A runner whose user takes only the items they started or approved never takes this person's work.
+  assert.deepEqual(runnerRoomIn(view([row(1, "ana")], { ana: { taskItems: "mine" } }), ask), { can: false, own: false, why: "repo", until: null });
+  // The person's ready runner may not write to the repo; an offline one says so.
+  const denied = view([row(3, "mira")]);
+  (denied.snapshot.denied as Set<string>).add("mira\napp");
+  assert.deepEqual(runnerRoomIn(denied, ask), { can: false, own: true, why: "own-denied", until: null });
+  assert.deepEqual(runnerRoomIn(view([row(3, "mira", { reportedAt: NOW - 3_600_000 })]), ask), { can: false, own: true, why: "own-off", until: null });
+
   // Someone else's ready runner takes it, though the person has none of their own; their own takes it outside their My repos.
   assert.deepEqual(runnerRoomIn(view([row(1, "ana")]), ask), { can: true, own: false });
   assert.deepEqual(runnerRoomIn(view([row(3, "mira", { idleRepos: ["other"] })], { mira: { repos: ["other"] } }), ask), { can: true, own: true });
 });
 
-let db: Db | undefined;
-afterEach(async () => db?.close());
+test("the sweep tells the person whose started work waits for their offline or held runner once per reason in the item's chat, and nobody for the automatic rule's work", async () => {
+  const db = await connectDb(join(tmpdir("runner-room"), "t.db"));
+  try {
+    await db.run(db.k.insertInto("access").values({ login: "mira", role: "maintainer" }));
+    await db.run(db.k.insertInto("repo_permissions").values({ login: "mira", repo: "photocraft", permission: "write", checked_at: new Date().toISOString() }));
+    const t0 = Date.now();
+    const token = (await createToken(db, "mira", "helper", { kind: "runner" })).row.id;
+    const report = (readiness: string, at: number, until?: string) =>
+      storeStatus(db, token, "mira", parseStatus({ slots: 1, busy: 0, readiness, ...(until && { until }), harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }), at);
+    await report("ready", t0);
+    await startWorkflows(db, [
+      { repo: "photocraft", number: 7, kind: "pr", entry: "review", weight: 5, startedBy: "mira", startedVia: "discord" },
+      { repo: "photocraft", number: 8, kind: "pr", entry: "merge", weight: 5, startedBy: RULE_STARTER, startedVia: "github" },
+    ]);
+    const enqueue = (number: number) => enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", items: [{ repo: "photocraft", number }], level: 0, maxAttempts: 1,
+      bundle: { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } }, t0);
+    const ids = [await enqueue(7), await enqueue(8)];
+    const sweep = async (at: number) => {
+      await db.run(db.k.updateTable("remote_calls").set({ seen_at: at }).where("id", "in", ids));
+      await sweepTakers(db, at, { stalled: async (v, calls) => { await stallNotices(db, v, calls); } });
+    };
+    const notices = async (number: number) => {
+      const convs = await loadConversationsOfItem(db, "photocraft", number);
+      return [...(await loadMessages(db, convs.map((c) => c.id))).values()].flat().filter((m) => m.kind === "notice").map((m) => m.body);
+    };
 
-test("a stalled call tells the person whose work it is once per reason in the item's chat, and nobody for the automatic rule's work", async () => {
-  const d = db = await connectDb(join(tmpdir("runner-room"), "t.db"));
-  await startWorkflows(d, [
-    { repo: "app", number: 1, kind: "pr", entry: "review", weight: 5, startedBy: "mira", startedVia: "discord" },
-    { repo: "app", number: 2, kind: "pr", entry: "merge", weight: 5, startedBy: RULE_STARTER, startedVia: "github" },
-  ]);
-  const call = (number: number): StalledCall => ({ prompt_id: "review.pr", repos: ["app"], refs: [{ repo: "app", number }], step: "review", tier: "top" });
-  const notices = async () => {
-    const convs = await loadConversationsOfItem(d, "app", 1);
-    return [...(await loadMessages(d, convs.map((c) => c.id))).values()].flat().filter((m) => m.kind === "notice");
-  };
-
-  const none = view([]);
-  assert.equal(await stallNotices(d, none, [call(1), call(2)]), 1);
-  assert.equal(await stallNotices(d, none, [call(1), call(2)]), 0, "the same reason posts no second notice");
-  const [first] = await notices();
-  assert.match(first!.body, /No Task Runner can take this right now .*Set up your own Task Runner: \S*\/connect/);
-  assert.equal((await loadConversationsOfItem(d, "app", 2)).length, 0, "the automatic rule's work tells nobody");
-
-  // The only runner that would take it becomes held: a different reason, one more notice.
-  assert.equal(await stallNotices(d, view([row(1, "ana", { readiness: "quota-held", until: LATER })]), [call(1)]), 1);
-  assert.equal((await notices()).length, 2);
+    // Within the hold the work waits for mira's runner without a word.
+    await sweep(t0 + 1000);
+    assert.deepEqual(await notices(7), []);
+    // Past the hold her runner has gone quiet: one notice, naming her role, and not again on the next pass.
+    const t1 = t0 + STARTED_HOLD_MS + STATUS_FRESH_MS + 1000;
+    await sweep(t1);
+    await sweep(t1 + 60_000);
+    assert.deepEqual(await notices(7), ["No Task Runner can take this right now (the starter's Task Runner is not connected). It starts when one is free."]);
+    assert.deepEqual(await notices(8), [], "the automatic rule's work tells nobody");
+    // It comes back held by its usage limit: a different reason, one more notice.
+    await report("quota-held", t1 + 120_000, new Date(t1 + 3_600_000).toISOString());
+    await sweep(t1 + 120_000);
+    const after = await notices(7);
+    assert.equal(after.length, 2);
+    assert.match(after[1]!, /the starter's Task Runner is held by its usage limit/);
+  } finally {
+    await db.close();
+  }
 });

@@ -127,6 +127,29 @@ export async function recordMessages(db: Db, ms: readonly NewChatMessage[]): Pro
   });
 }
 
+/**
+ * Stores Task Runner notices (kind `notice`), each in its item's main conversation: a notice whose workflow already has one of the same
+ * payload (its reason) is left out by the unique index `chat_messages_notice`, so two processes never store it twice. Returns how many
+ * were stored. Joins the caller's `db.write`.
+ */
+export async function recordNotices(db: Db, ms: readonly (NewChatMessage & { kind: "notice"; workflowId: number })[]): Promise<number> {
+  if (!ms.length) return 0;
+  const q = queryDb(db);
+  const now = new Date().toISOString();
+  return await db.write(async () => {
+    const convs = await ensureMainConversations(db, ms.map((m) => ({ repo: m.repo, number: m.number, by: m.author })));
+    let n = 0;
+    for (const m of ms) {
+      const got = await q.all((q.k as any).insertInto("main.chat_messages").values({
+        conversation_id: convs.get(keyOf(m.repo, m.number))!, author: m.author, via: m.via, kind: m.kind, body: m.body,
+        payload: m.payload === undefined || m.payload === null ? null : JSON.stringify(m.payload), workflow_id: m.workflowId, at: m.at ?? now,
+      }).onConflict((oc: any) => oc.doNothing()).returning(["id"]), { label: "chat.recordNotices" }) as { id: unknown }[];
+      n += got.length;
+    }
+    return n;
+  });
+}
+
 /** Stores one message; see recordMessages. */
 export async function recordMessage(db: Db, m: NewChatMessage): Promise<ChatMessageRow> {
   const [row] = await recordMessages(db, [m]);

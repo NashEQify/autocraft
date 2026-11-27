@@ -1876,6 +1876,8 @@ CREATE INDEX IF NOT EXISTS chat_messages_event ON chat_messages(workflow_event_i
 CREATE INDEX IF NOT EXISTS chat_messages_turn ON chat_messages(turn_id) WHERE turn_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS chat_messages_workflow ON chat_messages(workflow_id, kind) WHERE workflow_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_comment ON chat_messages(github_comment_id) WHERE github_comment_id IS NOT NULL;
+-- One Task Runner notice per workflow and reason (the payload names it): src/data/chat/messages.ts recordNotices.
+CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_notice ON chat_messages(workflow_id, payload) WHERE kind = 'notice';
 
 -- A repo's area list, one row per saved version; the current version is the highest.
 CREATE TABLE IF NOT EXISTS area_lists (

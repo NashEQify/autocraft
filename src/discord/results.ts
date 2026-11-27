@@ -354,7 +354,8 @@ export class ThreadResults {
       for (const c of changed) posts.set(dc.followPostKey(c.post), c.post);
     }
     if (!notices.length) return;
-    await sendToFollow(rest, f.target, { content: notices.map((v) => `**${v.key}** ${plain(v.notice!.body)}`).join("\n").slice(0, RESULT_MAX) });
+    // Where only the status may show, the notice says only that the work waits.
+    await sendToFollow(rest, f.target, { content: notices.map((v) => `**${v.key}** ${v.detail === "full" ? plain(v.notice!.body) : t("Waiting for a Task Runner")}`).join("\n").slice(0, RESULT_MAX) });
     // Each item's post is stamped now, so the notice is behind it.
     const stamped = notices.flatMap((v) => {
       const p = posts.get(dc.followPostKey({ targetHash: f.targetHash, repo: v.ref.repo, number: v.ref.number }));

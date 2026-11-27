@@ -12,7 +12,7 @@ import { NO_TAKER_PREFIX } from "./calls.ts";
 import { t, tk } from "../i18n/index.ts";
 import { orderedOf, type Cand } from "./cands.ts";
 import { pickCounts } from "./picks-rules.ts";
-import { heldForOwner, startedOf } from "./started.ts";
+import { heldForOwner, STARTED_HOLD_MS, startedOf } from "./started.ts";
 import { acceptedModels } from "./mode.ts";
 import type { Tier } from "./protocol.ts";
 import { roleFits, runnerTakes } from "./rules.ts";
@@ -212,7 +212,7 @@ export async function noTakerFor(db: Db, repo: string, step: string, nowMs: numb
  * that counts and is not held for the user who started its work (started.ts) gets the same mark (no_taker_since), and is withdrawn once
  * the mark is NO_TAKER_MS old. Before that, queued calls whose items all merged or closed are withdrawn (withdrawGoneCalls), so one the sync
  * did not see close (queued before that rule, say) ends here; their jobs skip the item. One statement, one read wave and one write transaction.
- * Then `stalled` gets the calls without a taker (src/core/runner-room.ts stallNotices tells the people whose work they are). Returns the
+ * Then `stalled` gets the calls that cannot run now (StalledHook; src/core/runner-room.ts stallNotices tells the people whose work they are). Returns the
  * number of calls withdrawn.
  */
 export async function sweepTakers(db: Db, nowMs: number = Date.now(), o: { stalled?: StalledHook } = {}): Promise<number> {
@@ -231,11 +231,19 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now(), o: { stall
     else if (since <= nowMs - NO_TAKER_MS) plan.withdraw.push({ id: c.id, reason: whyNoTaker(v, takes, c) });
   }
   const withdrawn = await saveTakerSweep(db, plan, nowMs);
-  const cleared = new Set(plan.clear);
-  const stalled = orderedOf(st.queue, nowMs).all.filter((c) => c.forLogin === null && !cleared.has(c.id) && (st.marked.has(c.id) || plan.mark.includes(c.id)));
-  if (stalled.length && o.stalled) await o.stalled(v, stalled);
+  if (o.stalled) {
+    const cleared = new Set(plan.clear), marking = new Set(plan.mark);
+    // Without a taker; or started work past its owners' hold that waits for their runners, none of which can claim it (waitingOnIn).
+    const stalled = orderedOf(st.queue, nowMs).all.filter((c) => c.forLogin === null && c.parent_id === null && c.seen_at >= nowMs - CALLER_STALE_MS && (
+      (!cleared.has(c.id) && (st.marked.has(c.id) || marking.has(c.id))) || (c.since < nowMs - STARTED_HOLD_MS && waitingOnIn(v, c).length > 0)));
+    if (stalled.length) await o.stalled(v, stalled);
+  }
   return gone + withdrawn;
 }
 
-/** What the sweep hands on of the calls that have no taker (marked or withdrawn this pass, or marked before), bound calls left out. */
+/**
+ * What the sweep hands on: queued calls with a live caller that have no taker (marked or withdrawn this pass, or marked before), and calls
+ * of started work queued longer than STARTED_HOLD_MS that wait only for their people's runners, none of which can claim now. Bound calls
+ * and follow-ups are left out.
+ */
 export type StalledHook = (v: RemoteView, calls: readonly Cand[]) => Promise<void>;
