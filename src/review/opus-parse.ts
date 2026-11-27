@@ -133,8 +133,14 @@ export type OpusReview = {
 };
 
 export type ClaimStatus = "verified" | "contradicted" | "unverified";
-/** What a contradicted or unverified claim means for the merge: the code is wrong, only the description is stale, or the model cannot tell. */
-export type ClaimImpact = "code-wrong" | "description-only" | "unknown";
+/**
+ * What a contradicted or unverified claim means for the merge: the PR's own change is wrong; the claim holds in the code the PR changes
+ * but other paths or edge cases do not follow (not blocking: a follow-up); only the description is stale; or the model cannot tell.
+ */
+export type ClaimImpact = "code-wrong" | "code-incomplete" | "description-only" | "unknown";
+const CLAIM_IMPACTS: readonly string[] = ["code-wrong", "code-incomplete", "description-only"];
+/** A claim impact that comes with a fix to make. */
+const fixable = (i: ClaimImpact) => i === "code-wrong" || i === "code-incomplete";
 export type Claim = { claim: string; status: ClaimStatus; evidence: string; impact?: ClaimImpact; fix?: { file: string; change: string } };
 
 export const MAX_CLAIMS = 12;
@@ -198,8 +204,8 @@ export function parseClaims(v: unknown, drop: ReadonlySet<string> = new Set(), k
       ? { file: file.slice(0, 200), change: f.change.trim().slice(0, 800) } : undefined;
     out.indexes.push(index);
     if (status === "verified") { out.claims.push({ claim, status, evidence }); return; }
-    const impact: ClaimImpact = evidenceAt(proof, files) && (o.impact === "code-wrong" || o.impact === "description-only") ? o.impact : "unknown";
-    out.claims.push(fix && impact === "code-wrong" ? { claim, status, evidence, impact, fix } : { claim, status, evidence, impact });
+    const impact = (evidenceAt(proof, files) && typeof o.impact === "string" && CLAIM_IMPACTS.includes(o.impact) ? o.impact : "unknown") as ClaimImpact;
+    out.claims.push(fix && fixable(impact) ? { claim, status, evidence, impact, fix } : { claim, status, evidence, impact });
   });
   return out;
 }
@@ -278,6 +284,8 @@ export function parseReviewWorkflow(r: Record<string, unknown>, partOf: (n: numb
 
 /** The class of a fix or hold the claims rule makes from a claim that shows wrong code: the PR does not do what it says. */
 const CLAIM_BLOCKING: Blocking = { class: "off-purpose", why: "The pull request does not do what its title or description says." };
+/** The class of a fix the claims rule makes from a claim that holds in the code the PR changes but not on every path: a follow-up. */
+export const CLAIM_INCOMPLETE: Blocking = { class: null, why: "The change does what the pull request says where it changes the code; other paths or cases do not follow yet." };
 
 export const OPUS_REASON_WORDS = 60;
 export const OPUS_MAX_FIXES = 20;
@@ -294,7 +302,8 @@ function replyObject(text: string): unknown {
  * (a one-element array is read too); take-fix needs at least one fix.
  * A summary or why over its word cap fails the reply unless `last`, which keeps its first sentence.
  * Claims rule: the code is what merges, not the description. A claim with impact "code-wrong" means the PR is not a take:
- * take-fix when every such claim names a fix, hold otherwise. "description-only" changes nothing. An "unknown" impact, or no
+ * take-fix when every such claim names a fix, hold otherwise. A "code-incomplete" claim's fix is added as a fix that does not block (a take
+ * becomes take-fix); one without a fix is a risk note. "description-only" changes nothing. An "unknown" impact, or no
  * `claims` list for a PR with a body (`body`), makes a take or take-fix unsure.
  * `files`: the PR's changed files, accepted as evidence paths. `drop`: see parsePublic. `keepLeaky`: keep fixes that mention the reference (the lint checks validity this way, so the fix turn can handle them; the stored review always drops them).
  */
@@ -324,8 +333,9 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
   const parsed = parseClaims(r.claims, drop, keepLeaky, files), listed = parsed?.claims ?? [];
   // Every valid claim reaches the verdict; only the texts stored and posted are cleaned. A list that was not fully read leaves the review unsure.
   const bad = listed.filter((c) => c.impact === "code-wrong"), unknownClaim = listed.find((c) => c.impact === "unknown");
-  // A take-fix needs a fix: its own list, or the fix of every claim that shows wrong code.
-  if (verdict === "take-fix" && !fixes.length && !(bad.length && bad.every((c) => c.fix))) return null;
+  const incomplete = listed.filter((c) => c.impact === "code-incomplete"), incompleteFixes = incomplete.filter((c) => c.fix).map((c) => ({ ...c.fix!, blocking: CLAIM_INCOMPLETE }));
+  // A take-fix needs a fix: its own list, the fix of every claim that shows wrong code, or the fix of an incomplete claim.
+  if (verdict === "take-fix" && !fixes.length && !(bad.length ? bad.every((c) => c.fix) : incompleteFixes.length)) return null;
   const unproven = parsed === null ? !!body.trim() : parsed.rejected > 0 || !!unknownClaim;
   let outVerdict = verdict as ReviewVerdict, outFixes: ReviewFix[] = verdict === "take-fix" ? fixes : [], outReason = r.reason, sure = r.sure, shift = 0;
   const notes: string[] = [];
@@ -335,6 +345,12 @@ export function parseOpusReply(text: string, ref: string, last = true, drop: Rea
     else { outVerdict = "hold"; outFixes = []; }
     outReason = `Claim shows wrong code: ${bad[0]!.claim} ${r.reason}`;
     notes.push(...bad.map((c) => `claim ${c.status}, code wrong: ${c.claim}: ${c.evidence}`.slice(0, 300)));
+  }
+  if (incomplete.length && (outVerdict === "take" || outVerdict === "take-fix")) {
+    // After the code-wrong fixes, before the model's own: `shift` keeps the recommendation's fix numbers on the model's fixes.
+    const at = outVerdict === "take-fix" ? shift : 0;
+    if (incompleteFixes.length) { outFixes = [...outFixes.slice(0, at), ...incompleteFixes, ...outFixes.slice(at)].slice(0, OPUS_MAX_FIXES); shift = at + incompleteFixes.length; outVerdict = "take-fix"; }
+    notes.push(...incomplete.map((c) => `claim ${c.status}, change incomplete: ${c.claim}: ${c.evidence}`.slice(0, 300)));
   }
   if (unproven && (outVerdict === "take" || outVerdict === "take-fix")) {
     sure = false;
