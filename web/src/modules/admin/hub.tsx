@@ -91,7 +91,6 @@ function HealthView(_: ViewProps) {
 }
 
 const BLOCKER_FIELDS = [
-  { key: "largeFixLines", label: "A fix larger than this many changed lines asks again" },
   { key: "outsidePurposeMin", label: "A change outside the PR's purpose of at least this many lines asks again" },
 ] as const;
 
@@ -102,8 +101,8 @@ function BlockerThresholds({ className }: { className?: string }) {
   const b = data?.blockers;
   const [text, setText] = useState<Record<string, string>>({});
   useEffect(() => {
-    if (b) setText({ largeFixLines: String(b.largeFixLines), outsidePurposeMin: String(b.outsidePurposeMin) });
-  }, [b?.largeFixLines, b?.outsidePurposeMin]);
+    if (b) setText({ outsidePurposeMin: String(b.outsidePurposeMin) });
+  }, [b?.outsidePurposeMin]);
   if (!b) return null;
   const valid = BLOCKER_FIELDS.every((f) => /^[1-9]\d{0,5}$/.test((text[f.key] ?? "").trim()));
   const dirty = BLOCKER_FIELDS.some((f) => (text[f.key] ?? "").trim() !== String(b[f.key]));

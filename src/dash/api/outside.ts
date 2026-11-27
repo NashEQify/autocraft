@@ -22,7 +22,7 @@ const wrap = async <T>(f: () => Promise<T>): Promise<T> => {
   }
 };
 
-/** The maintainer workflow's thresholds for blockers 5 (a large fix) and 6 (a change outside the purpose). */
+/** The maintainer workflow's threshold for the blocker of a change outside the purpose. */
 export async function getBlockerThresholds(db: Db) {
   return await blockerThresholds(db);
 }

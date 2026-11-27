@@ -101,7 +101,7 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
   const jobs = seed();
   const steps = structuredClone(STEPS);
   let next = 52;
-  const blockers = { largeFixLines: 400, outsidePurposeMin: 20 };
+  const blockers = { outsidePurposeMin: 20 };
   const flag = { enabled: !MOCK_DRAIN, draining: MOCK_DRAIN, changedBy: "ochre-fox" as string | null, changedAt: iso(300) as string | null };
   const limits: StageLimit[] = [
     ["classify-new", "Classify new and changed items", 2000, 412], ["embed", "Embed items", null, 0], ["premerge", "Review before merging", 100, 100],

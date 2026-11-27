@@ -70,7 +70,7 @@ test("our own push leaves the question as it is, and an answer accepts it; not o
   }
 });
 
-test("a resume accepts no pushes: ours from before the hold still count towards a large fix", async () => {
+test("a resume accepts no pushes: a hold and a resume keep the workflow and its approval, whatever our pushes changed", async () => {
   const w = await approvedReview();
   await w.pr(2, { label: "feature" });
   assert.equal((await answer(w, "merge")).outcome, "run");
@@ -83,7 +83,7 @@ test("a resume accepts no pushes: ours from before the hold still count towards 
   await pushNow(w, "ours", "ours2", 300);
   await advanceWorkflows(w.db);
   const now = (await liveWorkflow(w.db, "app", 2))!;
-  assert.deepEqual([now.id, now.blocker, now.blockerParams?.lines, now.approvedAt], [before.id, "large-fix", 600, before.approvedAt]);
+  assert.deepEqual([now.id, now.state, now.blocker, now.approvedAt], [before.id, "running", null, before.approvedAt]);
   w.close();
 });
 
@@ -176,7 +176,7 @@ test("a merge entry is reviewed again when a person asks for it, whatever an old
   assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "major-finding");
 });
 
-test("what came between a question and its answer was not seen: our push owes its review, a hold stops again, a large fix asks", async () => {
+test("what came between a question and its answer was not seen: our push owes its review, a hold stops again", async () => {
   // A merge entry: the word merge goes on past the author's commits, not past our push on them.
   let w = await authorPushed();
   await pushNow(w, "theirs", "ours");
@@ -218,21 +218,6 @@ test("what came between a question and its answer was not seen: our push owes it
   await ticks(w);
   assert.equal((await liveWorkflow(w.db, "app", 2))!.state, "running");
   w.close();
-
-  // A large fix: also when the answer is what approves the merge, and the time shown for it is the answer's.
-  w = await askedReview();
-  await pause();
-  await pushNow(w, "sha2", "ours", 500);
-  const before = new Date().toISOString();
-  assert.equal((await answer(w, "yes")).outcome, "run");
-  await ticks(w);
-  const wf = (await liveWorkflow(w.db, "app", 2))!;
-  assert.deepEqual([wf.blocker, wf.approvedBy], ["large-fix", MAINT]);
-  assert.ok(wf.approvedAt! >= before);
-  await pause();
-  assert.equal((await answer(w, "yes")).outcome, "run");
-  await ticks(w);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.state, "running", "asked once");
 });
 
 test("the merge leg a question ended is no reason to ask again after an answer that starts none", async () => {
@@ -256,7 +241,7 @@ test("the merge leg a question ended is no reason to ask again after an answer t
   assert.deepEqual([on.state, on.blocker], ["running", null]);
 });
 
-test("no answer ends the review a push of ours owes a merge entry: past a large fix, a failing step, or the author's commits on top, whose round reviews it", async () => {
+test("no answer ends the review a push of ours owes a merge entry: past a failing step, or the author's commits on top, whose round reviews it", async () => {
   const started = async () => {
     const w = await approvedReview();
     await w.pr(2, { label: "feature" });
@@ -278,14 +263,6 @@ test("no answer ends the review a push of ours owes a merge entry: past a large 
   };
 
   let w = await started();
-  await pushNow(w, "sha2", "ours", 600);
-  await advanceWorkflows(w.db);
-  assert.equal((await liveWorkflow(w.db, "app", 2))!.blocker, "large-fix");
-  await pause();
-  assert.equal((await answer(w, "yes")).outcome, "run");
-  await owes(w, "large fix");
-
-  w = await started();
   await pushNow(w, "sha2", "ours");
   for (const n of [1, 2]) await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 2, head: "ours", kind: "patch", state: "failed", attempt: n, created_at: new Date().toISOString() }));
   await pause();

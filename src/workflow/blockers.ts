@@ -16,8 +16,8 @@ export type BlockerFacts = {
   review: { verdict: string; sure: boolean; majors: number[]; outsideLines: number } | null;
   /** Steps whose tries failed since `since`, with how many failed. */
   failures: readonly { step: string; count: number }[];
-  /** Our pushes since `since`: the changed lines of all of them together, and the files of the latest fix-up. */
-  fix: { lines: number; files: readonly string[] } | null;
+  /** Our pushes since `since`: the files of the latest fix-up. */
+  fix: { files: readonly string[] } | null;
   /** The files the planned parts name; empty when none names one. */
   plannedFiles: readonly string[];
   /** Files an issue's implementation changed that no part of its plan names, not yet shown to a person. */
@@ -26,7 +26,7 @@ export type BlockerFacts = {
   leg: EndedLeg | null;
   /** A limit of the merge approval that holds our next step back: the pushes of ours since `since` (and the push held). */
   limit?: Limit | null;
-  thresholds: { largeFix: number; outsideMin: number };
+  thresholds: { outsideMin: number };
 };
 
 export type EndedLeg = { reason: string; code?: StopCode | null; head?: string | null };
@@ -61,7 +61,6 @@ export function legBlocker(code: StopCode): Blocker {
   switch (code) {
     case "author-push": case "head-back": return "author-commits";
     case "review-hold": case "review-close": case "verification-failed": case "premerge-defect": return "major-finding";
-    case "fix-too-large": return "large-fix";
     default: return "other";
   }
 }
@@ -77,7 +76,6 @@ export function detectBlocker(f: BlockerFacts): Found | null {
   if (!f.approved) return failed ? { blocker: "failed-twice", params: { step: failed.step, count: failed.count } } : null;
   if (f.authorPush) return { blocker: "author-commits", params: { from: f.authorPush.from, to: f.authorPush.to } };
   if (failed) return { blocker: "failed-twice", params: { step: failed.step, count: failed.count } };
-  if (f.fix && f.fix.lines > f.thresholds.largeFix) return { blocker: "large-fix", params: { lines: f.fix.lines, limit: f.thresholds.largeFix } };
   if (f.fix && f.plannedFiles.length) {
     const planned = new Set(f.plannedFiles);
     const beyond = f.fix.files.filter((x) => !planned.has(x));

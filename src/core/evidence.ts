@@ -9,7 +9,7 @@ export type OwnPush = { from: string; to: string };
 /** What a push of ours was. */
 export type PushWhat = "fix-up" | "CI fix" | "base merge" | "implementation session's revision" | "autorepin";
 /**
- * A recorded push. `lines`: the changed lines that count towards a large fix; null when they were not recorded. `landed`: git reported the push
+ * A recorded push. `lines`: the changed lines of the push; null when they were not recorded. `landed`: git reported the push
  * done, so the branch had its commit; one a crash came before landed as well when a head shows its commit. `small`: it changed
  * nothing of the PR that a model wrote (a base merge that left the PR's own diff the same, an autorepin), so it owes no review.
  */

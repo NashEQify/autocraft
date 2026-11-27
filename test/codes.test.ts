@@ -53,7 +53,7 @@ test("a merge leg's reason stands for the same blocker by its code as by its tex
   const byText = (reason: string): string =>
     /another push moved the head|the head went back/.test(reason) ? "author-commits"
     : /the review says (hold|close)|verification failed|pre-merge review found/.test(reason) ? "major-finding"
-    : /too-large/.test(reason) ? "large-fix" : "other";
+    : "other";
   const given = new Set(["cancelled", "failed", "asked"]);
   for (const reason of ["the pushed head", "the new head", "the PR's head"].flatMap(REASONS)) {
     const code = stopCodeOf(reason);

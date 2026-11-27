@@ -28,7 +28,6 @@ import { applyStuckAnswer, markStuck } from "../src/implement/stuck.ts";
 import { actor, approvedReview, asked, ASKS, fixup, implementationOpened, implementIssue, keep, labelOf, later, leg8, legState, MAINT, nextStep, ownPush, review, review8, say } from "./workflow-advance-world.ts";
 
 test("each blocker stops an approved item and keeps its approval", async () => {
-  const bigPatch = Array.from({ length: 450 }, (_, i) => `+line ${i}`).join("\n");
   const cases: [Blocker, (w: World) => Promise<unknown>][] = [
     ["major-finding", (w) => review(w, { head: "sha1", verdict: "hold" })],
     ["author-commits", async (w) => { await w.synced(1, "sha9"); await w.outOfScope(1, "sha9"); }],
@@ -37,7 +36,6 @@ test("each blocker stops an approved item and keeps its approval", async () => {
     ["failed-twice", async (w) => {
       for (const id of [901, 902]) await w.db.run(w.db.k.insertInto("main.jobs").values({ id, step: "opus-review", params: JSON.stringify({ repo: "app", number: 1, lane: "approved", limit: 10 }), requested_by: "pipeline", requested_at: later(), state: "failed", started_at: later(), ended_at: later(), error: "reply could not be read", repo: "app" }));
     }],
-    ["large-fix", (w) => fixup(w, { state: "pushed", files: ["src/lib.rs"], patch: bigPatch })],
     ["beyond-agreed", async (w) => {
       await review(w, { head: "sha1", verdict: "take-fix", fixes: [{ file: "src/lib.rs", change: "check the bound", title: "bound check" }], at: "2026-01-01T00:00:00Z" });
       await fixup(w, { state: "pushed", files: ["src/lib.rs", "src/other.rs"], patch: "+a\n-b" });
@@ -56,8 +54,8 @@ test("each blocker stops an approved item and keeps its approval", async () => {
   }
 });
 
-test("a large fix is every push of ours since the approval together; a base merge has no size of its own", async () => {
-  for (const [extra, stops] of [["cifix", true], ["merge", false]] as const) {
+test("however much our own pushes change, they never stop an approved item", async () => {
+  for (const extra of ["cifix", "merge"] as const) {
     const w = await approvedReview();
     const made = (action: string, from_oid: string, to_oid: string, lines: number, at: string, landed_at: string | null = at) =>
       w.db.run(w.db.k.insertInto("main.own_pushes").values({ repo: "app", number: 1, action, from_oid, to_oid, lines, at, landed_at }));
@@ -74,7 +72,7 @@ test("a large fix is every push of ours since the approval together; a base merg
     assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
     await (extra === "cifix" ? push("cifix-push", "sha1b", "sha1c", 250) : push("conflict-push", "sha1b", "sha1c", 0));
     const wf = (await liveWorkflow(w.db, "app", 1))!;
-    assert.deepEqual([wf.state, wf.blocker, wf.blockerParams?.lines], stops ? ["blocked", "large-fix", 500] : ["running", null, undefined], extra);
+    assert.deepEqual([wf.state, wf.blocker], ["running", null], extra);
     w.close();
   }
 });
@@ -396,7 +394,6 @@ test("the other blockers stop an approved implementation too", async () => {
     ["major-finding", (w) => review8(w, "hold")],
     ["outside-purpose", (w) => review8(w, "take", { outside_purpose: { lines: 60, note: "n" }, recommendation: null })],
     ["failed-twice", async (w) => { for (const state of ["failed", "rejected"]) await w.db.run(w.db.k.insertInto("main.ci_fixes").values({ repo: "app", number: 8, head: "sha8", kind: "patch", state, attempt: state === "failed" ? 1 : 2, created_at: later() })); }],
-    ["large-fix", (w) => w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 8, from_head: "sha8", to_head: "sha8b", state: "pushed", files: "[]", attempt: 1, created_at: later(), source: "operator", patch: Array.from({ length: 450 }, (_, i) => `+${i}`).join("\n") }))],
   ];
   for (const [blocker, evidence] of cases) {
     const w = await implementationOpened(["src/a.rs"], true);

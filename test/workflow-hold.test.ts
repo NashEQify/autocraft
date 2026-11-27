@@ -85,14 +85,14 @@ test("an item held at a blocker comes back with its question; the resume answers
   const rec = { text: "Fix it, then merge.", parts: { fix: [1], drop: [] }, merges: true };
   const id = await insertWorkflow(w.db, {
     repo: "app", number: 1, kind: "pr", entry: "fixup", state: "blocked", startedBy: MAINT, startedAt: T0, startedVia: "github", baseHead: "sha1", approvedBy: MAINT, approvedAt: T0,
-    blocker: "large-fix", blockerParams: { lines: 900 }, rec, recAt: T0, recHead: "sha1", plan: [{ n: 1, title: "A bug", source: "review", state: "planned" }],
+    blocker: "failed-twice", blockerParams: { step: "fix-up", count: 2 }, rec, recAt: T0, recHead: "sha1", plan: [{ n: 1, title: "A bug", source: "review", state: "planned" }],
   });
   await run(w, "hold");
   assert.deepEqual([(await workflowHistory(w.db, "app", 1))[0]!.rec, (await send(w, "fix 1")).outcome], [null, "ambiguous"]);
   assert.match(await run(w, "continue", OTHER), /question is open again/);
   await settle(w);
   const wf = (await liveWorkflow(w.db, "app", 1))!;
-  assert.deepEqual([wf.id, wf.state, wf.blocker, wf.blockerParams, wf.rec, wf.plan[0]!.state], [id, "blocked", "large-fix", { lines: 900 }, rec, "planned"]);
+  assert.deepEqual([wf.id, wf.state, wf.blocker, wf.blockerParams, wf.rec, wf.plan[0]!.state], [id, "blocked", "failed-twice", { step: "fix-up", count: 2 }, rec, "planned"]);
 });
 
 test("a question that closes by itself does not while the item is held; resumed, it is open again and the pass closes it once its cause is gone", async () => {

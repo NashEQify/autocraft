@@ -166,7 +166,7 @@ function failures(pass: Pass, ref: string, since: string, head: string, facts: P
 }
 
 /**
- * What our pushes changed: the lines of all of them since the person approved the PR (`agreed`), and the files of the
+ * What our pushes changed: the files of the
  * latest pushed fix-up of the PR's review findings (the review's own, or one a person asked for) after `since`, with the files the plan of the
  * review it fixed names (that review is at the head it started from).
  */
@@ -179,12 +179,9 @@ function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, head: string, sinc
   // One the mirror does not show yet counts once git reported it done; one that never landed does not.
   const pushes = all.filter((p) => p.at > agreed && (p.landed || through.includes(p)));
   if (!pushes.length && !latest) return { fix: null, plannedFiles: [] };
-  // The latest fix-up without its recorded size counts its stored patch.
-  const unsized = latest && pushedAt! > agreed && !pushes.some((p) => p.to === latest.toHead && p.lines !== null);
-  const lines = pushes.reduce((n, p) => n + (p.lines ?? 0), unsized ? latest.lines : 0);
   const fixed = latest ? reviewAt(pass, ref, latest.fromHead) : null;
   const plannedFiles = fixed ? planOf(fixed.fixes, w.plan).filter((p) => p.state !== "dropped" && p.file).map((p) => p.file!) : [];
-  return { fix: { lines, files: latest?.files.filter((f) => !LOCKFILE.test(f)) ?? [] }, plannedFiles };
+  return { fix: { files: latest?.files.filter((f) => !LOCKFILE.test(f)) ?? [] }, plannedFiles };
 }
 
 /**
@@ -315,7 +312,7 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const laneRuns = new Map<string, LaneRun[]>();
     for (const r of await loadLaneRuns(db, prRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
     const pass: Pass = {
-      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, premerge, issues: issueFacts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin }, laneRuns,
+      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, premerge, issues: issueFacts, thresholds: { outsideMin: thresholds.outsidePurposeMin }, laneRuns,
     };
     const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [] };
     const moved: Moved[] = [];

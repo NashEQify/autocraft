@@ -104,11 +104,10 @@ const BLOCKER_LABEL: Record<Blocker, string> = {
   "author-commits": tk("new commits from the author beyond what was approved"),
   "failed-twice": tk("a step failed twice"),
   "beyond-agreed": tk("work beyond what was agreed"),
-  "large-fix": tk("a large fix"),
   "outside-purpose": tk("a change outside the pull request's purpose"),
   other: tk("a stop the review or merge step reported"),
 };
-export const blockerLabel = (b: Blocker): string => t(BLOCKER_LABEL[b]);
+export const blockerLabel = (b: Blocker): string => t(BLOCKER_LABEL[b] ?? BLOCKER_LABEL.other);
 
 /** "1", "1 and 2", "1, 2 and 3". */
 export function listText(ns: readonly (number | string)[]): string {

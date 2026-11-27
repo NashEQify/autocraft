@@ -46,7 +46,7 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
     startedBy: r.started_by, startedAt: r.started_at, startedVia: r.started_via as Surface, baseHead: r.base_head, acceptedHead: r.accepted_head,
     approvedBy: r.approved_by, approvedAt: r.approved_at, approvedVia: r.approved_via as Surface | null,
     stoppedBy: r.stopped_by, stoppedAt: r.stopped_at, takenBy: r.taken_by ?? null,
-    blocker: r.blocker as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
+    blocker: (r.blocker === "large-fix" ? "other" : r.blocker) as Blocker | null, blockerParams: parse<Record<string, unknown> | null>(r.blocker_params, null),
     rec: parse<Recommendation | null>(r.rec, null), recAt: r.rec_at, recHead: r.rec_head,
     plan: parse<PlanPart[]>(r.plan, []), step: r.step, prNumber: r.pr_number === null ? null : Number(r.pr_number), reviewAskedAt: r.review_asked_at, legacyPreapprovalId: r.legacy_preapproval_id === null ? null : Number(r.legacy_preapproval_id), version: Number(r.version), updatedAt: r.updated_at,
   };

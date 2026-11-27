@@ -2,7 +2,7 @@
 // review and the blocker, and records the result on the workflow row.
 //
 // The review writes the sentence and says what a yes runs (src/review/opus-parse.ts ReviewRecommendation), so the text and the run
-// always agree. A blocker the review cannot speak for (author commits, a failing step, a large fix, files beyond the plan, a merge
+// always agree. A blocker the review cannot speak for (author commits, a failing step, files beyond the plan, a merge
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
 import { byHand, type ConflictPath, type HeldPush } from "../core/decide.ts";
@@ -186,7 +186,6 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       return go(p.step === "CI fix" ? `${ciFixFailed(p)} ${again}` : again, { again: "review" });
     }
     // The fix-up a leg stopped at pushed nothing.
-    case "large-fix": return p.lines === undefined ? afterStop(String(p.reason ?? ""), go) : go(t("Keep the fix of {lines} lines, then merge.", { lines: Number(p.lines ?? 0) }));
     case "beyond-agreed": return go(t("Keep the changes to {files}, then merge.", { files: listText((p.files as string[] | undefined) ?? []) }));
     case "outside-purpose":
     case "major-finding": {

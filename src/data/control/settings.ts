@@ -72,7 +72,6 @@ export const SETTINGS = {
   outsideIssuesPerDay: reg("outside_issues_per_day", "int", 5, { owner: "intake" }, (r) => intIn(r, 0, Infinity, 5)),
   outsideSurgePerHour: reg("outside_surge_per_hour", "int", 30, { owner: "intake" }, (r) => intIn(r, 0, Infinity, 30)),
   singleMergeMax: reg("single_merge_max", "int", 3, { owner: "merge" }, (r) => intIn(r, 0, 100, 3)),
-  blockerLargeFixLines: reg("blocker_large_fix_lines", "int", 400, { owner: "workflow" }, (r) => posInt(r, 400)),
   blockerOutsidePurposeMin: reg("blocker_outside_purpose_min", "int", 20, { owner: "workflow" }, (r) => posInt(r, 20)),
   reviewMinIntervalMinutes: reg("review_min_interval_minutes", "int", 120, { owner: "review" }, (r) => intIn(r, 0, 7 * 24 * 60, 120)),
   warmMinIntervalMinutes: reg("warm_min_interval_minutes", "int", 15, { owner: "build" }, (r) => intIn(r, 0, 24 * 60, 15)),
