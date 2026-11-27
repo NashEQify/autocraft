@@ -3,7 +3,7 @@
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { safePath } from "../fixup/patch.ts";
 import type { LintProblem } from "../replylint.ts";
-import { evidenceAt, OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
+import { CLAIM_INCOMPLETE, evidenceAt, OPUS_MAX_FIXES, REFERENCE_LEAK, parseClaims, type Claim, parseStatementConflicts, type StatementConflict, type OwnerStatement } from "../review/opus-parse.ts";
 import { BLOCKING_CLASSES, blockingOf, type Blocking, type PremergeFinding } from "./types.ts";
 
 export const PREMERGE_MAX_FINDINGS = 30;
@@ -52,15 +52,20 @@ function entries(text: string, ref: string): { entries: Entry[]; searched: strin
   return { entries: out, searched: typeof o.searched === "string" && o.searched.trim() ? clean(o.searched).slice(0, PREMERGE_SEARCHED_CHARS) : null, conflicts: o.conflicts };
 }
 
-/** The defects that claims make: the ones whose code is wrong. */
+/**
+ * The defects that claims make. A claim whose code is wrong blocks: the PR does not do what it says. A claim that holds in the code the
+ * PR changes but not on other paths or in edge cases does not: on a PR approved for merge it is filed as a follow-up.
+ */
 function claimFindings(claims: Claim[], files: readonly string[]): PremergeFinding[] {
-  return claims.filter((c) => c.impact === "code-wrong").map((c) => {
+  return claims.filter((c) => c.impact === "code-wrong" || c.impact === "code-incomplete").map((c) => {
     const at = evidenceAt(c.evidence, files), file = at && safePath(at.path) ? at.path : "(description)";
+    const wrong = c.impact === "code-wrong";
     return {
       severity: "defect" as const, file, line: at && file !== "(description)" ? at.line : 0,
-      title: `Claim shows wrong code: ${c.claim}`.slice(0, PREMERGE_TITLE_CHARS),
-      scenario: `The claim "${c.claim}" is ${c.status} and the code is wrong. ${c.evidence}`.slice(0, PREMERGE_SCENARIO_CHARS),
-      blocking: { class: "off-purpose" as const, why: "The pull request does not do what its title or description says." },
+      title: `${wrong ? "Claim shows wrong code" : "Claim holds only in part"}: ${c.claim}`.slice(0, PREMERGE_TITLE_CHARS),
+      scenario: (wrong ? `The claim "${c.claim}" is ${c.status} and the code is wrong. ${c.evidence}`
+        : `The claim "${c.claim}" holds in the code the pull request changes, but not on every path or case. ${c.evidence}`).slice(0, PREMERGE_SCENARIO_CHARS),
+      blocking: wrong ? { class: "off-purpose" as const, why: "The pull request does not do what its title or description says." } : CLAIM_INCOMPLETE,
     };
   });
 }
@@ -72,7 +77,7 @@ const leaks = (...s: string[]) => s.some((x) => REFERENCE_LEAK.test(x));
  * valid. An entry without a valid severity, file, line, title or scenario is dropped, and so is one whose title or scenario
  * mentions the reference documentation or is in `drop`; a fix with a leak, an unsafe path or past the fix cap is dropped
  * from its finding. `drop`: texts the reply lint still flagged after the fix turn.
- * Claims: a claim of the title or body with impact "code-wrong" is a defect finding of its own. An "unknown" impact, or a missing
+ * Claims: a claim of the title or body with impact "code-wrong" (blocking) or "code-incomplete" (not blocking) is a defect finding of its own. An "unknown" impact, or a missing
  * `claims` list when `body` is not empty, is no finding: it sets `unsure`, which sends the PR to a person. "description-only" is shown only.
  */
 export function parsePremerge(text: string, ref: string, drop: ReadonlySet<string> = new Set(), known: readonly OwnerStatement[] = [], body = "", files: readonly string[] = []): PremergeReview | null {

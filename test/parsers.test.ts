@@ -10,6 +10,7 @@ import { parseCheck } from "../src/patchcheck/index.ts";
 import { parseFindings } from "../src/postmerge/parse.ts";
 import { parseHaikuImpacts } from "../src/priority/score.ts";
 import { parseChecks } from "../src/review/checks.ts";
+import { verdictToAct } from "../src/core/review-blocking.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
 import { parseGateCall } from "../src/worker/gate.ts";
 
@@ -86,6 +87,18 @@ describe("model replies", () => {
     assert.equal(run({ claims: [{ ...bad, impact: "description-only", evidence: "nowhere in particular" }] }).sure, false, "no path:line, so impact unknown");
     assert.equal(run({}).sure, false, "no claims list with a body");
     assert.equal(parseOpusReply(fence(take), "app#1")?.sure, true, "no body, nothing to claim");
+  });
+
+  test("Opus review: a code-incomplete claim's fix does not stop a PR approved for merge; without a fix it is a note", () => {
+    const take = { ref: "app#1", verdict: "take", sure: true, reason: "fine", fixes: [], summary: "Adds a filter.", why: "It is correct." };
+    const part = { claim: "documents open in request order", status: "contradicted", evidence: "src/open.rs:88 orders the queue; src/panel.rs:20 opens at once", impact: "code-incomplete" };
+    const run = (o: object) => parseOpusReply(fence({ ...take, ...o }), "app#1", true, new Set(), false, [], "body")!;
+    const r = run({ claims: [{ ...part, fix: { file: "src/panel.rs", change: "queue the open" } }] });
+    assert.deepEqual([r.verdict, r.sure, r.fixes.map((f) => f.blocking?.class)], ["take-fix", true, [null]]);
+    assert.equal(verdictToAct(r.verdict, r.fixes, [], true), "take", "approved: filed as a follow-up, not made");
+    assert.equal(verdictToAct(r.verdict, r.fixes, [], false), "take-fix", "not approved: made like any fix");
+    const bare = run({ claims: [part] });
+    assert.deepEqual([bare.verdict, bare.sure], ["take", true]);
   });
 
   test("Opus review: the ref must match, take-fix needs a fix, a one-element array is read", () => {
