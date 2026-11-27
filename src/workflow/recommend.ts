@@ -72,7 +72,6 @@ const STOPS = {
 export type Conflict = { path: ConflictPath | null };
 
 const ON_CONFLICT: Record<Exclude<ConflictPath, "merge">, (text: string) => string> = {
-  tomorrow: (text) => t("It conflicts with its base branch, and today's merges of that branch into it are used up, so this goes on tomorrow. {text}", { text }),
   contributor: (text) => t("It conflicts with its base branch, which the contributor has to resolve first. {text}", { text }),
   person: (text) => t("It conflicts with its base branch, which AutoCraft cannot resolve: someone has to do that on its branch first. {text}", { text }),
 };
@@ -92,7 +91,7 @@ export function onConflict(rec: Recommendation, conflict: Conflict | null): Reco
     return { text: ON_CONFLICT[path](t("Wait for that with the merge approved.")), parts: { fix: [], drop: rec.parts.drop }, merges: true, waits: path };
   }
   const out = rec.merges ? rec : { ...rec, merges: true, text: textFor({ fix: rec.parts.fix, merges: true }) };
-  return path === "merge" ? out : { ...out, text: ON_CONFLICT[path](out.text) };
+  return out;
 }
 
 /**

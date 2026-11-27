@@ -527,10 +527,10 @@ export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
   !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && (!f.repoFacts.mainRed || f.mainFix) ? "ci" : null;
 
 /**
- * Who settles a PR's conflict with its base branch once its merge is approved: the conflict step merges the base in (`tomorrow`: today's
- * merges are used up), and the fixes follow; or the contributor or another person has to resolve it, and nothing is fixed or merged before.
+ * Who settles a PR's conflict with its base branch once its merge is approved: the conflict step merges the base in, and the fixes follow;
+ * or the contributor or another person has to resolve it, and nothing is fixed or merged before.
  */
-export type ConflictPath = "merge" | "tomorrow" | "contributor" | "person";
+export type ConflictPath = "merge" | "contributor" | "person";
 /** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (no take or take-fix review, and no merge entry). */
 export function conflictPath(f: PrFacts | null): ConflictPath | null {
   if (f?.mergeable !== "CONFLICTING") return null;
@@ -547,7 +547,8 @@ export function settlesConflict({ conflict: c, pushable }: Pick<PrFacts, "confli
     // The approval of the merge is the approval of this push as well; `done`: pushed, and the mirror does not show it yet.
     case "merge": case "unapproved": case "done": return "merge";
     case "linting": return pushable ? "merge" : "person";
-    case "capped": return "tomorrow";
+    // The daily cap holds only PRs whose merge nobody approved; an approved merge lifts it.
+    case "capped": return "merge";
     case "ask": case "ask-retry": case "asked": return "contributor";
     default: return "person";
   }
