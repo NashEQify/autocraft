@@ -117,7 +117,7 @@ export function queueViewIn(v: RemoteView, queue: QueueSnapshot, showPicker: boo
     const n = ahead.get(r.tier) ?? 0;
     const asked = !about || r.refs.some((x) => about.has(`${x.repo}#${x.number}`));
     const waits = !asked || followUp || picked !== null || r.forLogin !== null ? null : waitOf(v, started, r, nowMs, showPicker);
-    const why = whyWaiting({ tier: r.tier, promptId: r.prompt_id, step: r.step, repos: r.repos, refs: r.refs, followUp, picked: picked === null ? null : { login: showPicker ? picked : null }, bound: r.forLogin === null ? null : { login: r.forLogin, shown: showPicker, took: [...started.boundTakers({ prompt_id: r.prompt_id, refs: r.refs, forLogin: r.forLogin, tier: r.tier })] }, waits }, runners, n, canWrite);
+    const why = whyWaiting({ tier: r.tier, promptId: r.prompt_id, step: r.step, repos: r.repos, refs: r.refs, followUp, picked: picked === null ? null : { login: showPicker ? picked : null }, bound: r.forLogin === null ? null : { login: r.forLogin, shown: showPicker, took: [...started.boundTakers({ prompt_id: r.prompt_id, refs: r.refs, forLogin: r.forLogin, tier: r.tier, refusedToken: r.refusedToken })] }, waits }, runners, n, canWrite);
     // A call of repos or a task no ready runner takes is passed over, so it is no call ahead of the next; nor is one bound to a user.
     if (!followUp && picked === null && r.forLogin === null && why.code !== "task-off" && why.code !== "items-off" && why.code !== "no-repo-access") ahead.set(r.tier, n + 1);
     if (!asked) continue;

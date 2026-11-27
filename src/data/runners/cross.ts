@@ -21,9 +21,9 @@ export const POSTMERGE_STEP = "postmerge";
  * caller: src/remote/started.ts tierTokens), whose helper reported `ready` within STATUS_FRESH_MS, is active (a lease heartbeat within
  * LIVE_LEASE_MS, or an empty claim within IDLE_FRESH_MS) and has a free slot (its slots, less the fast lane when it has two or more,
  * less its leases outside the own lane), its login not cooling off and under its Max calls at once. The Task Runner snapshot's side is
- * readyWithRoom in src/remote/started.ts.
+ * readyWithRoom in src/remote/started.ts. `exceptTokenRef`: a column whose credential (when set) does not count.
  */
-export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly string[], now: number, tierTokens: readonly number[]): Expression<SqlBool> {
+export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly string[], now: number, tierTokens: readonly number[], exceptTokenRef?: string): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
   if (!tierTokens.length) return w.lit(false);
   const one = w.lit(1).as("one");
@@ -36,7 +36,7 @@ export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly 
   return w.exists(schemaEb(w).selectFrom("main.remote_helpers as rh").innerJoin("main.mcp_tokens as rt", "rt.id", "rh.token_id").innerJoin("main.access as ra", "ra.login", "rt.login").select(one)
     .where("rt.kind", "=", "runner").where("rt.expires_at", ">", new Date(now).toISOString()).where("ra.role", "in", ["maintainer", "operator"])
     .where((x: any) => x.or(cols.map((c) => ciEq(db, login, ref<string>(`${alias}.${c}`)))))
-    .where("rh.token_id", "in", [...tierTokens]).where("rh.readiness", "=", "ready").where("rh.reported_at", ">=", now - STATUS_FRESH_MS)
+    .where("rh.token_id", "in", [...tierTokens]).$if(exceptTokenRef !== undefined, (b: any) => b.where((x: any) => x.or([x(exceptTokenRef!, "is", null), x("rh.token_id", "<>", ref<number>(exceptTokenRef!))]))).where("rh.readiness", "=", "ready").where("rh.reported_at", ">=", now - STATUS_FRESH_MS)
     .where((x: any) => x.or([
       x.exists(schemaEb(x).selectFrom("main.remote_calls as rb").select(one).where("rb.state", "=", literal("leased")).where("rb.token_id", "=", ref<number>("rh.token_id")).where("rb.heartbeat_at", ">=", now - LIVE_LEASE_MS)),
       x("rh.idle_claim_at", ">=", now - IDLE_FRESH_MS),
@@ -80,9 +80,9 @@ export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: stri
 
 /**
  * A call bound to another person (`for_login`) for an item workflow's work (TAKEABLE_BOUND_PROMPTS) that `login` may lease: a follow-up
- * on the session `login`'s Task Runner holds (`sticky_login`), or a call whose items (at least one) each have a live workflow, or are the
+ * on the session `login`'s Task Runner holds (`sticky_login`), or a first call (no parent) whose items (at least one) each have a live workflow, or are the
  * PR one works on, whose work `login` took onto their Task Runner (`item_runners`, not released), while no Task Runner of `for_login`
- * could run the call now (readyWithRoomExpr, over `tierTokens`). The Task Runner snapshot's side is StartedCalls.boundTakers in
+ * could run the call now (readyWithRoomExpr, over `tierTokens`, leaving out the credential whose model declined the call). The Task Runner snapshot's side is StartedCalls.boundTakers in
  * src/remote/started.ts.
  */
 export function boundTakeAllows(db: Db, eb: Eb, login: string, o: { now: number; tierTokens: readonly number[] }): Expression<SqlBool> {
@@ -99,9 +99,10 @@ export function boundTakeAllows(db: Db, eb: Eb, login: string, o: { now: number;
     w.or([
       w.and([w("remote_calls.parent_id", "is not", null), ciEq(db, "remote_calls.sticky_login", w.val(login))]),
       w.and([
+        w("remote_calls.parent_id", "is", null),
         w.exists(items().select(one)),
         w.not(w.exists(items().select(one).where((x: any) => x.not(took(x, "bi"))))),
-        w.not(readyWithRoomExpr(db, w, "remote_calls", ["for_login"], o.now, o.tierTokens)),
+        w.not(readyWithRoomExpr(db, w, "remote_calls", ["for_login"], o.now, o.tierTokens, "remote_calls.refused_token")),
       ]),
     ]),
   ]);

@@ -65,9 +65,10 @@ export type StartedCalls = {
   /**
    * The lowercase logins that took onto their Task Runner the live workflow of every one of `refs` (at least one), or of the issue whose
    * PR one is. With `forLogin`, a call bound to that person: only an item workflow's bound work (takeableBound), and none while a runner
-   * of `forLogin` is ready with room for `tier` (readyWithRoom). The lease's side is boundTakeAllows in src/data/runners/cross.ts.
+   * of `forLogin` is ready with room for `tier` (readyWithRoom), leaving out the credential whose model declined the call
+   * (`refusedToken`). The lease's side is boundTakeAllows in src/data/runners/cross.ts.
    */
-  boundTakers: (c: { prompt_id: string; refs: readonly ItemRef[]; forLogin: string; tier?: Tier }) => ReadonlySet<string>;
+  boundTakers: (c: { prompt_id: string; refs: readonly ItemRef[]; forLogin: string; tier?: Tier; refusedToken?: number | null }) => ReadonlySet<string>;
 };
 
 const NONE: ReadonlySet<never> = new Set();
@@ -94,14 +95,14 @@ export const tierTokens = (v: RemoteView, tier: Tier): number[] =>
  * Whether some Task Runner of `login` could run a call of `tier` now (any tier when left out): a maintainer's or operator's fresh,
  * ready runner not cooling off whose reported model serves the tier, active (a lease heartbeat within LIVE_LEASE_MS or an empty claim
  * within IDLE_FRESH_MS) and with a free slot (its slots, less the fast lane when it has two or more, less its leases outside the own
- * lane), the login under its Max calls at once. The lease's side is readyWithRoomExpr in src/data/runners/cross.ts.
+ * lane), the login under its Max calls at once; never the credential `exceptToken`. The lease's side is readyWithRoomExpr in src/data/runners/cross.ts.
  */
-export function readyWithRoom(v: RemoteView, login: string, tier?: Tier): boolean {
+export function readyWithRoom(v: RemoteView, login: string, tier?: Tier, exceptToken: number | null = null): boolean {
   const { snapshot, now } = v;
   const key = login.toLowerCase();
   const max = settingsOf(snapshot, key).maxCalls;
   if (max !== null && (snapshot.leasedByLogin.get(key)?.leased ?? 0) >= max) return false;
-  return snapshot.runners.some((r) => r.login.toLowerCase() === key && (r.role === "maintainer" || r.role === "operator") && freshReady(snapshot, r, now)
+  return snapshot.runners.some((r) => r.login.toLowerCase() === key && r.tokenId !== exceptToken && (r.role === "maintainer" || r.role === "operator") && freshReady(snapshot, r, now)
     && (tier === undefined || tiersOf(r.models, v.accepted).has(tier))
     && ((r.beatAt ?? -Infinity) >= now - LIVE_LEASE_MS || (r.idleClaimAt ?? -Infinity) >= now - IDLE_FRESH_MS)
     && (r.slots ?? 1) - ((r.slots ?? 1) >= 2 ? 1 : 0) > r.leased);
@@ -120,9 +121,9 @@ function buildStarted(v: RemoteView): StartedCalls {
   // A workflow's people: its starter and approver, and the logins that took its work while none of those could run the call now.
   type Row = { started_by: string; approved_by: string | null; taken_by?: string[] };
   const ready = new Map<string, boolean>();
-  const readyOf = (l: string, tier?: Tier): boolean => {
-    const k = `${l}\n${tier ?? ""}`;
-    return ready.get(k) ?? ready.set(k, readyWithRoom(v, l, tier)).get(k)!;
+  const readyOf = (l: string, tier?: Tier, exceptToken: number | null = null): boolean => {
+    const k = `${l}\n${tier ?? ""}\n${exceptToken ?? ""}`;
+    return ready.get(k) ?? ready.set(k, readyWithRoom(v, l, tier, exceptToken)).get(k)!;
   };
   const takersOf = (w: Row, tier?: Tier): string[] =>
     w.taken_by?.length && ![w.started_by, w.approved_by].some((l) => l && readyOf(l.toLowerCase(), tier)) ? w.taken_by : [];
@@ -188,7 +189,7 @@ function buildStarted(v: RemoteView): StartedCalls {
       if (!c.refs.length || !takeableBound(c.prompt_id) || !taken.size) return NONE;
       const [first, ...rest] = c.refs.map((r) => new Set((taken.get(`${r.repo}#${r.number}`) ?? []).flatMap((w) => w.taken_by ?? [])));
       const all = [...first!].filter((l) => rest.every((x) => x.has(l)));
-      return all.length && !readyOf(c.forLogin.toLowerCase(), c.tier) ? new Set(all) : NONE;
+      return all.length && !readyOf(c.forLogin.toLowerCase(), c.tier, c.refusedToken ?? null) ? new Set(all) : NONE;
     },
     waitersFor: (c) => new Set([...startedBy(tokenLogins, c)].filter((l) => {
       const u = tokensOf.get(l);

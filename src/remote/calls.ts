@@ -324,7 +324,7 @@ function claimOrderAll(q: ReturnType<typeof orderedOf>, reads: OrderReads, calle
   const ownHere = bound === "with" ? own : own.filter((r) => r.boundSlot);
   // Bound work of a workflow the caller took, in the same lanes as the caller's own bound calls.
   const took = q.ordered.filter((r) => r.forLogin !== null && r.forLogin !== login && (bound === "with" || r.boundSlot) && live(r) && !released(r) && tiers.has(r.tier) && fast(r)
-    && started.boundTakers({ prompt_id: r.prompt_id, refs: r.refs, forLogin: r.forLogin, tier: r.tier }).has(login));
+    && started.boundTakers({ prompt_id: r.prompt_id, refs: r.refs, forLogin: r.forLogin, tier: r.tier, refusedToken: r.refusedToken }).has(login));
   // The caller's own picks count for it; other pickers' while they can take them.
   const counts = (r: Cand): boolean => pickCounts(r, nowMs, (who) => who === login || pickers.has(who));
   // Calls for work the caller started or approved come next, in queue order (started.ts): like picks, they go by no repo, task,
