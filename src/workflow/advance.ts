@@ -25,7 +25,7 @@ import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
 import { AUTHOR_ROUNDS_PER_DAY, CIFIX_NO_LOG_REASON } from "../core/rules.ts";
 import type { StopCode } from "../core/codes.ts";
-import { conflictDaysUsed, conflictPath, decidePr, premergeStopLifts, pushHeld } from "../core/decide.ts";
+import { conflictPath, decidePr, premergeStopLifts, pushHeld } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { loadItemFacts } from "../core/issue-facts.ts";
 import { acceptedHeads, agreedAt, approvedHead, chainsOwn, isAccepted, LOCKFILE, neededReview, pushesSince, type RecordedPush } from "../core/evidence.ts";
@@ -197,8 +197,7 @@ const answeredAt = (w: ItemWorkflow, moves: ReadonlyMap<string, readonly Recorde
 /** The merge approval's limit that holds the PR's next step back, from its facts at the head (blockers.ts Limit). */
 function approvalLimit(f: PrFacts): Limit | null {
   const step = pushHeld(f);
-  if (step) return { kind: "pushes", count: f.ownPushes ?? 0, step };
-  return conflictDaysUsed(f) ? { kind: "conflict-days", days: f.conflict?.cappedDays ?? 0 } : null;
+  return step ? { kind: "pushes", count: f.ownPushes ?? 0, step } : null;
 }
 
 /** How a hold ends a merge leg: its person cancels it, or the pre-approval pass does, with its workflow. */

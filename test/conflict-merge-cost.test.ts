@@ -48,7 +48,7 @@ test("a merge of the base that leaves the PR's own diff alone carries the verdic
   assert.equal(await carriedReview(db, { repo: "app", number: 1, head_oid: "H2" }), null, "changed diff: reviewed, not carried");
 });
 
-test("a third merge of the base into one PR in a UTC day waits for the next day", async () => {
+test("a third merge of the base into one unapproved PR in a UTC day waits for the next day; an approved PR has no daily limit", async () => {
   const db = await connectDb(join(tmpdir("conflict-cap"), "t.db"));
   const now = Date.parse("2026-11-04T20:00:00Z");
   const ins = async (from: string, to: string, at: string) => await db.run(db.k.insertInto("conflict_merges").values({ repo: "app", number: 1, from_head: from, to_head: to, state: "merged", attempt: 1, created_at: at }));
@@ -59,6 +59,7 @@ test("a third merge of the base into one PR in a UTC day waits for the next day"
   await ins("c", "d", "2026-11-04T02:00:00Z");
   assert.equal(await p("d"), "capped");
   assert.equal(await conflictBucket(db, { repo: "app", number: 1, head: "d", pushable: true }, { push: true, comment: true }, now + 5 * 3600_000), "merge", "next UTC day");
+  assert.equal(await conflictBucket(db, { repo: "app", number: 1, head: "d", pushable: true, uncapped: true }, { push: true, comment: true }, now), "merge", "a PR approved for merge gets a third merge the same day");
 });
 
 test("the review after our resolution reads the changed and dropped PR hunks, and a head with no recorded delta is reviewed in full", async () => {

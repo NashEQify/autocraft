@@ -63,12 +63,6 @@ export function mergesToday(rows: readonly ConflictRow[], now: number): number {
   const day = new Date(now).toISOString().slice(0, 10);
   return rows.filter((r) => (r.state === "merged" || r.state === "pushing") && r.createdAt >= day).length;
 }
-/** UTC days after `since` on which the conflict merges pushed (or pushing) reached the daily cap. */
-export function cappedDaysIn(rows: readonly ConflictRow[], since: string): number {
-  const per = new Map<string, number>();
-  for (const r of rows) if ((r.state === "merged" || r.state === "pushing") && r.createdAt > since) per.set(r.createdAt.slice(0, 10), (per.get(r.createdAt.slice(0, 10)) ?? 0) + 1);
-  return [...per.values()].filter((n) => n >= CONFLICT_MAX_MERGES_PER_PR_PER_DAY).length;
-}
 const unsentConflictAsk = (rows: readonly ConflictRow[], head: string, now: number) =>
   unsentAsk(rows.filter((r) => r.fromHead === head && r.state === "comment-unsent").map((r) => r.createdAt), now);
 /** When an ask-retry bucket's comment is due again (ms), or undefined. */
@@ -76,8 +70,8 @@ export function conflictAskRetryAtOf(rows: readonly ConflictRow[], head: string,
   const u = unsentConflictAsk(rows, head, now);
   return u !== null && u !== "final" ? u.until : undefined;
 }
-/** The conflict-merge bucket of a PR at `p.head` from its rows. `p.gone`: a merge pushed from that head is off the branch again (the PR is back at the head, or never left it), so it is due again. */
-export function conflictBucketOf(rows: readonly ConflictRow[], p: { head: string; pushable: boolean; gone?: boolean }, approvals: { push: boolean; comment: boolean }, now: number): ConflictBucket {
+/** The conflict-merge bucket of a PR at `p.head` from its rows. `p.uncapped`: a PR approved for merge or a merge-queue entry has no daily cap on base merges. `p.gone`: a merge pushed from that head is off the branch again (the PR is back at the head, or never left it), so it is due again. */
+export function conflictBucketOf(rows: readonly ConflictRow[], p: { head: string; pushable: boolean; gone?: boolean; uncapped?: boolean }, approvals: { push: boolean; comment: boolean }, now: number): ConflictBucket {
   const here = new Set(rows.filter((r) => r.fromHead === p.head).map((r) => r.state));
   if (here.has("merged") && !p.gone) return "done";
   // Nothing more a merge can do at this head: the contributor is asked once (a comment needs approval). A comment that failed is
@@ -92,7 +86,7 @@ export function conflictBucketOf(rows: readonly ConflictRow[], p: { head: string
   if (here.has("linting")) return "linting";
   if (!p.pushable || here.has("cannot-push")) return stuck();
   if (triesIn(rows, p.head) >= MAX_CONFLICT_TRIES) return stuck();
-  if (mergesToday(rows, now) >= CONFLICT_MAX_MERGES_PER_PR_PER_DAY) return "capped";
+  if (!p.uncapped && mergesToday(rows, now) >= CONFLICT_MAX_MERGES_PER_PR_PER_DAY) return "capped";
   return approvals.push ? "merge" : "unapproved";
 }
 

@@ -343,7 +343,7 @@ export function factsOf(w: PrRows): PrFacts {
     }
   }
   if (f.mergeable === "CONFLICTING") {
-    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable, gone: qh === head && !f.pushedOff }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment && !f.quiet }, NOW);
+    const bucket = conflictBucketOf(w.patches.conflicts, { head: qh, pushable: f.pushable, gone: qh === head && !f.pushedOff, uncapped: !!w.workflow?.approvedBy }, { push: pushAllowed(f, "conflict"), comment: w.approvals.comment && !f.quiet }, NOW);
     const until = bucket === "capped" ? NOW + 12 * 3600_000 : bucket === "ask-retry" ? conflictAskRetryAtOf(w.patches.conflicts, qh, NOW) : undefined;
     f.conflict = { bucket, base: "main", baseOk: w.baseOk, ...(until !== undefined ? { until } : {}) };
   }

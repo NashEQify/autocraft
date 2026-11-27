@@ -2,7 +2,7 @@
 // core/pass-load.ts. Each concept has one definition here.
 import { listQuietPrs } from "../data/security/index.ts";
 import { HOLD_MAX, loadOwnLogins, permKey, standing, type ActFacts, type ActIdentity, type PermKey, type Standing } from "../data/access/index.ts";
-import { loadMainFixPrs, attemptsIn, cappedDaysIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, premergeStalledIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
+import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, premergeStalledIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads, unsentTries } from "../data/review/index.ts";
 import { prPass } from "../data/planner/index.ts";
@@ -512,10 +512,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     }
   }
   if (base.mergeable === "CONFLICTING" && i.base_ref) {
-    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
+    const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff, uncapped: owned !== null }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
     const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
-    const cappedDays = bucket === "capped" && owned !== null ? cappedDaysIn(patch.conflicts, owned) : 0;
-    base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}), ...(cappedDays ? { cappedDays } : {}) };
+    base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
   }
   if (!mx && verdict === "take-fix") base.fixup = { fixes: parseFixes(JSON.stringify(fixes)).length, attempts: attemptsIn(patch.fixups, owned ?? undefined), ...fixupAtHead(patch.fixups, qh, now) };
   for (const l of lintAt(qh, base.brokeByUs || base.gateRed ? head ?? qh : qh)) if (l.source === "review" || l.source === "premerge") base.lint.push({ ...l, source: l.source });

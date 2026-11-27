@@ -35,7 +35,7 @@ export async function conflictAskRetryAt(db: Db, repo: string, number: number, h
   return conflictAskRetryAtOf(await conflictRows(db, repo, number), head, nowMs);
 }
 
-export async function conflictBucket(db: Db, p: { repo: string; number: number; head: string; pushable: boolean }, approvals: { push: boolean; comment: boolean }, nowMs: number = Date.now()): Promise<ConflictBucket> {
+export async function conflictBucket(db: Db, p: { repo: string; number: number; head: string; pushable: boolean; uncapped?: boolean }, approvals: { push: boolean; comment: boolean }, nowMs: number = Date.now()): Promise<ConflictBucket> {
   return conflictBucketOf(await conflictRows(db, p.repo, p.number), p, approvals, nowMs);
 }
 

@@ -94,8 +94,6 @@ export const FIXUP_MAX_ATTEMPTS = 2;
 export const PUSHES_PER_APPROVAL = 10;
 /** Review rounds of the author's new commits on a PR approved for merge per UTC day (since a person last went on with it): the next one waits for their answer. A runaway backstop that normal work never reaches. */
 export const AUTHOR_ROUNDS_PER_DAY = 10;
-/** UTC days on which the conflict merges of a PR approved for merge reached their daily cap (since a person last went on with it): after them, its approver is asked. A runaway backstop that normal work never reaches. */
-export const CONFLICT_CAPPED_DAYS = 5;
 /** Lint rounds (a lint task on a stored model patch) per head before the patch is abandoned. */
 export const LINT_MAX_ROUNDS = 2;
 /** Base branch names a conflict merge accepts. */
