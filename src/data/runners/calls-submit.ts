@@ -90,6 +90,18 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
   return ok;
 }
 
+/**
+ * Puts the call back in the queue without using an attempt, a cool-off strike or a skip of its login, in one transaction with its run's finish,
+ * which keeps the tokens the attempt used. False when the lease was not the one named.
+ */
+export async function returnLease(db: Db, lease: LiveLease, reason: string, a: { usage: Tokens | null; output?: Uint8Array }, now: number): Promise<boolean> {
+  return await db.write(async () => {
+    if (!(await unlease(db, { id: lease.id, runId: null, hash: lease.secretHash }, reason, now))) return false;
+    if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", error: reason, summary: "returned to the queue", ...(a.usage && { tokens: a.usage }), ...(a.output && { output: a.output }) }]);
+    return true;
+  });
+}
+
 /** Unleases with `released_by` and the skip `wait` (src/remote/calls.ts releaseWait), tombstone and run finish. False when the lease was not the one named. */
 export async function releaseLease(db: Db, lease: LiveLease, reason: string, now: number, wait: { ms: number | null; setupRetry: boolean } = { ms: null, setupRetry: false }): Promise<boolean> {
   return await unlease(db, { id: lease.id, runId: lease.runId, hash: lease.secretHash }, reason, now, { login: lease.login, waitMs: wait.ms, setupRetry: wait.setupRetry });

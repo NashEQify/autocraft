@@ -2037,6 +2037,7 @@ export interface RemoteCalls {
   base_stdin: string | null;
   refusals: Generated<number>;
   refused_token: number | null;
+  lease_timeout_ms: number | null;
 }
 
 export interface RemoteChecks {
@@ -2073,6 +2074,7 @@ export interface RemoteHelpers {
   busy: number | null;
   last_error: string | null;
   helper_version: string | null;
+  login_renews_at: number | null;
   idle_claim_at: number | null;
   idle_tiers: string | null;
   idle_repos: string | null;
@@ -3298,10 +3300,10 @@ export const COLUMNS = {
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],
   remote_call_items: ["call_id", "pos", "repo", "number"],
-  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "for_login", "own_lane", "bound_slot", "released_by", "released_at", "release_wait_ms", "setup_retries", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin", "refusals", "refused_token"],
+  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "for_login", "own_lane", "bound_slot", "released_by", "released_at", "release_wait_ms", "setup_retries", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin", "refusals", "refused_token", "lease_timeout_ms"],
   remote_checks: ["id", "call_id", "run_id", "input", "state", "result", "requested_at", "ended_at"],
   remote_cooloffs: ["login", "until", "reason", "failures", "failures_since"],
-  remote_helpers: ["token_id", "login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error", "helper_version", "idle_claim_at", "idle_tiers", "idle_repos", "machine"],
+  remote_helpers: ["token_id", "login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error", "helper_version", "login_renews_at", "idle_claim_at", "idle_tiers", "idle_repos", "machine"],
   remote_lease_drops: ["token_id", "at", "login", "call_id"],
   remote_lease_tombstones: ["secret_hash", "call_id", "at"],
   remote_liveness: ["id", "alive_at", "since"],

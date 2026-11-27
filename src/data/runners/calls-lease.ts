@@ -41,7 +41,7 @@ export async function leaseCall(db: Db, req: LeaseRequest): Promise<Lease | "lim
         items: s.items, prompt: req.prompt, remote: { callId: req.id, userLogin: login, harness: claim.harness, reportedModel: req.model } });
       const r = await q.get(q.k.updateTable("main.remote_calls").set((eb) => ({
         state: "leased", token_id: caller.tokenId, user_login: login, harness: claim.harness, harness_version: claim.harnessVersion, model: req.model, root: claim.root ?? null,
-        lease_secret_hash: sha256hex(secret), leased_at: now, heartbeat_at: now, started_at: null, claim_id: claim.requestId ?? null, run_id: runId,
+        lease_secret_hash: sha256hex(secret), leased_at: now, heartbeat_at: now, started_at: null, lease_timeout_ms: req.timeoutMs ?? null, claim_id: claim.requestId ?? null, run_id: runId,
         own_lane: claim.ownLane || caps.interactive !== null ? 1 : 0, ...(req.rewrite && { bundle: req.rewrite.bundle, base_stdin: req.rewrite.baseStdin }),
         queued_ms: queuedMsAfter(db, eb, now), queued_since: null, progress: null, error: null, picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
       }) as any).where("id", "=", req.id).where("state", "=", literal("queued"))

@@ -94,8 +94,9 @@ export type Claim = {
   /** A claim from a slot or the fast lane of a helper that also runs an own lane: the calls bound to its user are left to that lane. */
   withOwnLane?: boolean;
   /**
-   * Only calls whose timeout is at most this many seconds: the helper's harness login is refreshed before a longer call could
-   * finish. Absent: any timeout. A server without the field offers any call, and the helper gives back one that does not fit.
+   * The room left on the helper's harness login before its refresh, in seconds: no call may run longer. With enough room the
+   * server leases a longer call with its bundle's `timeoutSeconds` cut to the room (calls.ts LOGIN_CUT_MIN_MS); with less it
+   * leases only calls that fit. Absent: any timeout. A server without the field offers any call, and the helper gives back one that does not fit.
    */
   maxTimeoutSeconds?: number;
   /**
@@ -250,7 +251,7 @@ export type TaskBundle = {
   promptVersion: string;
   tier: Tier;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
-  /** Wall-clock limit for the whole harness run. */
+  /** Wall-clock limit for the whole harness run: the call's own, or the lease's when cut to the claim's login room. */
   timeoutSeconds: number;
   maxTurns: number | null;
   /** The text sent on stdin. */
