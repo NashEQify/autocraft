@@ -491,6 +491,18 @@ describe("picks and Manual only", async () => {
     const session = await q({ promptId: "implement.session", items: item, forLogin: "alice", boundSlot: true });
     assert.equal(await leased("bob"), null, "alice's runner could run it now: bob's passes it over");
     assert.ok([turn, session].includes((await leased("alice"))!));
+    await clear();
+    // A call alice's only credential declined (requeued with refused_token) goes to bob although her runner has room again;
+    // with bob's runner gone nobody may take it, so it has no taker.
+    await db.run(db.k.updateTable("remote_helpers").set({ idle_claim_at: Date.now() }).where("login", "=", "alice"));
+    const declined = await q({ promptId: "implement.plan", items: item, forLogin: "alice", boundSlot: true });
+    await db.run(db.k.updateTable("remote_calls").set({ refused_token: callers.alice!.tokenId }).where("id", "=", declined));
+    dropQueueCache(db);
+    const asTaker = { prompt_id: "implement.plan", repos: ["photocraft"], refs: item, forLogin: "alice", tier: "top" as Tier, refusedToken: callers.alice!.tokenId };
+    assert.equal(await leased("alice"), null, "not again on the credential that declined it");
+    assert.equal(await leased("bob"), declined, "bob's runner takes the declined call while alice's other credentials cannot run it");
+    await unfresh("bob");
+    assert.equal(await takerTest(db, Date.now())(asTaker), false, "with bob's runner gone the declined call has no taker");
     await updateWorkflow(db, wf, { state: "done" });
     await ready("olga");
     await clear();
