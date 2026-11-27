@@ -6,12 +6,15 @@
 //
 // A head's row (premerge_followups for the pre-merge review's head, review_followups for the reviewed head) is written in state
 // `filing` before the write, so a head is filed once. A write GitHub refused is recorded
-// `failed` with its reason, and the merge goes on; one that sent nothing removes the row, so a later run tries again. A head
-// whose follow-ups an earlier row filed already (same file and title) is recorded `filed` without a post.
+// `failed` with its reason, and the merge goes on. One that sent nothing (no app token, write pacing, GitHub's rate limit) is
+// recorded `unsent` with the times of such tries and tried again after the backoff of src/core/rules.ts unsentAsk (10, then
+// 60 minutes); the try after those is `failed`, "not posted on GitHub", and the merge goes on. A head whose follow-ups an
+// earlier row filed already (same file and title) is recorded `filed` without a post.
 import { guard } from "../core/guard.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
-import { claimFollowup, dropFollowup, loadFollowupRows, loadPremerge, loadReviewsAt, settleFollowup, type FollowupSource, type ReviewRow } from "../data/review/index.ts";
+import { claimFollowup, deferFollowup, loadFollowupRows, loadPremerge, loadReviewsAt, settleFollowup, unsentTries, type FollowupSource, type ReviewRow } from "../data/review/index.ts";
+import { unsentAsk } from "../core/rules.ts";
 import { reviewFollowUps } from "../core/review-blocking.ts";
 import { partTitle } from "../workflow/work.ts";
 import { loadShown } from "../data/mirror/index.ts";
@@ -108,7 +111,7 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
     const [pmRows, rvRows] = await Promise.all([loadFollowupRows(db, [{ repo, number }], "premerge"), loadFollowupRows(db, [{ repo, number }], "review")]);
     const mine = (source === "review" ? rvRows : pmRows).get(ref) ?? [], other = (source === "review" ? pmRows : rvRows).get(ref) ?? [];
     // What earlier rows of either table filed (or may have filed) is not posted again: a new head repeats the same findings after every push of ours.
-    const kept = (x: { state: string }) => x.state !== "failed";
+    const kept = (x: { state: string }) => x.state !== "failed" && x.state !== "unsent";
     const earlierOwn = mine.filter((x) => x.head_oid !== rowHead && kept(x)), earlierOther = other.filter(kept);
     const [pmBefore, rvBefore] = source === "review" ? [earlierOther, earlierOwn] : [earlierOwn, earlierOther];
     const [earlierPm, earlierRv] = await Promise.all([
@@ -125,6 +128,7 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
     const body = followupBody(number, rowHead, source, fs, !issue);
     const at = () => deps.now().toISOString();
     const bad = refusal([title, body], login);
+    const unsentBefore = unsentTries(mine.find((x) => x.head_oid === rowHead));
     if (!await claimFollowup(db, { repo, number, source, head: rowHead, at: at() })) continue;
     handled++;
     params.onHandled?.(handled);
@@ -155,10 +159,18 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
       await jobItem(db, repo, number, `follow-ups filed in ${made.url}`, log);
     } catch (e) {
       const reason = oneLine(e);
-      // Nothing was sent: the head is tried again by a later run.
+      // Nothing was sent: the head is tried again after a backoff, and the try after the last one fails it.
       if (isUnsent(e) || (e instanceof IssueError && (e.later || e.unsettled))) {
-        await dropFollowup(db, { repo, number, source, head: rowHead });
-        s.skipped.push({ ref, reason });
+        const now = at(), tries = [...unsentBefore, now];
+        if (unsentAsk(tries, Date.parse(now)) !== "final") {
+          await deferFollowup(db, { repo, number, source, head: rowHead, at: now, tries });
+          s.skipped.push({ ref, reason });
+          await jobItem(db, repo, number, `follow-ups not sent, tried again later: ${reason}`, log);
+          continue;
+        }
+        await settleFollowup(db, { repo, number, source, head: rowHead, at: now, state: "failed", note: `not sent ${tries.length} times: ${reason}` });
+        s.failed.push({ ref, reason });
+        await jobItem(db, repo, number, `follow-ups not posted on GitHub: ${reason}`, log);
         continue;
       }
       // An outcome that is not known keeps the `filing` row: the issue may exist, and it is not opened twice.

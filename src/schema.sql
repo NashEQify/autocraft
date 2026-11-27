@@ -2053,7 +2053,9 @@ CREATE TABLE IF NOT EXISTS premerge_reviews (
 
 -- The follow-up issue of a PR a maintainer approved for merge (src/premerge/followups.ts): one row per PR head whose pre-merge
 -- review found defects that do not stop the merge. The first row's write opens the PR's one issue (issue_number, url); a later
--- head's row comments on it. state: filing (written before the write), filed, or failed (note: why GitHub refused it).
+-- head's row comments on it. state: filing (written before the write), filed, failed (note: why GitHub refused it, or that it was
+-- never sent), or unsent (the write sent nothing: tried again after a backoff, src/core/rules.ts unsentAsk; note: the JSON list of
+-- the times of those tries, kept while the retry is filing).
 CREATE TABLE IF NOT EXISTS premerge_followups (
   repo TEXT NOT NULL, number INTEGER NOT NULL,
   head_oid TEXT NOT NULL,
