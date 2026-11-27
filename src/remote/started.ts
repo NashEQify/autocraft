@@ -12,13 +12,15 @@
 // A person who took a live workflow's work onto their Task Runner (`take`, src/data/workflow/item-runners.ts) is one of its
 // people too, while no Task Runner of its starter or approver is ready with room (readyWithRoom; the lease's condition is
 // readyWithRoomExpr in src/data/runners/cross.ts): the starter's runner comes first, the taker's takes the work while it cannot.
+// An item workflow's work bound to a person (the implement step's calls, takeableBound) goes the same way: a taker's runner takes it
+// while no runner of that person is ready with room (boundTakers; the lease's condition is boundTakeAllows in cross.ts).
 import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
 import type { Entry } from "../workflow/types.ts";
 import { judges, roleFits } from "./rules.ts";
 import { taskOfStep } from "./my-tasks.ts";
 import type { Tier } from "./protocol.ts";
-import { IDLE_FRESH_MS, LIVE_LEASE_MS, POSTMERGE_STEP } from "../data/runners/index.ts";
+import { IDLE_FRESH_MS, LIVE_LEASE_MS, POSTMERGE_STEP, takeableBound } from "../data/runners/index.ts";
 import { scaled } from "./time-scale.ts";
 import { canWriteOf, freshReady, loadView, settingsOf, tiersOf, type RemoteView } from "./view.ts";
 
@@ -60,6 +62,12 @@ export type StartedCalls = {
    * the runner last reported (any tier before its first report). The taker rule counts them, so the work waits for their runner.
    */
   waitersFor: (c: { prompt_id: string; repos: readonly string[]; refs?: readonly ItemRef[]; step?: string; tier?: Tier }) => ReadonlySet<string>;
+  /**
+   * The lowercase logins that took onto their Task Runner the live workflow of every one of `refs` (at least one), or of the issue whose
+   * PR one is. With `forLogin`, a call bound to that person: only an item workflow's bound work (takeableBound), and none while a runner
+   * of `forLogin` is ready with room for `tier` (readyWithRoom). The lease's side is boundTakeAllows in src/data/runners/cross.ts.
+   */
+  boundTakers: (c: { prompt_id: string; refs: readonly ItemRef[]; forLogin: string; tier?: Tier }) => ReadonlySet<string>;
 };
 
 const NONE: ReadonlySet<never> = new Set();
@@ -176,6 +184,12 @@ function buildStarted(v: RemoteView): StartedCalls {
       return [...u.tokens].some(([id, tiers]) => id !== c.refusedToken && (c.tier === undefined ? tiers.size > 0 : tiers.has(c.tier)));
     },
     ownersFor: (c) => startedBy(runnerLogins, c),
+    boundTakers: (c) => {
+      if (!c.refs.length || !takeableBound(c.prompt_id) || !taken.size) return NONE;
+      const [first, ...rest] = c.refs.map((r) => new Set((taken.get(`${r.repo}#${r.number}`) ?? []).flatMap((w) => w.taken_by ?? [])));
+      const all = [...first!].filter((l) => rest.every((x) => x.has(l)));
+      return all.length && !readyOf(c.forLogin.toLowerCase(), c.tier) ? new Set(all) : NONE;
+    },
     waitersFor: (c) => new Set([...startedBy(tokenLogins, c)].filter((l) => {
       const u = tokensOf.get(l);
       return !!u && roleFits(u.role, c) && !deniedOn(l, c.repos) && u.tiers.some((t) => t === null || (c.tier === undefined ? t.size > 0 : t.has(c.tier)));

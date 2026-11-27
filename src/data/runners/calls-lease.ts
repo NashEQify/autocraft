@@ -7,7 +7,7 @@ import { ciEq, indexedBy, literal, schemaEb } from "../../db/kx.ts";
 import { openRun } from "../inference/index.ts";
 import { manualOnlyExpr } from "./fragments.ts";
 import { INTERACTIVE_PROMPTS, LEASE_PREFIX, queuedMsAfter, remoteLeaseLock, sha256hex, takeFromQueueCache } from "./calls-shared.ts";
-import { itemsGoneExpr, leasedCountExpr, pickLapsedExpr, startedWorkAllows } from "./cross.ts";
+import { boundTakeAllows, itemsGoneExpr, leasedCountExpr, pickLapsedExpr, startedWorkAllows } from "./cross.ts";
 import type { Lease, LeaseRequest } from "./types.ts";
 
 /** Thrown in the lease transaction when the update took no row: the run opened for the call goes with the rollback. */
@@ -48,12 +48,13 @@ export async function leaseCall(db: Db, req: LeaseRequest): Promise<Lease | "lim
         .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", login), pickLapsedExpr(db, eb, now)]))
         // The runner whose model declined the call does not take it again (another process's queue cache may still offer it).
         .where((eb) => eb.or([eb("refused_token", "is", null), eb("refused_token", "!=", caller.tokenId)]))
-        // Only the user a call is bound to takes it. A Manual only caller takes only follow-ups, its own picks, calls bound to it and calls for work it started or approved.
-        .where((eb) => eb.or([eb("for_login", "is", null), eb("for_login", "=", login)]))
+        // Only the user a call is bound to takes it, or for an item workflow's bound work a person who took it while that user's runners cannot (boundTakeAllows).
+        // A Manual only caller takes only follow-ups, its own picks, bound calls it may take and calls for work it started or approved.
+        .where((eb) => eb.or([eb("for_login", "is", null), eb("for_login", "=", login), boundTakeAllows(db, eb, login, { now, tierTokens: req.tierTokens ?? [] })]))
         // A call whose items all merged or closed meanwhile is no one's work any more (sync withdraws it).
         .where((eb) => eb.not(itemsGoneExpr(eb, "remote_calls.id", { promptId: "remote_calls.prompt_id", forLogin: "remote_calls.for_login", step: "remote_calls.step" })))
         .where((eb) => (req.started ? startedWorkAllows(db, eb, login, "remote_calls.id", { stepRef: "remote_calls.step", now, tierTokens: req.tierTokens ?? [] })
-          : eb.or([eb.not(manualOnlyExpr(eb, eb.val(login))), eb("parent_id", "is not", null), eb("picked_by", "=", login), eb("for_login", "=", login)])))
+          : eb.or([eb.not(manualOnlyExpr(eb, eb.val(login))), eb("parent_id", "is not", null), eb("picked_by", "=", login), eb("for_login", "is not", null)])))
         .where((eb) => eb.exists(schemaEb(eb).selectFrom("main.mcp_tokens as lt").select(eb.lit(1).as("one")).where("lt.id", "=", caller.tokenId).where("lt.kind", "=", "runner").where("lt.expires_at", ">", new Date(now).toISOString())))
         .$if(caps.perLogin !== null, (b) => b.where((eb) => eb(leasedCountExpr(db, eb, eb.val(login)), "<", caps.perLogin!)))
         .$if(caps.interactive !== null, (b) => b.where((eb) => eb(interactiveCount(db, eb, login), "<", caps.interactive!)))

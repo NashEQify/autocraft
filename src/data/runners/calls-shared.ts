@@ -27,6 +27,13 @@ export const LEASE_PREFIX = "aclease_";
 export const QUEUE_CACHE_MS = 2_000;
 /** Prompts whose calls run on the interactive lane. */
 export const INTERACTIVE_PROMPTS: readonly string[] = ["discord.", "interactive."];
+/**
+ * Prompts of an item workflow's work that is bound to a person (NewCall.forLogin, the implement step's calls on its starter's Task Runner):
+ * a person who took the workflow's work onto their Task Runner may run such a call while no runner of that person could (cross.ts
+ * boundTakeAllows). Every other bound call (Discord and interactive prompts, a maintainer's conversation turn) runs only on its person's runners.
+ */
+export const TAKEABLE_BOUND_PROMPTS: readonly string[] = ["implement."];
+export const takeableBound = (promptId: string): boolean => TAKEABLE_BOUND_PROMPTS.some((p) => promptId.startsWith(p));
 /** `user_settings` key of a login's Max calls at once and its largest value. */
 export const MAX_CALLS_KEY = "max_calls";
 export const MAX_CALLS_MAX = 64;

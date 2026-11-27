@@ -7,7 +7,7 @@ import { ciEq, indexedBy, literal, ref, schemaEb, type Eb, type Ex } from "../..
 import { setRunProgress } from "../inference/index.ts";
 import { endedByMerge, LIVE_STATES, MERGE_WAYS, MERGED_WORK_MS, worksOnPr } from "../workflow/fragments.ts";
 import type { ItemRef } from "../../../web/src/api/types.ts";
-import { IDLE_FRESH_MS, INTERACTIVE_PROMPTS, LIVE_LEASE_MS, MAX_CALLS_KEY, MAX_CALLS_MAX, STATUS_FRESH_MS, lostLeaseExpr, sha256hex } from "./calls-shared.ts";
+import { IDLE_FRESH_MS, INTERACTIVE_PROMPTS, TAKEABLE_BOUND_PROMPTS, LIVE_LEASE_MS, MAX_CALLS_KEY, MAX_CALLS_MAX, STATUS_FRESH_MS, lostLeaseExpr, sha256hex } from "./calls-shared.ts";
 import type { LiveLease, Tier } from "./types.ts";
 import { expireLeases } from "./calls-expiry.ts";
 import { unlease } from "./calls-unlease.ts";
@@ -76,6 +76,35 @@ export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: stri
     return e.or([live, e.and([e(o.stepRef, "=", POSTMERGE_STEP), e.or(merged)])]);
   };
   return w.not(w.exists(schemaEb(w).selectFrom("main.remote_call_items as ci").select(one).where("ci.call_id", "=", ref<number>(callIdRef)).where((e: any) => e.not(owns(e, "ci")))));
+}
+
+/**
+ * A call bound to another person (`for_login`) for an item workflow's work (TAKEABLE_BOUND_PROMPTS) that `login` may lease: a follow-up
+ * on the session `login`'s Task Runner holds (`sticky_login`), or a call whose items (at least one) each have a live workflow, or are the
+ * PR one works on, whose work `login` took onto their Task Runner (`item_runners`, not released), while no Task Runner of `for_login`
+ * could run the call now (readyWithRoomExpr, over `tierTokens`). The Task Runner snapshot's side is StartedCalls.boundTakers in
+ * src/remote/started.ts.
+ */
+export function boundTakeAllows(db: Db, eb: Eb, login: string, o: { now: number; tierTokens: readonly number[] }): Expression<SqlBool> {
+  const w = schemaEb(eb) as any;
+  const one = w.lit(1).as("one");
+  const took = (e: any, item: string) => e.exists(schemaEb(e).selectFrom("main.item_workflows as tw").select(one)
+    .where("tw.state", "in", LIVE_STATES).where("tw.repo", "=", ref<string>(`${item}.repo`))
+    .where((x: any) => x.or([x("tw.number", "=", ref<number>(`${item}.number`)), worksOnPr(x, "tw", `${item}.number`)]))
+    .where((x: any) => x.exists(schemaEb(x).selectFrom("main.item_runners as tr").select(one).where("tr.workflow_id", "=", ref<number>("tw.id")).where("tr.login", "=", login.toLowerCase()).where("tr.released_at", "is", null))));
+  const items = () => schemaEb(w).selectFrom("main.remote_call_items as bi").where("bi.call_id", "=", ref<number>("remote_calls.id"));
+  return w.and([
+    w("remote_calls.for_login", "is not", null),
+    w.or(TAKEABLE_BOUND_PROMPTS.map((p) => w("remote_calls.prompt_id", "like", `${p}%`))),
+    w.or([
+      w.and([w("remote_calls.parent_id", "is not", null), ciEq(db, "remote_calls.sticky_login", w.val(login))]),
+      w.and([
+        w.exists(items().select(one)),
+        w.not(w.exists(items().select(one).where((x: any) => x.not(took(x, "bi"))))),
+        w.not(readyWithRoomExpr(db, w, "remote_calls", ["for_login"], o.now, o.tierTokens)),
+      ]),
+    ]),
+  ]);
 }
 
 /**
