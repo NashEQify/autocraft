@@ -9,6 +9,18 @@ import { loadPrWorkflows, type WorkflowFact } from "../data/workflow/index.ts";
 export const roundWaits = (w: (Pick<WorkflowFact, "approved" | "baseHead" | "own" | "state">) | null | undefined, pushes: readonly OwnPush[], head: string): boolean =>
   !!w && w.own && w.state === "running" && authorRound(w, pushes, head) !== null;
 
+/**
+ * Review rounds of the author's commits on the PR made today (UTC) after `since`, the review at `head` left out: reviews by a model at heads our own
+ * pushes did not make. A carried review, or one with no model call, is none. Where nobody answered since the start (`since` is `startedAt`), the
+ * first such review is the one the start asked for, not a round.
+ */
+export function roundsToday(reviews: readonly { head: string; at: string; model: string | null; mode: string | null }[], pushes: readonly OwnPush[], o: { head: string; since: string; startedAt: string; now: number }): number {
+  const ours = new Set(pushes.map((p) => p.to));
+  const read = reviews.filter((r) => r.model !== null && r.mode !== "carried" && r.at > o.since && !ours.has(r.head)).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  const day = new Date(o.now).toISOString().slice(0, 10);
+  return read.slice(o.since === o.startedAt ? 1 : 0).filter((r) => r.at > day && r.head !== o.head).length;
+}
+
 /** The head the approver accepted when someone else's commits lead from it to the PR's `head_oid` (the PR's own live workflow, approved); null otherwise. */
 export async function roundHeadOf(db: Db, c: { repo: string; number: number; head_oid: string }): Promise<string | null> {
   const ref = `${c.repo}#${c.number}`;

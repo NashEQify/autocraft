@@ -11,6 +11,7 @@ import { loadAccess } from "../data/access/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
+import { retryPremergeAt } from "../data/review/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
 import { countEventsSince, dropWorkflows, endFixupRequests, loadFixupRequests, listWorkflows, loadActions, loadLinks, loadPrWorkflows, loadWorkflowHistory, moveWorkflows, recordEvents, retryActions, sameWorkflow, saveWorkflows, startWorkflows, type CloseAs, type WorkflowAction, type WorkflowPatch } from "../data/workflow/index.ts";
 import { t } from "../i18n/index.ts";
@@ -542,7 +543,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   // A new weight also orders the queued calls of the item and of the PR that implements it.
   const weighed = patch.weight === undefined ? [] : [item, ...(live.kind === "issue" ? [await issuePr(live)] : [])].filter((x) => x !== null);
   const work = runs ? await fx.again(on, { again: r.again, plan: live.plan, fix: r.fix, merges: r.merges, says: o.says && r.approve, instruction: r.instruction }) : null;
-  if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) ? { ...p, state: "dropped" as const } : p));
+  if (r.drop.length) patch.plan = live.plan.map((p) => (r.drop.includes(p.n) && p.state !== "dropped" ? { ...p, state: "dropped" as const, droppedBy: by } : p));
   // An answered question's options are no plan any more.
   if (r.pick) patch.plan = live.plan.filter((p) => !sameQuestion(p.question, r.pick!.question));
   if (r.approve) Object.assign(patch, { approvedBy: by, approvedAt: at, approvedVia: via, recHead: null });
@@ -572,6 +573,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
       if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
       if (r.merges && o.waiting.length) await retryActions(db, { ids: o.waiting.map((a) => a.id) });
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
+      if (r.retryPremerge && live.recHead !== null) await retryPremergeAt(db, [{ repo: on.item.repo, number: on.item.number, head: live.recHead }]);
       if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));
       await work?.write(live.id);
       return live.id;

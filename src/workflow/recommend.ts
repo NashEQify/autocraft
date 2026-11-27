@@ -5,8 +5,8 @@
 // always agree. A blocker the review cannot speak for (author commits, a failing step, a large fix, files beyond the plan, a merge
 // leg that stopped) gets a sentence built here from its facts.
 import { t } from "../i18n/index.ts";
-import { byHand, type ConflictPath } from "../core/decide.ts";
-import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, UNSURE_REASON } from "../core/rules.ts";
+import { byHand, type ConflictPath, type HeldPush } from "../core/decide.ts";
+import { PREMERGE_DEFECT_REASON, PREMERGE_FAILED_REASON, PREMERGE_UNSURE_REASON, PUSHES_PER_APPROVAL, UNSURE_REASON } from "../core/rules.ts";
 import { asSentence, clipText } from "../prose.ts";
 import type { ReviewFix, ReviewRecommendation } from "../review/opus-parse.ts";
 import type { Found } from "./blockers.ts";
@@ -16,14 +16,19 @@ import { droppedTitles, partTitle } from "./work.ts";
 
 /**
  * The plan of a review's fixes, numbered from 1 in the review's order. A part a person dropped from the plan before (same title)
- * stays dropped; a part with no fix (the review asks for nothing) is no part.
+ * stays dropped; a part with no fix (the review asks for nothing) is no part. A pre-merge review's finding a person dropped (overruled)
+ * stays in the plan after the review's parts, so it stops no merge of the workflow's.
  */
 export function planOf(fixes: readonly ReviewFix[], before: readonly PlanPart[]): PlanPart[] {
   const dropped = new Set(droppedTitles(before));
-  return fixes.map((f, i) => {
+  const parts: PlanPart[] = fixes.map((f, i) => {
     const title = partTitle(f);
-    return { n: i + 1, title, source: "review" as const, file: f.file, ...(f.major ? { major: true } : {}), state: dropped.has(title.toLowerCase()) ? "dropped" as const : "planned" as const };
+    const was = before.find((p) => p.state === "dropped" && p.title.toLowerCase() === title.toLowerCase());
+    return { n: i + 1, title, source: "review" as const, file: f.file, ...(f.major ? { major: true } : {}), ...(was?.droppedBy ? { droppedBy: was.droppedBy } : {}), state: dropped.has(title.toLowerCase()) ? "dropped" as const : "planned" as const };
   });
+  const titles = new Set(parts.map((p) => p.title.toLowerCase()));
+  const overruled = before.filter((p) => p.premerge && p.state === "dropped" && !titles.has(p.title.toLowerCase()));
+  return [...parts, ...overruled.map((p, i) => ({ ...p, n: parts.length + i + 1 }))];
 }
 
 /** `finding`: what the review found, in the words it wrote for the PR (its public summary, which is posted anyway); null when it wrote none. */
@@ -149,11 +154,22 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
   const p = found.params;
   const premerge = (p.premerge as number[] | undefined) ?? null;
   if (premerge) {
-    if (premerge.length) return { text: t("Fix the pre-merge review's findings {parts}, then merge.", { parts: listText(premerge) }), parts: { fix: premerge, drop }, merges: true };
+    if (premerge.length) {
+      // A finding that blocks the merge is overruled by dropping it: the merge then goes on with green CI and no new pre-merge review.
+      const blocking = premerge.filter((n) => plan.find((x) => x.n === n)?.major);
+      const fix = t("Fix the pre-merge review's findings {parts}, then merge.", { parts: listText(premerge) });
+      const overrule = blocking.length ? ` ${t("To overrule them instead, write drop {parts}: the merge then goes on once CI is green.", { parts: listText(blocking) })}` : "";
+      return { text: `${fix}${overrule}`, parts: { fix: premerge, drop }, merges: true };
+    }
     return go(t("Review it again, then merge."), { again: "review" });
   }
   switch (found.blocker) {
     case "author-commits": {
+      // The day's review rounds of the author's commits are used up (advance.ts): a yes reviews the new ones too.
+      if (p.round === "daily-cap") {
+        const said = t("The author pushed new commits again, and AutoCraft already reviewed {n} rounds of the author's commits on this pull request today.", { n: Number(p.rounds ?? 0) });
+        return go(`${said} ${t("Review the new commits, then merge.")}`, { newCommits: true, ...(mergeEntry ? { again: "review" } : {}) });
+      }
       // The review round found the author's new commits beyond what was approved (advance.ts): its public finding, and a yes keeps them.
       if (p.round === "out-of-scope") {
         const finding = typeof p.finding === "string" && p.finding.trim() ? asSentence(clipText(p.finding, FINDING_CHARS)) : null;
@@ -185,12 +201,30 @@ export function atBlocker(found: Found, review: ReviewView | null, plan: readonl
       return go(t("Merge it as it is."));
     }
     case "other": {
+      if (p.limit === "pushes" || p.limit === "conflict-days") return go(limitText(p));
       // The review of the author's new commits failed for good: a yes asks for it again.
       if (p.round === "review-failed") return go(t("Review the author's new commits again, then merge."), { newCommits: true, again: "review" });
       return afterStop(String(p.reason ?? ""), go);
     }
   }
 }
+
+/** What our steps did on the approved PR, as `blockers.ts` limits stop it (`params.limit`), and what a yes lets them do. */
+function limitText(p: Record<string, unknown>): string {
+  if (p.limit === "conflict-days") {
+    // The conflict sentence (onConflict) says that today's merges are used up.
+    return t("Since the approval, AutoCraft merged the base branch into it as often as a day allows on {days} days. Yes lets it go on merging the base branch into it each day.", { days: Number(p.days ?? 0) });
+  }
+  const step = PUSH_STEP[p.step as HeldPush]?.() ?? t("the next fix");
+  return t("AutoCraft pushed {count} changes to this pull request since it was approved, and stops before the next one, {step}. Yes lets it go on: {step} runs, and AutoCraft may push up to {limit} more changes before it asks again.", { count: Number(p.count ?? 0), step, limit: PUSHES_PER_APPROVAL });
+}
+
+const PUSH_STEP: Record<HeldPush, () => string> = {
+  fixup: () => t("the fix-up of the review's fixes"),
+  premerge: () => t("the fix-up of the pre-merge review's findings"),
+  cifix: () => t("the CI fix"),
+  conflict: () => t("the merge of its base branch"),
+};
 
 /** What a CI fix that failed twice says: the failing checks (`params.failing`) and its last try (`params.last`), where the blocker names them. */
 function ciFixFailed(p: Record<string, unknown>): string {

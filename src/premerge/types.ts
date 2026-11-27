@@ -35,10 +35,11 @@ export const defectFix = (d: PremergeFinding): { file: string; change: string } 
 
 /**
  * The defects that stop the merge. On a PR a maintainer approved for merge (`approved`) only the blocking ones do: the approval and green CI
- * merge it past the rest, which are filed as follow-ups. Elsewhere every defect stops it.
+ * merge it past the rest, which are filed as follow-ups. Elsewhere every defect stops it. A defect a person dropped from the workflow's plan
+ * (`dropped`: lower-case titles) stops nothing: they overruled it.
  */
-export const stoppingDefects = (fs: readonly PremergeFinding[], approved: boolean): PremergeFinding[] =>
-  fs.filter((f) => f.severity === "defect" && (!approved || f.blocking?.class !== null));
+export const stoppingDefects = (fs: readonly PremergeFinding[], approved: boolean, dropped: readonly string[] = []): PremergeFinding[] =>
+  fs.filter((f) => f.severity === "defect" && (!approved || f.blocking?.class !== null) && !dropped.includes(f.title.toLowerCase()));
 
 /** The defects of a PR approved for merge that do not stop it: they are filed as follow-ups. */
 export const followUpDefects = (fs: readonly PremergeFinding[]): PremergeFinding[] => fs.filter((f) => f.severity === "defect" && f.blocking?.class === null);

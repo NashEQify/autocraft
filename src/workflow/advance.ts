@@ -22,9 +22,9 @@ import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
-import { CIFIX_NO_LOG_REASON } from "../core/rules.ts";
+import { AUTHOR_ROUNDS_PER_DAY, CIFIX_NO_LOG_REASON } from "../core/rules.ts";
 import type { StopCode } from "../core/codes.ts";
-import { conflictPath, decidePr, premergeStopLifts } from "../core/decide.ts";
+import { conflictDaysUsed, conflictPath, decidePr, premergeStopLifts, pushHeld } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { loadItemFacts } from "../core/issue-facts.ts";
 import { acceptedHeads, agreedAt, approvedHead, chainsOwn, isAccepted, neededReview, pushesSince, type RecordedPush } from "../core/evidence.ts";
@@ -33,13 +33,13 @@ import type { PlanReply } from "../implement/types.ts";
 import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
 import { fixPath, redCiPath } from "../preapproval/paths.ts";
 import { t } from "../i18n/index.ts";
-import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED } from "../core/author-round.ts";
+import { ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundsToday } from "../core/author-round.ts";
 import { holdGoesOn, partsToMake } from "../core/review-blocking.ts";
 import { causeWent, fixable, itemQuestion, legStop, questionFor, type Question } from "./ask.ts";
 import { asksNobody } from "./asked.ts";
 import { headKey, premergeOf, recheckRuleRow, startAutoStops } from "./auto-stop.ts";
 import { blockWorkflow } from "./block.ts";
-import { checkedOtherHead, codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found } from "./blockers.ts";
+import { checkedOtherHead, codeOf, detectBlocker, premergeStop, type BlockerFacts, type EndedLeg, type Found, type Limit } from "./blockers.ts";
 import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
@@ -149,6 +149,20 @@ function pushedWork(pass: Pass, w: ItemWorkflow, ref: string, head: string, sinc
   const fixed = latest ? reviewAt(pass, ref, latest.fromHead) : null;
   const plannedFiles = fixed ? planOf(fixed.fixes, w.plan).filter((p) => p.state !== "dropped" && p.file).map((p) => p.file!) : [];
   return { fix: { lines, files: latest?.files.filter((f) => !LOCKFILE.test(f)) ?? [] }, plannedFiles };
+}
+
+/**
+ * The person's last answer was given at `head`, and no push of ours made that head since: a conflict there that a person has to resolve was theirs
+ * to see when they went on with the merge approved, so its wait asks them nothing again.
+ */
+const answeredAt = (w: ItemWorkflow, moves: ReadonlyMap<string, readonly RecordedPush[]>, ref: string, head: string, said: string): boolean =>
+  said > w.startedAt && w.baseHead === head && !(moves.get(ref) ?? []).some((p) => p.to === head && p.at > said);
+
+/** The merge approval's limit that holds the PR's next step back, from its facts at the head (blockers.ts Limit). */
+function approvalLimit(f: PrFacts): Limit | null {
+  const step = pushHeld(f);
+  if (step) return { kind: "pushes", count: f.ownPushes ?? 0, step };
+  return conflictDaysUsed(f) ? { kind: "conflict-days", days: f.conflict?.cappedDays ?? 0 } : null;
 }
 
 /** How a hold ends a merge leg: its person cancels it, or the pre-approval pass does, with its workflow. */
@@ -574,6 +588,12 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
   if (w.kind === "pr" && authorPush && approved) {
     // A review hold written without a model call (too large to review) judged nothing: the approver decides.
     const unread = stored !== null && stored.model === null;
+    // The day's rounds are used up: the approver says whether the author's new commits are reviewed too.
+    const rounds = roundsToday(pass.reviews.get(ref) ?? [], pass.moves.get(ref) ?? [], { head, since, startedAt: w.startedAt, now: Date.parse(pass.at) });
+    if (rounds >= AUTHOR_ROUNDS_PER_DAY && !(stored?.mode === "carried")) {
+      const round: Found = { blocker: "author-commits", params: { from: authorPush.from, to: head, round: "daily-cap", rounds } };
+      return await block({ ...patch, blocker: round.blocker, blockerParams: round.params, rec: ask(blockerRec(round, plan), head), recAt: pass.at, recHead: head }, patch);
+    }
     if (stored && !unread && (stored.mode === "carried" || stored.workflow?.author_commits?.in_scope !== false)) {
       Object.assign(patch, { baseHead: head, acceptedHead: head });
       authorPush = null;
@@ -603,6 +623,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       majors: leg === "fixup" ? [] : partsToMake(plan, fresh.fixes, approved).filter((p) => p.major).map((p) => p.n), outsideLines: fresh.workflow?.outside_purpose?.lines ?? 0,
     } : null,
     failures: failures(pass, ref, since, head, f),
+    limit: approved && f?.head === head ? approvalLimit(f) : null,
     fix: fixed.fix,
     plannedFiles: fixed.plannedFiles,
     ...(beyond?.length ? { implementationBeyond: beyond } : {}),
@@ -638,7 +659,7 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
       }
       return await comeWith({ ...question, rec }, patch, head);
     }
-  } else if (question && impl !== "later") return await comeWith(question, patch, head);
+  } else if (question && impl !== "later" && !(question.params.code === "conflict-person" && answeredAt(w, pass.moves, ref, head, said))) return await comeWith(question, patch, head);
   else if (impl !== "later") {
     const refused = await ensureLeg(db, pass, writes, w, w.repo, target, head, agreed);
     if (refused) {

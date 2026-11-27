@@ -76,10 +76,10 @@ test("a person wait of a started PR has a question that a yes runs, unless its p
     const busy = p.actions.some((a) => worksOn(a) && (refused(a)?.who !== "person" || refused(a)?.code === "blocked"));
     const gone = f.standing?.merge?.standing === "no" || f.standing?.work?.standing === "no" || !!f.mergeLacksAccess;
     const own = p.waitCode === "implement-stuck" || p.waitCode === "implement-question" || (approved && p.state === "opus-hold");
-    if (!gone && !busy && !own && p.waitCode && needsQuestion(p.waitCode, p.waitKind!)) assert.ok(q, at);
+    if (!gone && !busy && !own && p.waitCode && needsQuestion(p.waitCode, p.waitKind!, approved)) assert.ok(q, at);
     if (!q) continue;
     asked++;
-    if (!gone && p.state !== "opus-close" && p.state !== "opus-hold") assert.ok(p.waitCode && needsQuestion(p.waitCode, p.waitKind!) && !busy, at);
+    if (!gone && p.state !== "opus-close" && p.state !== "opus-hold") assert.ok(p.waitCode && needsQuestion(p.waitCode, p.waitKind!, approved) && !busy, at);
     assert.ok(yesClause(q.rec), at);
     assert.equal(approved && !q.rec.merges, false, at);
     const row = { entry: w.entry, state: approved ? "blocked" : "recommending", approvedBy: w.approvedBy, plan: [], rec: q.rec, blocker: q.blocker } as unknown as ItemWorkflow;

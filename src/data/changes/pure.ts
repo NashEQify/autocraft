@@ -22,9 +22,9 @@ const byId = <T extends { id: number }>(rows: readonly T[]): T[] => [...rows].so
 const unsentOf = (ats: string[], now: number): { unsent?: UnsentAsk } => { const u = unsentAsk(ats, now); return u === null ? {} : { unsent: u }; };
 const taskEnded = (tasks: TaskStates, id: number | null): boolean => { const t = id === null ? undefined : tasks.get(id); return !t || TASK_ENDED.includes(t.state); };
 
-/** Review fix-up tries (source null, try states, minus hunk-header refusals; the reason match ignores ASCII case). */
-export function attemptsIn(rows: readonly FixupRow[]): number {
-  return rows.filter((r) => r.source === null && FIXUP_TRY_STATES.includes(r.state)
+/** Review fix-up tries (source null, try states, minus hunk-header refusals; the reason match ignores ASCII case), made after `since` when given. */
+export function attemptsIn(rows: readonly FixupRow[], since?: string): number {
+  return rows.filter((r) => r.source === null && FIXUP_TRY_STATES.includes(r.state) && (since === undefined || r.createdAt > since)
     && !(r.state === "refused" && FORMAT_REASONS.some((f) => (r.reason ?? "").toLowerCase().startsWith(f)))).length;
 }
 /** `source = 'operator'` rows in try states. */
@@ -62,6 +62,12 @@ export function triesIn(rows: readonly ConflictRow[], head: string): number {
 export function mergesToday(rows: readonly ConflictRow[], now: number): number {
   const day = new Date(now).toISOString().slice(0, 10);
   return rows.filter((r) => (r.state === "merged" || r.state === "pushing") && r.createdAt >= day).length;
+}
+/** UTC days after `since` on which the conflict merges pushed (or pushing) reached the daily cap. */
+export function cappedDaysIn(rows: readonly ConflictRow[], since: string): number {
+  const per = new Map<string, number>();
+  for (const r of rows) if ((r.state === "merged" || r.state === "pushing") && r.createdAt > since) per.set(r.createdAt.slice(0, 10), (per.get(r.createdAt.slice(0, 10)) ?? 0) + 1);
+  return [...per.values()].filter((n) => n >= CONFLICT_MAX_MERGES_PER_PR_PER_DAY).length;
 }
 const unsentConflictAsk = (rows: readonly ConflictRow[], head: string, now: number) =>
   unsentAsk(rows.filter((r) => r.fromHead === head && r.state === "comment-unsent").map((r) => r.createdAt), now);

@@ -41,6 +41,10 @@ export type PlanPart = {
   /** The question whose option the part is. */
   question?: QuestionRef;
   major?: boolean;
+  /** A finding of the pre-merge review: a person who drops it overrules it, and it stays dropped in the plan while it is the workflow's. */
+  premerge?: true;
+  /** Who dropped it from the plan. */
+  droppedBy?: string;
   state: "planned" | "dropped" | "fixed";
 };
 
@@ -72,6 +76,8 @@ export type Recommendation = {
   question?: QuestionRef;
   /** What the review found, in the words the question shows (its public summary), where it lists no fix: a bare fix makes the fix-up fix it. */
   finding?: string;
+  /** The pre-merge review failed for good at the head: a yes gives it one more try there, the word merge goes on without it. */
+  retriesPremerge?: true;
 };
 
 /** A question an implementation attempt asked: the attempt and the round that asked it (answers are recorded on that attempt). */

@@ -4,6 +4,7 @@
 // Every detector looks only at what happened after `since`, up to when the person who last started or answered the item has seen it (an
 // answer: when its question was asked): what they had seen then, they chose to go on with, so a yes after a blocker resumes instead of stopping again on the same evidence.
 import { stopCodeOf, type StopCode } from "../core/codes.ts";
+import type { HeldPush } from "../core/decide.ts";
 import type { Blocker, Entry } from "./types.ts";
 
 export type BlockerFacts = {
@@ -23,10 +24,15 @@ export type BlockerFacts = {
   implementationBeyond?: readonly string[];
   /** The merge leg (the pre-approved merge) stopped or was cancelled since `since`, with its reason, and its code where the row has one. */
   leg: EndedLeg | null;
+  /** A limit of the merge approval that holds our next step back: the pushes of ours since `since` (and the push held), or the days of capped conflict merges. */
+  limit?: Limit | null;
   thresholds: { largeFix: number; outsideMin: number };
 };
 
 export type EndedLeg = { reason: string; code?: StopCode | null; head?: string | null };
+
+/** `pushes`: PUSHES_PER_APPROVAL pushes of ours were made, and `step` would push next. `conflict-days`: the conflict merges reached their daily cap on `days` days. */
+export type Limit = { kind: "pushes"; count: number; step: HeldPush } | { kind: "conflict-days"; days: number };
 
 /** Why the leg ended, its text's where the row has no code. */
 export const codeOf = (leg: EndedLeg): StopCode => leg.code ?? stopCodeOf(leg.reason);
@@ -78,6 +84,10 @@ export function detectBlocker(f: BlockerFacts): Found | null {
     if (beyond.length) return { blocker: "beyond-agreed", params: { files: beyond.slice(0, 10) } };
   }
   if (f.implementationBeyond?.length) return { blocker: "beyond-agreed", params: { files: f.implementationBeyond.slice(0, 10) } };
+  // Our steps stop at the merge approval's limits before they push or merge the base branch again: the approver says whether they go on.
+  const l = f.limit;
+  if (l?.kind === "pushes") return { blocker: "other", params: { limit: l.kind, count: l.count, step: l.step, reason: `AutoCraft pushed ${l.count} changes since the approval, and the next one waits for an answer` } };
+  if (l?.kind === "conflict-days") return { blocker: "other", params: { limit: l.kind, days: l.days, reason: `the conflict merges reached their daily cap on ${l.days} days` } };
   const r = f.review;
   if (r && r.outsideLines >= f.thresholds.outsideMin) return { blocker: "outside-purpose", params: { lines: r.outsideLines, limit: f.thresholds.outsideMin } };
   // An unsure review is no blocker: the approval says the change is wanted, so its fixes run and the merge still waits for the

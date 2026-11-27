@@ -2,7 +2,7 @@
 // core/pass-load.ts. Each concept has one definition here.
 import { listQuietPrs } from "../data/security/index.ts";
 import { HOLD_MAX, loadOwnLogins, permKey, standing, type ActFacts, type ActIdentity, type PermKey, type Standing } from "../data/access/index.ts";
-import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, premergeStalledIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
+import { loadMainFixPrs, attemptsIn, cappedDaysIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, premergeStalledIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
 import { loadUnsureHeads } from "../data/review/index.ts";
 import { prPass } from "../data/planner/index.ts";
@@ -29,7 +29,7 @@ import { workScore } from "./work-score.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
 import { landedOpen } from "./decide.ts";
-import { ciAt, landedWhy, neededReview, type CiState } from "./evidence.ts";
+import { ciAt, diffPushesSince, landedWhy, neededReview, type CiState } from "./evidence.ts";
 import { standingFor } from "./standing.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import type { WorkflowFact } from "../data/workflow/types.ts";
@@ -323,6 +323,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads,
     ...queuerIn(d.workflow.actors.get(d.workflow.ofPr.get(ref)?.id ?? -1), repo, acts) } : null;
   base.workflow = wfFact;
+  // The merge approval's own count of our pushes and tries starts when its person approved it or last went on with it.
+  const owned = wfFact && (wfFact.approved || wfFact.entry === "merge") ? (wfRow?.approvedAt && wfRow.approvedAt > wfFact.since ? wfRow.approvedAt : wfFact.since) : null;
+  if (owned !== null && head) base.ownPushes = diffPushesSince(ours, head, owned);
   base.standing = standingIn(wfFact, d.workflow.actors, repo, acts);
   base.endedWorkflow = d.workflow.ended.get(ref) ?? null;
   if (integration) {
@@ -485,11 +488,11 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.followUps = { heads: pmFiled.map((x) => x.head_oid), reviewHeads: rvFiled.map((x) => x.head_oid), issue };
   }
   if (pmRow) {
-    const all = findingsOf(pmRow), approved = !!wfFact?.approved;
-    const defects = stoppingDefects(all, approved), followUps = approved ? followUpDefects(all).length : 0;
+    const all = findingsOf(pmRow), approved = !!wfFact?.approved, dropped = wfFact?.dropped ?? [];
+    const defects = stoppingDefects(all, approved, dropped), followUps = approved ? followUpDefects(all).length : 0;
     base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
     if (defects.length) {
-      const defectsAt = (h: string) => { const r = d.review.premerge.get(`${ref}@${h}`); return r?.findings ? stoppingDefects(findingsOf(r), approved) : null; };
+      const defectsAt = (h: string) => { const r = d.review.premerge.get(`${ref}@${h}`); return r?.findings ? stoppingDefects(findingsOf(r), approved, dropped) : null; };
       base.premergeFixUsed = premergeFixUsedIn(patch.fixups, premergeStalledIn(patch.fixups, qh, defectsAt));
       if (premergeFixRunningIn(patch.fixups, qh, pushedOff)) base.premergeFixRunning = true;
     }
@@ -497,9 +500,10 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   if (base.mergeable === "CONFLICTING" && i.base_ref) {
     const bucket = conflictBucketOf(patch.conflicts, { head: qh, pushable: base.pushable, gone: qh === head && !pushedOff }, { push: pushAllowed(base, "conflict"), comment: rf.commentApproved && !base.quiet }, now);
     const until = bucket === "capped" ? nextUtcMidnight(now) : bucket === "ask-retry" ? conflictAskRetryAtOf(patch.conflicts, qh, now) : undefined;
-    base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}) };
+    const cappedDays = bucket === "capped" && owned !== null ? cappedDaysIn(patch.conflicts, owned) : 0;
+    base.conflict = { bucket, base: i.base_ref, baseOk: BASE_NAME.test(i.base_ref), ...(until !== undefined ? { until } : {}), ...(cappedDays ? { cappedDays } : {}) };
   }
-  if (!mx && verdict === "take-fix") base.fixup = { fixes: parseFixes(JSON.stringify(fixes)).length, attempts: attemptsIn(patch.fixups), ...fixupAtHead(patch.fixups, qh, now) };
+  if (!mx && verdict === "take-fix") base.fixup = { fixes: parseFixes(JSON.stringify(fixes)).length, attempts: attemptsIn(patch.fixups, owned ?? undefined), ...fixupAtHead(patch.fixups, qh, now) };
   for (const l of lintAt(qh, base.brokeByUs || base.gateRed ? head ?? qh : qh)) if (l.source === "review" || l.source === "premerge") base.lint.push({ ...l, source: l.source });
   if (base.lint.length) base.inFlight = true;
   if (base.ci === "failure" || base.brokeByUs || base.gateRed) {

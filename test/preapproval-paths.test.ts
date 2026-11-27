@@ -1,8 +1,10 @@
-// Who makes the next fix of an approved PR (src/preapproval/paths.ts): the merge leg waits for our own steps and for a contributor who was or
-// is asked, and stops for a person otherwise. Red CI the CI fix gives up on stops for the approver.
+// Who makes the next fix of an approved PR (src/preapproval/paths.ts): the merge leg waits for our own steps and for a contributor who has a
+// patch to apply, and stops for a person otherwise. Review fixes and red CI our steps give up on stop for the approver.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decidePr } from "../src/core/decide.ts";
+import { decidePr, pushHeld } from "../src/core/decide.ts";
+import { detectBlocker } from "../src/workflow/blockers.ts";
+import { atBlocker } from "../src/workflow/recommend.ts";
 import { fixPath, redCiPath, type FixPath } from "../src/preapproval/paths.ts";
 import { CIFIX_ASK_REASON, CIFIX_NO_LOG_REASON } from "../src/core/rules.ts";
 import { cifixAt } from "../src/data/changes/pure.ts";
@@ -45,10 +47,12 @@ const FIX: [string, Over, FixPath][] = [
   ["pushed", takefix({ recorded: ["pushed"] }), "fix"],
   ["stored for its lint run", takefix({ recorded: ["linting"] }), "fix"],
   ["the push was refused", takefix({ recorded: ["push-denied"] }), null],
-  ["the branch takes no push: the contributor is asked next", takefix({}, CLOSED), "contributor"],
-  ["the contributor was asked", takefix({ recorded: ["asked"] }, CLOSED), "contributor"],
-  ["too large: the contributor is asked next", takefix({ recorded: ["too-large"] }), "contributor"],
-  ["the ask did not reach GitHub and is posted again", takefix(LATER, CLOSED), "contributor"],
+  // A person approved the merge: fixes our fix-up cannot make are theirs, never the contributor's.
+  ["the branch takes no push: the approver is asked", takefix({}, CLOSED), null],
+  ["the contributor was asked before the approval: the approver is asked", takefix({ recorded: ["asked"] }, CLOSED), null],
+  ["too large: the approver is asked", takefix({ recorded: ["too-large"] }), null],
+  ["the tries since the approval are used: the approver is asked", takefix({ attempts: 2 }), null],
+  ["an ask that did not reach GitHub is not posted again: the approver is asked", takefix(LATER, CLOSED), null],
   ["the ask never reached GitHub", takefix(FINAL, CLOSED), null],
   ["the ask failed", takefix({ recorded: ["comment-failed"] }, CLOSED), null],
   ["nobody can be asked: no comment approval", takefix({}, { ...CLOSED, ...NO_COMMENT }), null],
@@ -78,4 +82,19 @@ test("an approved PR whose CI fix found no log yet and asked the contributor is 
   assert.equal(decidePr(f).actions.find((a) => a.kind === "cifix")?.params?.bucket, "work");
   // Nobody approved the merge: the ask stands, and the PR waits for its contributor.
   assert.notEqual(decidePr(prFacts({ ci: "failure", cifix, workflow: { entry: "fixup", approved: false, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true } })).actions.find((a) => a.kind === "cifix")?.params?.bucket, "work");
+});
+
+test("after three pushes of ours since the approval, the next one waits for the approver, who is asked what a yes lets AutoCraft do", () => {
+  const cases: [Over, string][] = [[takefix(), "fixup"], [red(), "cifix"]];
+  for (const [over, step] of cases) {
+    const pushes = (n: number) => prFacts({ ...over, ownPushes: n });
+    const pushing = (n: number) => decidePr(pushes(n)).actions.some((a) => (a.kind === "fixup" && a.params?.bucket === "fix") || (a.kind === "cifix" && a.params?.bucket === "work"));
+    assert.ok(pushing(2), step);
+    assert.ok(!pushing(3), step);
+    assert.equal(pushHeld(pushes(3)), step);
+    const found = detectBlocker({ entry: "review", approved: true, authorPush: null, review: null, failures: [], fix: null, plannedFiles: [], leg: null, thresholds: { largeFix: 400, outsideMin: 50 }, limit: { kind: "pushes", count: 3, step: pushHeld(pushes(3))! } });
+    const rec = atBlocker(found!, null, []);
+    assert.ok(rec.merges && !rec.parts.fix.length, step);
+    assert.match(rec.text, /pushed 3 changes.*Yes lets it go on/, step);
+  }
 });

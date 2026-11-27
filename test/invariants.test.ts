@@ -223,7 +223,7 @@ const EXCEPTIONS: Exception[] = [
   },
   {
     id: "request-window", rules: ["dead-end", "false-wait"], why: "A fix-up request that cannot run (any more) holds the fix-ups of the reviews back until the next leg pass ends the request (endStaleRequests).",
-    covers: ({ f, p }) => !!f.operator?.fix && !p.actions.some((a) => a.params?.source === "operator"), example: greenRows({ request: { from: "c0", by: "noor", id: 41 }, pushable: false, legs: [], review: reviewed("take-fix") }),
+    covers: ({ f, p }) => !!f.operator?.fix && !p.actions.some((a) => a.params?.source === "operator"), example: greenRows({ request: { from: "c0", by: "noor", id: 41 }, pushable: false, legs: [], review: reviewed("take-fix"), workflow: startedAs("fixup", { approvedBy: null }) }),
   },
   {
     id: "opus-close", rules: ["dead-end"], why: "A review that says close plans no wait: the workflow asks for a started PR, and an unstarted one waits for someone to pick it up.",
