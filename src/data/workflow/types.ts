@@ -54,8 +54,9 @@ export type StoredEvent = WorkflowEvent & { id: number; at: string };
 export type SaidEvent = StoredEvent & { kind: WorkflowEventKind };
 export type QueuePosition = { position: number; of: number; weight: number; startedBy: string };
 export type StartedWork = {
-  live: { repo: string; number: number; entry: Entry; state: WorkflowState; startedBy: string; approvedBy: string | null }[];
-  prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[];
+  /** `takenBy`: the lowercase logins whose Task Runners were taken onto the workflow (item-runners.ts). */
+  live: { repo: string; number: number; entry: Entry; state: WorkflowState; startedBy: string; approvedBy: string | null; takenBy?: string[] }[];
+  prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null; takenBy?: string[] }[];
   /** Merged PRs whose workflow ended done through the merge lately (fragments.ts endedByMerge): their post-merge review is that workflow's work. */
   merged: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[];
 };

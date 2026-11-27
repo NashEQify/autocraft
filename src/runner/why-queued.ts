@@ -18,13 +18,14 @@ import { loadView } from "../remote/view.ts";
 import { stageOfStep } from "../stages/registry.ts";
 import { t } from "../i18n/index.ts";
 import type { Db } from "../db/index.ts";
+import type { Tier } from "../remote/protocol.ts";
 import { AUTOPILOT_USER, KEY_ENABLED } from "./autopilot.ts";
 import { jobBlockOf, STEP_PARALLEL_KEY, untakenTest, wantOf, type Active, type JobBlock } from "./concurrency.ts";
 import { jobCalls } from "./runner.ts";
 import { knownStep, loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
 
 /** One queued job or model call about an item: `title` its stage (or step) as the item page names it, `since` when it was queued; `why` one short line, or null when no rule holds it back. */
-export type QueuedWork = { kind: "job" | "call"; id: number; step: string; title: string; since: string; why: string | null };
+export type QueuedWork = { kind: "job" | "call"; id: number; step: string; title: string; since: string; why: string | null; /** A call's tier. */ tier?: Tier };
 
 type Ref = { repo: string; number: number };
 const keyOf = (r: Ref): string => `${r.repo}#${r.number}`;
@@ -42,7 +43,7 @@ export async function queuedOfItems(db: Db, refs: readonly Ref[], o: { shown: bo
   const [live, v, snapshot, cfg] = await db.together(() => Promise.all([loadLiveJobs(db), loadView(db, nowMs), loadQueue(db, nowMs), freshConfig(db, [KEY_ENABLED, STEP_PARALLEL_KEY])]));
   const queue = queueViewIn(v, snapshot, o.shown, { about: new Set(out.keys()) });
   for (const c of queue.calls) {
-    for (const r of c.refs) out.get(keyOf(r))?.push({ kind: "call", id: c.id, step: c.step, title: workTitle(c.step), since: new Date(nowMs - c.waitedMs).toISOString(), why: c.why.text });
+    for (const r of c.refs) out.get(keyOf(r))?.push({ kind: "call", id: c.id, step: c.step, title: workTitle(c.step), since: new Date(nowMs - c.waitedMs).toISOString(), why: c.why.text, tier: c.tier });
   }
   const jobs = live.filter((j) => j.state === "queued" && j.repo !== null && j.number !== null && j.step !== "security-fix" && out.has(`${j.repo}#${j.number}`));
   if (jobs.length) {

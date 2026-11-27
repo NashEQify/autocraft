@@ -19,7 +19,7 @@ const INTERACTIVE_LIKE = "discord.%";
 
 /** The reads of other modules the snapshot embeds; tests may pass fixed answers in their place. */
 export type SnapshotDeps = {
-  started: (db: Db, now: number) => Promise<{ live: { repo: string; number: number; entry: string; startedBy: string; approvedBy: string | null; state: string }[]; prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[]; merged?: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[] }>;
+  started: (db: Db, now: number) => Promise<{ live: { repo: string; number: number; entry: string; startedBy: string; approvedBy: string | null; state: string; takenBy?: string[] }[]; prs: { repo: string; pr: number; startedBy: string; approvedBy: string | null; takenBy?: string[] }[]; merged?: { repo: string; pr: number; startedBy: string; approvedBy: string | null }[] }>;
   /** Non-write permission checks of every login with a live runner credential, by "login\nrepo", with when each was checked. */
   denials: (db: Db, logins: { runners: true }, now: number) => Promise<Map<string, { checkedAt: string }>>;
 };
@@ -27,8 +27,8 @@ const REAL: SnapshotDeps = { started: loadStartedWork, denials: loadPermissionDe
 
 /** The workflow module's started-work rows in the shape the pure builder reads. */
 const startedOf = (w: Awaited<ReturnType<SnapshotDeps["started"]>>): StartedWork => ({
-  live: w.live.map((r) => ({ repo: r.repo, number: r.number, entry: r.entry, state: r.state, started_by: r.startedBy, approved_by: r.approvedBy })),
-  prs: w.prs.map((r) => ({ repo: r.repo, prNumber: r.pr, started_by: r.startedBy, approved_by: r.approvedBy })),
+  live: w.live.map((r) => ({ repo: r.repo, number: r.number, entry: r.entry, state: r.state, started_by: r.startedBy, approved_by: r.approvedBy, ...(r.takenBy && { taken_by: r.takenBy }) })),
+  prs: w.prs.map((r) => ({ repo: r.repo, prNumber: r.pr, started_by: r.startedBy, approved_by: r.approvedBy, ...(r.takenBy && { taken_by: r.takenBy }) })),
   merged: (w.merged ?? []).map((r) => ({ repo: r.repo, prNumber: r.pr, started_by: r.startedBy, approved_by: r.approvedBy })),
 });
 

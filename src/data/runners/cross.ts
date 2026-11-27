@@ -1,4 +1,4 @@
-// reads: workflow.item_workflows (and through workflow.worksOnPr implement.implementations), mirror.items, access.mcp_tokens, access.access
+// reads: workflow.item_workflows, workflow.item_runners (and through workflow.worksOnPr implement.implementations), mirror.items, access.mcp_tokens, access.access
 // The conditions that must hold at the instant of the lease, under the login's lock, so they cannot be loaded beforehand.
 import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
@@ -16,19 +16,51 @@ import { unlease } from "./calls-unlease.ts";
 export const POSTMERGE_STEP = "postmerge";
 
 /**
+ * Some Task Runner of a login the workflow `alias` (an `item_workflows` row) names in `cols` is ready with room at `now`: a live runner
+ * credential of a maintainer or operator whose helper reported `ready` within STATUS_FRESH_MS and has a free slot (its slots, less the
+ * fast lane when it has two or more, less its leases outside the own lane), its login not cooling off and under its Max calls at once.
+ * The Task Runner snapshot's side is readyWithRoom in src/remote/started.ts.
+ */
+export function readyWithRoomExpr(db: Db, eb: Eb, alias: string, cols: readonly string[], now: number): Expression<SqlBool> {
+  const w = schemaEb(eb) as any;
+  const one = w.lit(1).as("one");
+  const login = ref<string>("rh.login");
+  const slots = w.fn.coalesce("rh.slots", w.lit(1));
+  const free = w(slots, "-", w.case().when(slots, ">=", 2).then(1).else(0).end());
+  const leased = schemaEb(w).selectFrom("main.remote_calls as rl").select((e: any) => e.fn.countAll().as("n"))
+    .where("rl.state", "=", literal("leased")).where("rl.token_id", "=", ref<number>("rh.token_id")).where("rl.own_lane", "<>", 1);
+  const max = w.cast(w.case().when("rs.key", "=", MAX_CALLS_KEY).then(w.ref("rs.value")).end(), "bigint");
+  return w.exists(schemaEb(w).selectFrom("main.remote_helpers as rh").innerJoin("main.mcp_tokens as rt", "rt.id", "rh.token_id").innerJoin("main.access as ra", "ra.login", "rt.login").select(one)
+    .where("rt.kind", "=", "runner").where("rt.expires_at", ">", new Date(now).toISOString()).where("ra.role", "in", ["maintainer", "operator"])
+    .where((x: any) => x.or(cols.map((c) => ciEq(db, login, ref<string>(`${alias}.${c}`)))))
+    .where("rh.readiness", "=", "ready").where("rh.reported_at", ">=", now - STATUS_FRESH_MS)
+    .where((x: any) => x(free, ">", leased))
+    .where((x: any) => x.not(x.exists(schemaEb(x).selectFrom("main.remote_cooloffs as rc").select(one).where(ciEq(db, "rc.login", login)).where("rc.until", ">", now))))
+    .where((x: any) => x.not(x.exists(schemaEb(x).selectFrom("main.user_settings as rs").select(one).where(ciEq(db, "rs.login", login)).where("rs.key", "=", MAX_CALLS_KEY)
+      .where(x.between(max, 1, MAX_CALLS_MAX)).where(x(leasedCountExpr(db, x, login), ">=", max))))));
+}
+
+/**
  * The started-work condition inside the lease update: every item of the call (`remote_call_items`) has a live workflow started or
- * approved by `login`, or is the PR that one works on. With `stepRef` (the call's `step` column), a call of the post-merge review's
- * item may instead be a merged PR whose workflow, started or approved by `login`, ended done through that merge since `now` less
- * MERGED_WORK_MS (src/data/workflow/fragments.ts endedByMerge, which the Task Runner snapshot reads too).
+ * approved by `login`, or is the PR that one works on. A live workflow whose work `login` took onto their Task Runner (`item_runners`,
+ * not released) counts too while no Task Runner of its starter or approver is ready with room (readyWithRoomExpr). With `stepRef` (the
+ * call's `step` column), a call of the post-merge review's item may instead be a merged PR whose workflow, started or approved by
+ * `login`, ended done through that merge since `now` less MERGED_WORK_MS (src/data/workflow/fragments.ts endedByMerge, which the Task
+ * Runner snapshot reads too).
  */
 export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: string, o: { stepRef?: string; now?: number } = {}): Expression<SqlBool> {
   const w = schemaEb(eb) as any;
   const one = w.lit(1).as("one");
+  const now = o.now ?? Date.now();
   const by = (x: any, alias: string) => x.or([ciEq(db, `${alias}.started_by`, x.val(login)), ciEq(db, `${alias}.approved_by`, x.val(login))]);
-  const since = new Date((o.now ?? Date.now()) - MERGED_WORK_MS).toISOString();
+  const took = (x: any, alias: string) => x.and([
+    x.exists(schemaEb(x).selectFrom("main.item_runners as tr").select(one).where("tr.workflow_id", "=", ref<number>(`${alias}.id`)).where("tr.login", "=", login.toLowerCase()).where("tr.released_at", "is", null)),
+    x.not(readyWithRoomExpr(db, x, alias, ["started_by", "approved_by"], now)),
+  ]);
+  const since = new Date(now - MERGED_WORK_MS).toISOString();
   const owns = (e: any, item: string) => {
     const live = e.exists(schemaEb(e).selectFrom("main.item_workflows as ow").select(one)
-      .where("ow.state", "in", LIVE_STATES).where("ow.repo", "=", ref<string>(`${item}.repo`)).where((x: any) => by(x, "ow"))
+      .where("ow.state", "in", LIVE_STATES).where("ow.repo", "=", ref<string>(`${item}.repo`)).where((x: any) => x.or([by(x, "ow"), took(x, "ow")]))
       .where((x: any) => x.or([x("ow.number", "=", ref<number>(`${item}.number`)), worksOnPr(x, "ow", `${item}.number`)])));
     if (o.stepRef === undefined) return live;
     const merged = MERGE_WAYS.map((via) => e.exists(schemaEb(e).selectFrom("main.item_workflows as mw").select(one)

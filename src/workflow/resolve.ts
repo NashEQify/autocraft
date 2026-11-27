@@ -46,6 +46,8 @@ export type Run = {
   close?: CloseReason;
   /** The autorepin arguments, as written. */
   autorepin: string | null;
+  /** Takes the live workflow's work onto the sender's own Task Runner, or releases it (src/data/workflow/item-runners.ts). */
+  runner: "take" | "release" | null;
   /** It answers the open recommendation, which closes. */
   answers: boolean;
   /** Answers a question whose yes only lets the work go on: the steps end as before. */
@@ -79,6 +81,8 @@ export type Refusal =
   | { why: "not-issue-step"; word: "review" | "fix-up" }
   | { why: "issue-merge-queue" }
   | { why: "autorepin-not-pr" }
+  /** take or release on an item with no live work. */
+  | { why: "no-live-work"; word: "take" | "release" }
   | { why: "already-held"; by: string; at: string }
   | { why: "not-held" }
   | { why: "already-started"; entry: Entry; by: string; at: string }
@@ -102,7 +106,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, retryPremerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, instruction: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, retryPremerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, runner: null, answers: false, goesOn: false, pick: null, instruction: null, ...r },
 });
 
 /** The item stopped at defects of the pre-merge review: their plan parts (none where nobody asked for their fixes yet); null otherwise. */
@@ -162,10 +166,11 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const merge = has("merge");
   const end = (["backlog", "close", "hold"] as const).filter((w) => has(w));
   const repin = parts.find((p): p is Extract<CommandPart, { args?: string }> => p.word === "autorepin");
+  const runner = (["take", "release"] as const).find((w) => has(w)) ?? null;
   const named = parts.filter((p): p is Extract<CommandPart, { part: unknown }> => "part" in p);
 
   // Words that end the work or stand apart run alone; two entry points can't both start.
-  if (((end.length || repin) && parts.length > 1) || (has("resume") && parts.some((p) => p.word !== "resume" && p.word !== "weight")) || entries.length > 1) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
+  if (((end.length || repin || runner) && parts.length > 1) || (has("resume") && parts.some((p) => p.word !== "resume" && p.word !== "weight")) || entries.length > 1) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
 
   if (end.length) {
     const e = end[0]!;
@@ -178,6 +183,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     if (state.kind !== "pr") return refused({ why: "autorepin-not-pr" });
     return run({ autorepin: repin.args ?? "", how: "set" });
   }
+  if (runner) return live ? run({ runner, how: "set" }) : refused({ why: "no-live-work", word: runner });
 
   const entry = entries[0] ?? null;
   if (entry === "implement" && state.kind !== "issue") return refused({ why: "implement-not-issue" });

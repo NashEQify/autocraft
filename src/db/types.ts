@@ -1208,6 +1208,16 @@ export interface ItemReads {
   synced_at: string;
 }
 
+export interface ItemRunners {
+  id: Generated<number>;
+  repo: string;
+  number: number;
+  workflow_id: number;
+  login: string;
+  at: string;
+  released_at: string | null;
+}
+
 export interface ItemSettled {
   run: string;
   repo: string;
@@ -2820,6 +2830,7 @@ export interface DB {
   item_priority: ItemPriority;
   item_rank: ItemRank;
   item_reads: ItemReads;
+  item_runners: ItemRunners;
   item_settled: ItemSettled;
   item_settled_dirty: ItemSettledDirty;
   item_settled_runs: ItemSettledRuns;
@@ -3040,6 +3051,7 @@ export interface DB {
   "main.item_priority": ItemPriority;
   "main.item_rank": ItemRank;
   "main.item_reads": ItemReads;
+  "main.item_runners": ItemRunners;
   "main.item_settled": ItemSettled;
   "main.item_settled_dirty": ItemSettledDirty;
   "main.item_settled_runs": ItemSettledRuns;
@@ -3264,6 +3276,7 @@ export const COLUMNS = {
   item_priority: ["repo", "number", "text_hash", "impact", "jev_impact", "jev_p", "haiku_impact", "score", "model", "reason", "at"],
   item_rank: ["repo", "number", "score", "breakdown", "computed_at"],
   item_reads: ["repo", "number", "synced_at"],
+  item_runners: ["id", "repo", "number", "workflow_id", "login", "at", "released_at"],
   item_settled: ["run", "repo", "number", "status", "label", "source", "top", "jev_label", "haiku_label", "flags", "security", "needs_decision", "referee_label", "referee_sure", "referee_reason", "referee_final"],
   item_settled_dirty: ["run_id", "repo", "number", "n"],
   item_settled_runs: ["run", "refreshed_at"],

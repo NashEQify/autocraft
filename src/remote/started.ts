@@ -9,6 +9,9 @@
 // it rather than being reported as having no taker. Registered as a wait in src/stages/registry.ts. A call of the post-merge
 // review step on a merged PR is such work too: of the starter and approver of the workflow that ended done through that merge, for
 // MERGED_WORK_MS after its last write (src/data/workflow/fragments.ts endedByMerge, which the lease's condition reads too).
+// A person who took a live workflow's work onto their Task Runner (`take`, src/data/workflow/item-runners.ts) is one of its
+// people too, while no Task Runner of its starter or approver is ready with room (readyWithRoom; the lease's condition is
+// readyWithRoomExpr in src/data/runners/cross.ts): the starter's runner comes first, the taker's takes the work while it cannot.
 import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
 import type { Entry } from "../workflow/types.ts";
@@ -17,7 +20,7 @@ import { taskOfStep } from "./my-tasks.ts";
 import type { Tier } from "./protocol.ts";
 import { POSTMERGE_STEP } from "../data/runners/index.ts";
 import { scaled } from "./time-scale.ts";
-import { canWriteOf, freshReady, loadView, tiersOf, type RemoteView } from "./view.ts";
+import { canWriteOf, freshReady, loadView, settingsOf, tiersOf, type RemoteView } from "./view.ts";
 
 /** How long other users' runners pass a started call over for its owner, from its queueing. */
 export const STARTED_HOLD_MS = scaled(10 * 60_000);
@@ -34,7 +37,8 @@ const WORKING = new Set(["running", "waiting"]);
 
 export type StartedCalls = {
   /**
-   * The lowercase logins whose call one with these items is: those that started or approved work on every one of them. For a call of the
+   * The lowercase logins whose call one with these items is: those that started or approved work on every one of them, or took it onto
+   * their Task Runner while no runner of those is ready with room. For a call of the
    * post-merge review (`step` postmerge), a merged PR's workflow that ended done through that merge lately counts as such work.
    */
   owners: (refs: readonly ItemRef[], step?: string) => ReadonlySet<string>;
@@ -74,6 +78,20 @@ export function startedOf(v: RemoteView): StartedCalls {
   return s;
 }
 
+/**
+ * Whether some Task Runner of `login` is ready with room: a maintainer's or operator's fresh, ready runner not cooling off with a free
+ * slot (its slots, less the fast lane when it has two or more, less its leases outside the own lane), the login under its Max calls at
+ * once. The lease's side is readyWithRoomExpr in src/data/runners/cross.ts.
+ */
+export function readyWithRoom(v: RemoteView, login: string): boolean {
+  const { snapshot, now } = v;
+  const key = login.toLowerCase();
+  const max = settingsOf(snapshot, key).maxCalls;
+  if (max !== null && (snapshot.leasedByLogin.get(key)?.leased ?? 0) >= max) return false;
+  return snapshot.runners.some((r) => r.login.toLowerCase() === key && (r.role === "maintainer" || r.role === "operator") && freshReady(snapshot, r, now)
+    && (r.slots ?? 1) - ((r.slots ?? 1) >= 2 ? 1 : 0) > r.leased);
+}
+
 function buildStarted(v: RemoteView): StartedCalls {
   const { snapshot, accepted, now: nowMs } = v;
   const { live, prs, merged } = snapshot.started;
@@ -84,8 +102,13 @@ function buildStarted(v: RemoteView): StartedCalls {
     if (!s) to.set(key, (s = new Set()));
     for (const l of logins) if (l) s.add(l.toLowerCase());
   };
-  for (const w of live) add(byItem, w.repo, w.number, [w.started_by, w.approved_by]);
-  for (const p of prs) add(byItem, p.repo, p.prNumber, [p.started_by, p.approved_by]);
+  // A workflow's people: its starter and approver, and the logins that took its work while none of those has a runner ready with room.
+  const ready = new Map<string, boolean>();
+  const readyOf = (l: string): boolean => ready.get(l) ?? ready.set(l, readyWithRoom(v, l)).get(l)!;
+  const peopleOf = (w: { started_by: string; approved_by: string | null; taken_by?: string[] }): (string | null)[] =>
+    w.taken_by?.length && ![w.started_by, w.approved_by].some((l) => l && readyOf(l.toLowerCase())) ? [w.started_by, w.approved_by, ...w.taken_by] : [w.started_by, w.approved_by];
+  for (const w of live) add(byItem, w.repo, w.number, peopleOf(w));
+  for (const p of prs) add(byItem, p.repo, p.prNumber, peopleOf(p));
   for (const p of merged) add(byMerged, p.repo, p.prNumber, [p.started_by, p.approved_by]);
   const runnersOf = new Map<string, { role: string; tokens: Map<number, Set<Tier>> }>();
   for (const r of snapshot.runners) {
@@ -124,7 +147,7 @@ function buildStarted(v: RemoteView): StartedCalls {
     if (c.step === undefined || !c.repos.length) return NONE;
     const task = taskOfStep(c.step);
     const working = live.filter((w) => WORKING.has(w.state) && ENTRY_TASKS[w.entry as Entry]?.has(task));
-    return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && [w.started_by, w.approved_by].some((b) => b?.toLowerCase() === l)))));
+    return new Set(logins.filter((l) => c.repos.every((x) => working.some((w) => w.repo === x && peopleOf(w).some((b) => b?.toLowerCase() === l)))));
   };
   const deniedOn = (login: string, repos: readonly string[]): boolean => repos.some((x) => !canWrite(login, x));
   return {

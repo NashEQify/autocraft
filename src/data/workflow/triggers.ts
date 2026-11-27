@@ -22,3 +22,8 @@ registerTriggerSource("preapprovals",
 registerTriggerSource("actions",
   { table: "workflow_actions" },
 );
+
+// A Task Runner taken onto an item's work changes which runners may claim its queued calls: what a held claim reacts to. Not planner input.
+registerTriggerSource("remote-queue",
+  { table: "item_runners" },
+);

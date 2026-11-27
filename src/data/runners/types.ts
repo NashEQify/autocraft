@@ -62,8 +62,9 @@ export type RunnerRow = {
 };
 /** Rows of the workflow module's started-work load: live workflows and the PR each implement workflow works on. */
 export type StartedWork = {
-  live: { repo: string; number: number; entry: string; state: string; started_by: string; approved_by: string | null }[];
-  prs: { repo: string; prNumber: number; started_by: string; approved_by: string | null }[];
+  /** `taken_by`: the lowercase logins whose Task Runners were taken onto the workflow (src/data/workflow/item-runners.ts). */
+  live: { repo: string; number: number; entry: string; state: string; started_by: string; approved_by: string | null; taken_by?: string[] }[];
+  prs: { repo: string; prNumber: number; started_by: string; approved_by: string | null; taken_by?: string[] }[];
   /** Merged PRs whose workflow ended done through the merge lately: only their post-merge review calls are its work (src/remote/started.ts). */
   merged: { repo: string; prNumber: number; started_by: string; approved_by: string | null }[];
 };

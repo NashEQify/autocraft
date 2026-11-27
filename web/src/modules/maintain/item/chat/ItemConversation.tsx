@@ -12,6 +12,7 @@ import { DiscordLine } from "../../../../ui/molecules/chat/DiscordLine";
 import { GithubLine } from "../../../../ui/molecules/chat/GithubLine";
 import { FOLD_FROM, WorkGroup, WorkRow } from "../../../../ui/molecules/chat/WorkRow";
 import { QueuedLine } from "../../../../ui/molecules/chat/QueuedLine";
+import { RunnerLine } from "../../../../ui/molecules/chat/RunnerLine";
 import { WorkingLine } from "../../../../ui/molecules/chat/WorkingLine";
 
 type Said = Extract<ChatEntry, { t: "said" }>;
@@ -158,6 +159,15 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
     }
   });
 
+  // The take and release buttons send their command words, as the reader would write them.
+  const press = async (word: "take" | "release") => {
+    try {
+      await send(word);
+    } catch (err) {
+      setAnnounce(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const running = last?.t === "work" && last.state === "running";
   // What AutoCraft is on now, after its last entries: the running step's line, then the queued work and what holds each back.
   const now = (
@@ -166,9 +176,10 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
       {c.queued.map((q) => (
         <QueuedLine key={q.id} q={q} />
       ))}
+      {c.runner && <RunnerLine r={c.runner} onPress={press} />}
     </>
   );
-  const nowShown = (!!c.working && !running) || c.queued.length > 0;
+  const nowShown = (!!c.working && !running) || c.queued.length > 0 || !!c.runner;
   const bs = blocks(c.entries);
   const lastBlock = bs[bs.length - 1];
   const placed = placeAnswer(c.entries, answer);
@@ -202,7 +213,7 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
             ),
           )}
           {nowShown && lastBlock?.k !== "turn" && (
-            <AutoCraftTurn at={last?.at ?? new Date().toISOString()} text={c.working && !running ? c.working : t("{work} queued", { work: c.queued[0]!.title })}>
+            <AutoCraftTurn at={last?.at ?? new Date().toISOString()} text={c.working && !running ? c.working : c.queued[0] ? t("{work} queued", { work: c.queued[0].title }) : t("Task Runner")}>
               {now}
             </AutoCraftTurn>
           )}

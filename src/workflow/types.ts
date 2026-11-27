@@ -165,7 +165,7 @@ export type CloseReason = { as: "completed" | "not-planned" } | { as: "duplicate
 
 /** One command word with its arguments, as the parser understood it. */
 export type CommandPart =
-  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "hold" | "resume" | "autorepin"; args?: string }
+  | { word: "review" | "fix-up" | "implement" | "merge" | "backlog" | "hold" | "resume" | "take" | "release" | "autorepin"; args?: string }
   | { word: "close"; reason?: CloseReason }
   | { word: "drop" | "fix"; part: number | string; /** A fix's words as written, which the fix-up carries out when they name no part of the plan. */ text?: string }
   | { word: "weight"; weight: number };
@@ -183,4 +183,4 @@ export type Parsed =
 export type Control = "resume-breaker" | "release-outside" | "set-automatic" | "runner-settings";
 
 /** `read`: a command a model read in a message the parser could not read, with its score and whether it ran (read.ts). */
-export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "resumed" | "weighted" | "closed" | "backlog" | "set" | "read";
+export type WorkflowEventKind = "started" | "approved" | "answered" | "ambiguous" | "blocked" | "stopped" | "resumed" | "weighted" | "closed" | "backlog" | "set" | "read" | "taken" | "released";
