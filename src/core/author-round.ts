@@ -10,8 +10,12 @@ import { RULE_STARTER } from "../workflow/types.ts";
 export const roundWaits = (w: (Pick<WorkflowFact, "approved" | "baseHead" | "own" | "state">) | null | undefined, pushes: readonly OwnPush[], head: string): boolean =>
   !!w && w.own && w.state === "running" && authorRound(w, pushes, head) !== null;
 
-/** A live workflow of the PR itself that a person started with a model review in its plan (entry review or fix-up, approved for merge or not): their request for a review of the current head. */
-export const personReviews = (w: (Pick<WorkflowFact, "entry" | "startedBy">) | null | undefined): boolean => !!w && w.startedBy !== RULE_STARTER && (w.entry === "review" || w.entry === "fixup");
+/**
+ * When a person started the live workflow of the PR itself with a model review in its plan (entry review or fix-up, approved for merge or not) and
+ * it is not waiting for a person (running or waiting): their request for a review of the current head. Null otherwise.
+ */
+export const personReviewSince = (w: (Pick<WorkflowFact, "entry" | "startedBy" | "startedAt" | "state">) | null | undefined): string | null =>
+  w && w.startedBy !== RULE_STARTER && (w.entry === "review" || w.entry === "fixup") && (w.state === "running" || w.state === "waiting") ? w.startedAt : null;
 
 /**
  * Review rounds of the author's commits on the PR made today (UTC) after `since`, the review at `head` left out: reviews by a model at heads our own
