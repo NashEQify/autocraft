@@ -164,3 +164,29 @@ test("a pool job whose only unit no Task Runner takes waits for the takers, not 
   await setUserRepos(db, "olga", ["deckcraft", "photocraft"]);
   assert.deepEqual((await plan()).proposals.map((p) => p.params.repo), ["photocraft"], "the takers changed: the job runs again");
 });
+
+test("a Verify job of a repo is proposed only while a call about one of the PRs it would plan has a Task Runner", async () => {
+  const { world } = await import("./world-db.ts");
+  const { LANES } = await import("../src/runner/autopilot.ts");
+  const w = await (await (await (await (await (await (await world()).repo()).pr(1)).review(1)).pr(2)).review(2)).pr(3);
+  try {
+    const db = w.db, now = new Date().toISOString();
+    await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator') ON CONFLICT (login) DO NOTHING").run();
+    const token = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
+    await storeStatus(db, token, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+    // Olga's runner takes app only for the PR she started, which Verify has nothing to plan on; the repo's checks were just read.
+    await setUserRepos(db, "olga", ["deckcraft"]);
+    await startWork(db, "app", 3, "olga");
+    await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, ended_at, repo) VALUES ('checks', '{\"repo\":\"app\"}', 'pipeline', ?, 'done', ?, ?, 'app')").run(now, now, now);
+    const lanes = LANES.filter((l) => l.name === "verify");
+
+    const held = await detectAutopilot(db, { lanes });
+    assert.deepEqual(held.proposals, [], "no Verify job while no Task Runner takes its PRs");
+    assert.equal(held.status?.verify, noRunnerFor("app"));
+
+    await setUserRepos(db, "olga", ["deckcraft", "app"]);
+    const found = await detectAutopilot(db, { lanes });
+    assert.deepEqual(found.proposals.map((p) => [p.step, p.params.repo]), [["verify", "app"]]);
+    assert.equal((await applyProposals(db, found.proposals, { lanes })).length, 1, "the job is queued");
+  } finally { w.close(); }
+});

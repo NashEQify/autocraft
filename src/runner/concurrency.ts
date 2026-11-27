@@ -74,10 +74,10 @@ export const noRunnerForTask = (repo: string, step: string): string => {
   const task = taskOfStep(step);
   return `No Task Runner takes ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} tasks on ${repo}`;
 };
-/** The reason a job waits when Task Runners take its repo and step's task, but none takes a call about any of its due items. */
+/** The reason a job waits when Task Runners take its repo and step's task, but none takes a call about any of its due items (the first few named). */
 export const noRunnerForItems = (_repo: string, step: string, refs: readonly ItemRef[]): string => {
-  const task = taskOfStep(step);
-  return `No Task Runner takes ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} tasks on ${refs.map((r) => `${r.repo}#${r.number}`).join(", ")}`;
+  const task = taskOfStep(step), named = refs.slice(0, 3).map((r) => `${r.repo}#${r.number}`).join(", ");
+  return `No Task Runner takes ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} tasks on ${named}${refs.length > 3 ? ` and ${refs.length - 3} more` : ""}`;
 };
 
 /**
@@ -85,7 +85,7 @@ export const noRunnerForItems = (_repo: string, step: string, refs: readonly Ite
  * Runner may take now or whose step's task none of those takes (src/remote/takers.ts, the rule the runner's job starts and the
  * pools use). The runners are read once, on the first such job, so one test serves a whole pass. Never for a job with no repo. A job names no item (a `number` param is a security finding), so a runner that takes only some
  * items counts on the repos with such an item (src/remote/task-items.ts); the job's pools then ask about each unit's items.
- * With the job's due items (`refs`) the test is the call's own: the job waits unless a call about one of them has a taker. Without
+ * With the job's due items (`refs`: one PR of a per-item lane, or the PRs a Verify job of the repo would plan) the test is the call's own: the job waits unless a call about one of them has a taker. Without
  * them, someone's started work elsewhere in the repo makes their runner a taker for the whole repo, although a call about an item
  * nobody started never reaches it and is withdrawn.
  */

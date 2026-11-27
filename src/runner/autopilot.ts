@@ -55,7 +55,7 @@ import { PIPELINE_DRAIN } from "../core/rules.ts";
 import { checkRequest, DEADLINE_ERROR, JobError, now } from "./jobs.ts";
 import { NO_TAKER_SKIP, UNITS_RAN } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, wantOf, type Active, type UntakenTest } from "./concurrency.ts";
-import { APPROVED_LANE, approvedLane, hasApprovedLane, ITEM_LANE, loadSteps, perItemLane, type Params, type StepDef } from "./steps.ts";
+import { APPROVED_LANE, approvedLane, hasApprovedLane, ITEM_LANE, knownStep, loadSteps, perItemLane, type Params, type StepDef } from "./steps.ts";
 import { repoInScope, type RepoScope, type ScopeFor } from "../core/scope.ts";
 import { loadRepoScopes } from "../data/workflow/index.ts";
 import { refreshOutsideHolds } from "../outside.ts";
@@ -92,6 +92,12 @@ export const KEY_BY = "pipeline_changed_by", KEY_AT = "pipeline_changed_at";
 const MARK_PLANNED_AT = "planned_at", MARK_SEQS_SEEN = "seqs_seen", MARK_WAKE_AT = "wake_at", MARK_STATUS = "status";
 
 // ---- lanes ---------------------------------------------------------------------
+
+/** The most items one job of `step` works: the largest limit it takes. */
+const limitMax = (step: string): number => {
+  const p = knownStep(step)?.params.find((x) => x.name === "limit");
+  return p?.kind === "int" ? p.max : Infinity;
+};
 
 /** The first (best-scored) planned PR of each repo. */
 const firstByRepo = (items: Planned[]): Map<string, Planned> => {
@@ -338,13 +344,21 @@ type FpRecord = { job: number | null; fp: string };
 /**
  * What the lane's input looked like: the step, its repo, and the counters of the topics it reads. A per-item job's input is its own
  * PR (`prSig`: prSigOf its facts) in place of the counters, so an idle item job runs again when its PR changed, not when any item did.
+ * A repo job proposed for its due items (Candidate.refs) reads those PRs the same way (`refsSig`: refsSigOf them).
  */
-export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>, prSig?: string): Promise<string> {
+export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>, prSig?: string, refsSig?: string): Promise<string> {
   const repo = typeof params.repo === "string" ? params.repo : "";
   if (prSig !== undefined && lanePrOf(params) !== null) return [step, repo, `#${lanePrOf(params)}`, prSig, await extraOf(db, lane.extra), await takersOf(db)].join("|");
+  if (refsSig !== undefined && lanePrOf(params) === null) return [step, repo, `refs:${refsSig}`, await extraOf(db, lane.extra), await takersOf(db)].join("|");
   if (seqs === undefined) seqs = await db.seqs();
   const topics = lane.topics ?? INPUT_TOPICS;
   return [step, repo, ...topics.map((t) => seqs[t] ?? 0), await extraOf(db, lane.extra), await takersOf(db)].join("|");
+}
+
+/** A digest of the due items of a repo job and of each one's facts (`sigOf`: prSigOf, undefined for an item without facts). */
+export function refsSigOf(refs: readonly ItemRef[], sigOf: (r: ItemRef) => string | undefined): string {
+  const parts = refs.map((r) => `${r.repo}#${r.number}=${sigOf(r) ?? ""}`).sort();
+  return createHash("sha1").update(parts.join(",")).digest("base64url");
 }
 
 /** A digest of a PR's facts, without the clock and the rank score, which move without the PR changing. */
@@ -668,19 +682,25 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // One repo per job, round robin; the repo's checks come before its planning.
+    // One repo per job, round robin; the repo's checks come before its planning. The job's refs are the repo's PRs it would plan, in
+    // its own selection order (src/verify/select.ts), at most as many as one job's limit allows: it plans the ones a Task Runner takes first.
+    // PRs Verify cannot build are recorded without a call, so a repo with only those carries no refs.
     name: "verify",
     perRepo: true,
     topics: TASK_TOPICS,
     detect: async (db, ctx) => {
       const out: Candidate[] = [];
       const plans = await plansOf(db, ctx);
-      const top = firstByRepo([...await planned(db, "verify", { plans, bucket: "plan" }), ...await planned(db, "verify", { plans, bucket: "unavailable" })]);
+      const toPlan = new Map<string, ItemRef[]>(), unavailable = new Set<string>();
+      for (const p of await planned(db, "verify", { plans, bucket: "plan" })) (toPlan.get(p.facts.repo) ?? toPlan.set(p.facts.repo, []).get(p.facts.repo)!).push({ repo: p.facts.repo, number: p.facts.number });
+      for (const p of await planned(db, "verify", { plans, bucket: "unavailable" })) unavailable.add(p.facts.repo);
+      const most = limitMax("verify");
       for (const repo of flightFirst(plans, roundRobin(ctx.tracked, await cursorOf(db, ctx, "verify")))) {
-        if (!top.has(repo)) continue;
+        if (!toPlan.has(repo) && !unavailable.has(repo)) continue;
         const checks = await lastJobEnd(db, "checks", repo);
         const fresh = checks?.state === "done" && Date.now() - Date.parse(checks.endedAt) < CHECKS_FRESH_MS;
-        const verify = { step: "verify", params: { repo } };
+        const refs = toPlan.get(repo)?.slice(0, most);
+        const verify = { step: "verify", params: { repo }, ...(refs ? { refs } : {}) };
         out.push(fresh ? verify : { step: "checks", params: { repo }, poll: true, gate: verify });
       }
       return out;
@@ -1199,13 +1219,11 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     return paused.get(stepName)!;
   };
   const note = (stepName: string, why: string) => { status[stepName] ??= why; };
-  // The facts digest of each PR of the pass, for the fingerprints of per-item jobs; made on first use.
+  // The facts digest of each PR of the pass, for the fingerprints of per-item jobs and of repo jobs proposed for their items; made on first use.
   let sigs: Map<string, PrFacts> | null = null;
   const digests = new Map<string, string>();
-  const prSig = async (params: Params): Promise<string | undefined> => {
-    const n = lanePrOf(params);
-    if (n === null || typeof params.repo !== "string") return undefined;
-    const key = `${params.repo}#${n}`;
+  const digestOf = async (repo: string, number: number): Promise<string | undefined> => {
+    const key = `${repo}#${number}`;
     if (!digests.has(key)) {
       sigs ??= new Map((await plansOf(db, ctx)).prs.map((p) => [`${p.facts.repo}#${p.facts.number}`, p.facts]));
       const f = sigs.get(key);
@@ -1213,6 +1231,15 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
       digests.set(key, prSigOf(f));
     }
     return digests.get(key);
+  };
+  const prSig = async (params: Params): Promise<string | undefined> => {
+    const n = lanePrOf(params);
+    return n === null || typeof params.repo !== "string" ? undefined : await digestOf(params.repo, n);
+  };
+  const refsSig = async (refs: readonly ItemRef[] | undefined): Promise<string | undefined> => {
+    if (!refs?.length) return undefined;
+    const each = new Map(await mapSeq(refs, async (r) => [`${r.repo}#${r.number}`, await digestOf(r.repo, r.number)] as const));
+    return refsSigOf(refs, (r) => each.get(`${r.repo}#${r.number}`));
   };
 
   /**
@@ -1231,7 +1258,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (waits !== null) { note(stepName, waits); return null; }
     if (lane) {
       const repo = typeof params.repo === "string" ? params.repo : null;
-      const fp = await fingerprintOf(db, lane, stepName, params, seqs, await prSig(params));
+      const fp = await fingerprintOf(db, lane, stepName, params, seqs, await prSig(params), await refsSig(refs));
       const pr = lanePrOf(params);
       const b = await failureBackoff(db, stepName, ms, { repo, fp, lane: pr });
       if (b) {
@@ -1295,7 +1322,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
         // A lane PR's own job works one PR: it keeps no more of the daily limit than that.
         const limit = g.limit === undefined ? undefined : lanePrOf(c.params) !== null ? Math.min(g.limit, 1) : g.limit;
         const params: Params = { ...c.params, ...(limit === undefined ? {} : { limit }) };
-        proposals.push({ lane: lane.name, step: c.step, params, fp: await fingerprintOf(db, lane, c.step, c.params, seqs, await prSig(c.params)), ...(c.gate ? { gate: (({ refs: _, ...g }) => g)(c.gate) } : {}) });
+        proposals.push({ lane: lane.name, step: c.step, params, fp: await fingerprintOf(db, lane, c.step, c.params, seqs, await prSig(c.params), await refsSig(c.refs)), ...(c.gate ? { gate: (({ refs: _, ...g }) => g)(c.gate) } : {}) });
         if (item) items++;
         else if (!approvedLane(lanePr) && ++taken >= perLane) break;
       }
