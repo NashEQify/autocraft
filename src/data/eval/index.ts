@@ -2,7 +2,7 @@
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { queryDb } from "../../db/query-db.ts";
-import type { EvalCause, EvalCauseState, EvalEvidence, EvalFacts, EvalVerdict } from "./types.ts";
+import type { EvalCause, EvalCauseState, EvalEvidence, EvalFacts, EvalLoginRole, EvalNames, EvalVerdict } from "./types.ts";
 
 export type * from "./types.ts";
 
@@ -58,6 +58,51 @@ export async function loadEvalFacts(db: Db, o: { sinceMs: number; mergedSinceMs:
     answers: answers.map((r) => ({ id: Number(r.id), repo: r.repo, number: Number(r.number), kind: r.kind, at: r.at, live: Boolean(Number(r.live)), touchedAfter: Boolean(Number(r.touched)) })),
     merged: [...byPr.values()],
   };
+}
+
+const RANK: Record<EvalLoginRole, number> = { operator: 0, maintainer: 1, runner: 2, user: 3, owner: 4, author: 5 };
+const hostOf = (machine: string | null): string | null => {
+  try {
+    const h = (JSON.parse(machine ?? "null") as { hostname?: unknown } | null)?.hostname;
+    return typeof h === "string" && h.trim() ? h.trim() : null;
+  } catch { return null; }
+};
+
+/**
+ * Every login AutoCraft knows with its strongest role (access list, Task Runner credentials and helpers, user settings,
+ * repository owners, item authors and mergers; bots left out), and the host names and labels of Task Runner machines.
+ */
+export async function loadEvalNames(db: Db): Promise<EvalNames> {
+  const q = queryDb(db);
+  const [access, tokens, helpers, logins, settings, owners, authors, mergers] = await db.together(() => Promise.all([
+    q.all(q.k.selectFrom("access").select(["login", "role"])),
+    q.all(q.k.selectFrom("mcp_tokens").select(["login", "kind", "label", "machine"])),
+    q.all(q.k.selectFrom("remote_helpers").select(["login", "machine"])),
+    q.all(q.k.selectFrom("runner_logins").select(["login", "label", "machine"])),
+    q.all(q.k.selectFrom("user_settings").select("login").distinct()),
+    q.all(q.k.selectFrom("repos").select("owner").distinct()),
+    q.all(q.k.selectFrom("items").select("author").distinct().where("author", "is not", null).where((eb) => eb.or([eb("author_type", "is", null), eb("author_type", "!=", "Bot")]))),
+    q.all(q.k.selectFrom("items").select("merged_by").distinct().where("merged_by", "is not", null)),
+  ]));
+  const roles = new Map<string, { login: string; role: EvalLoginRole }>();
+  const add = (login: string | null, role: EvalLoginRole) => {
+    const l = login?.trim();
+    if (!l || /\[bot\]$/i.test(l) || l.toLowerCase() === "ghost") return;
+    const was = roles.get(l.toLowerCase());
+    if (!was || RANK[role] < RANK[was.role]) roles.set(l.toLowerCase(), { login: l, role });
+  };
+  for (const r of access) add(r.login, r.role === "operator" ? "operator" : r.role === "maintainer" ? "maintainer" : "user");
+  for (const r of tokens) add(r.login, r.kind === "runner" ? "runner" : "user");
+  for (const r of helpers) add(r.login, "runner");
+  for (const r of logins) add(r.login, "runner");
+  for (const r of settings) add(r.login, "user");
+  for (const r of owners) add(r.owner, "owner");
+  for (const r of authors) add(r.author, "author");
+  for (const r of mergers) add(r.merged_by, "author");
+  const hosts = new Set<string>(), labels = new Set<string>();
+  for (const r of [...tokens, ...helpers, ...logins]) { const h = hostOf(r.machine); if (h) hosts.add(h); }
+  for (const r of [...tokens, ...logins]) { const l = r.label?.trim(); if (l) labels.add(l); }
+  return { logins: [...roles.values()], hosts: [...hosts], labels: [...labels] };
 }
 
 // ---- causes ----------------------------------------------------------------------------------------------------------

@@ -86,3 +86,28 @@ test("a real defect is filed once; new evidence becomes one comment a day on tha
   assert.deepEqual([calls("create").length, calls("comment").length], [1, 1]);
   assert.ok(!calls("comment")[0]!.input.includes("secretcraft"));
 });
+
+test("posted text carries no known login, bare or mentioned, no unknown mention, e-mail address or link to another host", async () => {
+  const w = current = await (await world()).repo();
+  await setEvalRepo(w.db, "app", OPERATOR);
+  await w.db.run(w.db.k.insertInto("remote_helpers").values({ token_id: 7, login: "dana-k", readiness: "ready", harness: "claude", models: "{}", reserve: "{}", reported_at: NOW, slots: 1, busy: 0 }));
+  const finding: EvalFinding = {
+    real_defect: true, severity: "medium", title: "Approval by dana-k never reaches the queue",
+    cause: "The answer from dana-k (mentioned as @dana-k, then @someone-else) is read by `src/core/answer.ts`; write to dana@example.org or see http://runner.internal:8080/jobs/9.",
+    evidence: [{ where: "src/core/answer.ts:40", what: "drops the answer of dana-k" }], fix: "Queue the answer.",
+  };
+  await saveEvalCauses(w.db, [{
+    key: "answer-ran-nothing", detector: "answer-ran-nothing", summary: "s", state: "investigated", firstSeen: iso(NOW - H), lastSeen: iso(NOW), seen: 1,
+    evidence: [{ id: "answer:3", at: iso(NOW), note: "answered by dana-k", ref: { repo: "app", number: 3 } }],
+    investigatedAt: iso(NOW), investigatedSeen: 1, verdict: "defect", finding, model: "claude-opus-5-5", runId: "r", issueNumber: null, filedAt: null, reportedSeen: 0, commentedAt: null, attempts: 0, note: null,
+  }]);
+  const posted: string[] = [];
+  const exec: Exec = async (_cmd, args, o) => {
+    if (args[0] === "issue" && args[1] === "create") { posted.push(args.join(" "), String((o as { input?: string } | undefined)?.input ?? "")); return { code: 0, stdout: "https://github.com/storytold/app/issues/9\n", stderr: "" }; }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  assert.deepEqual((await runEvalFiling(w.db, { repo: "app", by: { operator: OPERATOR } }, () => {}, { exec, now: () => new Date(NOW) })).filed, [9]);
+  const text = posted.join("\n");
+  for (const gone of ["dana-k", "someone-else", "@", "dana@example.org", "runner.internal"]) assert.ok(!text.includes(gone), `${gone} is posted`);
+  assert.ok(text.includes("a Task Runner owner") && text.includes("src/core/answer.ts:40"));
+});

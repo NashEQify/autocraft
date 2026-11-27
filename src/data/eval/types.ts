@@ -40,3 +40,9 @@ export type EvalFacts = {
   answers: { id: number; repo: string; number: number; kind: string; at: string; live: boolean; touchedAfter: boolean }[];
   merged: { repo: string; number: number; mergedAt: string; calls: number; costUsd: number; byPrompt: Record<string, number> }[];
 };
+
+/** Who a known login is to AutoCraft, strongest first: the access list's role, a Task Runner's owner, a user with settings, a repository owner, an item author. */
+export type EvalLoginRole = "operator" | "maintainer" | "runner" | "user" | "owner" | "author";
+
+/** Names AutoCraft knows that public text must not carry: logins with their role, Task Runner machines' host names and the labels people gave them. */
+export type EvalNames = { logins: { login: string; role: EvalLoginRole }[]; hosts: string[]; labels: string[] };
