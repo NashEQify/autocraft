@@ -8,7 +8,7 @@ import { reviewAfterBaseMerge } from "./own-diff.ts";
 import { mergeApprovedIn } from "../core/author-round.ts";
 import { askedParts, beyondPlanned, premergeSource, type ChainReview } from "../core/evidence.ts";
 import { findingsOf } from "../premerge/store.ts";
-import { stoppingDefects } from "../premerge/types.ts";
+import { notBlocking, stoppingDefects } from "../premerge/types.ts";
 import { partTitle } from "../workflow/work.ts";
 import type { Db } from "../db/index.ts";
 import { loadFixupPushes, loadFixupVerdicts, loadPushEdges, type PushEdge } from "../data/changes/index.ts";
@@ -98,14 +98,20 @@ export async function carriedReviews(db: Db, cs: Cand[], stale: Set<string> = ne
   const [texts, facts] = await db.together(() => Promise.all([
     loadReviewTexts(db, picked.map((p) => ({ repo: p.c.repo, number: p.c.number, head: p.e.head }))), loadFixupFacts(db, picked.flatMap((p) => fixupKeys(p.key, p.commits))),
   ]));
-  for (const { e, baseRef, key, commits } of picked) {
+  for (const { c, e, baseRef, key, commits } of picked) {
     const steps = commits.map((x) => carriable(key, x, edges.get(key) ?? [], facts));
     if (steps.some((s) => s === null)) continue;
     const t = texts.get(`${key}@${e.head}`);
     // Our fix-ups made the review's fixes, or the ones a person named; a base merge and a fix-up of the pre-merge review's defects leave them.
+    // On a PR approved for merge the review's fix-up made only its blocking fixes: the others stay, to be filed as follow-ups.
     let verdict = e.verdict as "take" | "take-fix", fixes = e.fixes as unknown as ReviewFix[], made = false;
     for (const s of steps as Step[]) {
-      if (s.kind === "fix-up") { made ||= verdict === "take-fix"; verdict = "take"; fixes = []; }
+      if (s.kind === "fix-up") {
+        const left = approved.has(`${c.repo}#${c.number}`) ? fixes.filter(notBlocking) : [];
+        made ||= left.length < fixes.length && verdict === "take-fix";
+        fixes = left;
+        if (!fixes.length) verdict = "take";
+      }
       if (s.kind === "operator fix-up") {
         const left = fixes.filter((x) => !s.asked!.includes(partTitle(x).toLowerCase()));
         if (left.length < fixes.length) { made ||= verdict === "take-fix"; fixes = left; }

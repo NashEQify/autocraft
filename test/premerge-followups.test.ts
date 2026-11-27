@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runPremergeFollowups } from "../src/premerge/followups.ts";
 import { recommendation, reviewBody } from "../src/review/post-template.ts";
+import { runCarry } from "../src/review/carry-step.ts";
 import { appLane } from "./acting.ts";
 import { liveWorkflow } from "../src/workflow/store.ts";
 import type { World } from "./world-db.ts";
@@ -160,6 +161,24 @@ test("on an approved PR, a blocking fix runs the fix-up, and the fix beside it i
   assert.deepEqual(s.filed, ["app#1"]);
   assert.match(posted, /Clearer name/);
   assert.doesNotMatch(posted, /Bound check/);
+  assert.equal((await kinds(w)).includes("followups"), false);
+  w.close();
+});
+
+test("the fix that does not block beside a blocking one is filed when the carry wrote the fix-up's head before the filing ran", async () => {
+  const w = await approvedReview({ verdict: "take-fix", fixes: [BLOCKING_FIX, NOT_BLOCKING_FIX] });
+  await w.db.run(w.db.k.insertInto("main.patch_checks").values({ kind: "fixup", repo: "app", number: 1, subject: "sha1", patch_hash: "x", round: 1, verdict: "approve", reasons: "", problems: "[]", model: "m", created_at: new Date().toISOString() }));
+  await ourPush(w, "sha1", "sha2");
+  assert.equal(await runCarry(w.db, "app", () => {}), 1);
+  // The review was dated after the start, a moment ahead; the carry comes after it.
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date(Date.now() + 2000).toISOString() }).where("head_oid", "=", "sha2"));
+  await settle(w);
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "followups" && a.params?.reviewHead === "sha2"), (await kinds(w)).join(", "));
+  const { s, posted } = await file(w);
+  assert.deepEqual(s.filed, ["app#1"]);
+  assert.match(posted, /Clearer name/);
+  assert.doesNotMatch(posted, /Bound check/);
+  await settle(w);
   assert.equal((await kinds(w)).includes("followups"), false);
   w.close();
 });
