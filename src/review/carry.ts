@@ -108,7 +108,7 @@ export async function carriedReviews(db: Db, cs: Cand[], stale: Set<string> = ne
     for (const s of steps as Step[]) {
       if (s.kind === "fix-up") {
         const left = approved.has(`${c.repo}#${c.number}`) ? fixes.filter(notBlocking) : [];
-        made ||= left.length < fixes.length && verdict === "take-fix";
+        made ||= verdict === "take-fix";
         fixes = left;
         if (!fixes.length) verdict = "take";
       }
