@@ -683,7 +683,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
   },
   {
     // One repo per job, round robin; the repo's checks come before its planning. The job's refs are the repo's PRs it would plan, in
-    // its own selection order (src/verify/select.ts), at most as many as one job's limit allows: it plans the ones a Task Runner takes first.
+    // its own selection order (src/verify/select.ts), at most as many as one job's limit allows, those a Task Runner takes first, as the job plans them.
     // PRs Verify cannot build are recorded without a call, so a repo with only those carries no refs.
     name: "verify",
     perRepo: true,
@@ -694,12 +694,18 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const toPlan = new Map<string, ItemRef[]>(), unavailable = new Set<string>();
       for (const p of await planned(db, "verify", { plans, bucket: "plan" })) (toPlan.get(p.facts.repo) ?? toPlan.set(p.facts.repo, []).get(p.facts.repo)!).push({ repo: p.facts.repo, number: p.facts.number });
       for (const p of await planned(db, "verify", { plans, bucket: "unavailable" })) unavailable.add(p.facts.repo);
-      const most = limitMax("verify");
+      const most = limitMax("verify"), untaken = (ctx.untaken ??= await untakenTest(db));
+      const takenFirst = async (refs: ItemRef[]): Promise<ItemRef[]> => {
+        const taken = new Set(await filterSeq(refs, async (r) => await untaken({ step: "verify", repo: r.repo, refs: [r] }) === null));
+        return [...refs.filter((r) => taken.has(r)), ...refs.filter((r) => !taken.has(r))];
+      };
       for (const repo of flightFirst(plans, roundRobin(ctx.tracked, await cursorOf(db, ctx, "verify")))) {
         if (!toPlan.has(repo) && !unavailable.has(repo)) continue;
         const checks = await lastJobEnd(db, "checks", repo);
         const fresh = checks?.state === "done" && Date.now() - Date.parse(checks.endedAt) < CHECKS_FRESH_MS;
-        const refs = toPlan.get(repo)?.slice(0, most);
+        const due = toPlan.get(repo);
+        // PRs a Task Runner takes first, as the job plans them, so a taken one is always among the refs the gate tests.
+        const refs = due && (due.length > most ? (await takenFirst(due)).slice(0, most) : due);
         const verify = { step: "verify", params: { repo }, ...(refs ? { refs } : {}) };
         out.push(fresh ? verify : { step: "checks", params: { repo }, poll: true, gate: verify });
       }
@@ -1012,10 +1018,23 @@ export const DEADLINE_BACKOFF_MS = 3600_000;
  * An operator release since the last failure ends it. After a single failure, so does a changed input (`fp` given and
  * different from the one the failed job saw); later failures wait out the backoff, because inputs that change every
  * minute would otherwise retry a failing step at once, every time. Jobs a runner restart ended, and jobs that failed only because a write was paced (it is retried later anyway), do not count.
+ * Without `repo` it is the whole step's: each repo (and lane PR) keeps its own streak, and the step waits only while every one of them does,
+ * until the first of them may run again; one repo that keeps failing does not hold the others.
  */
-export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string; lane?: number | null } = {}): Promise<{ until: number; failures: number } | null> {
+export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string; lane?: number | null; exact?: boolean } = {}): Promise<{ until: number; failures: number } | null> {
+  if (o.repo === undefined) {
+    const groups = new Map<string, { repo: string | null; lane: number | null }>();
+    for (const r of (await readsOf(db, ms)).inputs.streaks) if (r.step === step) groups.set(`${r.repo ?? ""}#${r.lane_number ?? ""}`, { repo: r.repo, lane: r.lane_number });
+    let first: { until: number; failures: number } | null = null;
+    for (const g of groups.values()) {
+      const b = await failureBackoff(db, step, ms, { repo: g.repo, lane: g.lane, exact: true });
+      if (!b) return null;
+      if (!first || b.until < first.until) first = b;
+    }
+    return first;
+  }
   // The pipeline jobs of the step (of the repo, and the jobs without a lane or one lane PR's, when given), newest first, back to the first success, at most 12.
-  const rows = (await readsOf(db, ms)).inputs.streaks.filter((r) => r.step === step && (o.repo == null || r.repo === o.repo) && (o.lane === undefined || r.lane_number === o.lane)).sort((a, b) => b.id - a.id).slice(0, 12);
+  const rows = (await readsOf(db, ms)).inputs.streaks.filter((r) => r.step === step && ((o.repo === null && !o.exact) || r.repo === o.repo) && (o.lane === undefined || r.lane_number === o.lane)).sort((a, b) => b.id - a.id).slice(0, 12);
   let failures = 0;
   while (failures < rows.length && rows[failures]!.state === "failed") failures++;
   if (!failures || !rows[0]!.ended_at) return null;
@@ -1263,9 +1282,10 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
       const b = await failureBackoff(db, stepName, ms, { repo, fp, lane: pr });
       if (b) {
         ctx.wake?.push(b.until);
-        note(stepName, `failed ${b.failures} time${b.failures === 1 ? "" : "s"} in a row; retry at ${hhmm(b.until)}`);
-        const key = `${stepName}:${b.until}`;
-        if (!warned.has(key)) { warned.add(key); log(`autopilot: ${stepName}: failed ${b.failures} times in a row; retry at ${hhmm(b.until)}`); }
+        const where = repo === null ? "" : ` on ${pr === null ? repo : `${repo}#${pr}`}`;
+        note(stepName, `failed ${b.failures} time${b.failures === 1 ? "" : "s"} in a row${where}; retry at ${hhmm(b.until)}`);
+        const key = `${stepName}:${repo ?? ""}:${b.until}`;
+        if (!warned.has(key)) { warned.add(key); log(`autopilot: ${stepName}: failed ${b.failures} times in a row${where}; retry at ${hhmm(b.until)}`); }
         return null;
       }
       const idle = poll ? null : await unchangedSinceIdle(db, stepName, repo, fp, { lane: pr, byRefs: refs !== undefined, topics: lane.topics ?? INPUT_TOPICS });

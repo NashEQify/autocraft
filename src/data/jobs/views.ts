@@ -204,18 +204,18 @@ export async function loadJobStamp(db: Db, repo: string, refs?: Ref[]): Promise<
 
 /**
  * Finished runs of the jobs `requestedBy` started, among the newest `window` job ids, ended in the last `sinceDays` days, a runner restart's left out,
- * newest first: the newest `last` of each step, and of a step whose newest `last` all failed every done one.
+ * newest first: the newest `last` of each step and repo, and of a step and repo whose newest `last` all failed every done one.
  */
 export async function loadStepRuns(db: Db, o: { requestedBy: string; sinceDays: number; window: number; last: number; nowMs: number }): Promise<StepRun[]> {
   const q = queryDb(db);
   const since = new Date(o.nowMs - o.sinceDays * 86_400_000).toISOString();
-  const runs = q.k.selectFrom("jobs").select((eb) => ["id", "step", "state", "error", "ended_at", eb.fn.agg<number>("row_number").over((w) => w.partitionBy("step").orderBy("id", "desc")).as("rn")])
+  const runs = q.k.selectFrom("jobs").select((eb) => ["id", "step", "repo", "state", "error", "ended_at", eb.fn.agg<number>("row_number").over((w) => w.partitionBy(["step", "repo"]).orderBy("id", "desc")).as("rn")])
     .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", o.window))
     .where("requested_by", "=", o.requestedBy).where("state", "in", ["done", "failed"]).where("ended_at", ">", since)
     .where((eb) => eb.or([eb("error", "is", null), eb("error", "<>", RUNNER_STOPPED)]));
   const counted = q.k.selectFrom(runs.as("r")).selectAll("r")
-    .select((eb) => eb.fn.sum<number>(eb.case().when(eb.and([eb("r.rn", "<=", o.last), eb("r.state", "=", "failed")])).then(1).else(0).end()).over((w) => w.partitionBy("r.step")).as("failed"));
-  return await q.all(q.k.selectFrom(counted.as("c")).select(["c.id", "c.step", "c.state", "c.error", "c.ended_at"]).$narrowType<{ state: JobState }>()
+    .select((eb) => eb.fn.sum<number>(eb.case().when(eb.and([eb("r.rn", "<=", o.last), eb("r.state", "=", "failed")])).then(1).else(0).end()).over((w) => w.partitionBy(["r.step", "r.repo"])).as("failed"));
+  return await q.all(q.k.selectFrom(counted.as("c")).select(["c.id", "c.step", "c.repo", "c.state", "c.error", "c.ended_at"]).$narrowType<{ state: JobState }>()
     .where((eb) => eb.or([eb("c.rn", "<=", o.last), eb.and([eb("c.failed", "=", o.last), eb("c.state", "=", "done")])])).orderBy("c.id", "desc"));
 }
 

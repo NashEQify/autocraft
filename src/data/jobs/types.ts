@@ -46,7 +46,7 @@ export type StageState = "running" | "queued" | "ok" | "failed" | "idle";
 export type ActiveJob = { id: number; step: string; state: JobState; requested_by: string; started_at: string | null };
 export type FailedJob = { id: number; step: string; error: string | null; ended_at: string | null };
 export type JobStamp = { count: number; newestId: number | null; states: string; positions: Map<number, number> };
-export type StepRun = { id: number; step: string; state: JobState; error: string | null; ended_at: string | null };
+export type StepRun = { id: number; step: string; repo: string | null; state: JobState; error: string | null; ended_at: string | null };
 export type DeadlineStop = { step: string; jobId: number; error: string; endedAt: string | null; count: number };
 export type ItemsByBucket = { step: string; bucket: string; items: number };
 
