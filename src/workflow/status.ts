@@ -8,6 +8,7 @@ import { clipText } from "../prose.ts";
 import { asksNobody } from "./asked.ts";
 import { heldWork, openRecommendation, RULE_STARTER } from "./types.ts";
 import { COMMANDS, ENTRY_LABEL, weightWord } from "./vocab.ts";
+import type { RunnerRoom } from "../core/runner-room.ts";
 
 export type StepName = "implement" | "review" | "fix-up" | "review again" | "update from main" | "fix CI and conflicts" | "batch" | "merge" | "recommend" | "review new commits";
 export type StepState = "done" | "running" | "waiting" | "stopped" | "next";
@@ -303,19 +304,31 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
 }
 
 /**
- * The line a confirmation adds about the Task Runners (src/core/runner-room.ts RunnerRoom): why none can take the work now, and the
- * setup page for a person with no Task Runner of their own; null when one can and the person has their own. `connect`: the setup page's URL.
+ * The line a confirmation, or a stalled call's notice, adds about the Task Runners (src/core/runner-room.ts RunnerRoom): why none can take
+ * the work now, and the setup page for a person with no Task Runner of their own; null when one can and the person has their own.
+ * `connect`: the setup page's URL. `whose`: the person's role in the work, for a line others read too; left out, it speaks to the person.
  */
-export function runnerLine(room: { can: boolean; own: boolean; why?: "none" | "held" | "own-held"; until?: string | null }, repo: string, connect: string, clock: Clock = utcClock): string | null {
-  if (room.can) return room.own ? null : t("You have no Task Runner yet: {url}", { url: connect });
+export function runnerLine(room: RunnerRoom, repo: string, connect: string, clock: Clock = utcClock, whose?: "starter" | "approver" | "taker"): string | null {
+  const setup = t("Set up your own Task Runner: {url}", { url: connect });
+  if (room.can) return room.own ? null : setup;
   const until = room.until ? clock(room.until) : null;
-  const reason = room.why === "own-held"
-    ? until ? t("your Task Runner is held by its usage limit until {time}", { time: until }) : t("your Task Runner is held by its usage limit")
-    : room.why === "held"
-      ? until ? t("the Task Runners that may take {repo} are held by their usage limit until {time}", { repo, time: until }) : t("the Task Runners that may take {repo} are held by their usage limit", { repo })
-      : t("no Task Runner that may take {repo} is ready", { repo });
+  const runner = whose === "approver" ? t("the approver's Task Runner") : whose === "starter" ? t("the starter's Task Runner") : whose === "taker" ? t("the Task Runner it was taken onto") : t("your Task Runner");
+  const reason = ((): string => {
+    switch (room.why) {
+      case "own-off": return t("{runner} is not connected", { runner });
+      case "own-held": return until ? t("{runner} is held by its usage limit until {time}", { runner, time: until }) : t("{runner} is held by its usage limit", { runner });
+      case "own-cooling": return t("{runner} is cooling off", { runner });
+      case "own-not-ready": return t("{runner} is not ready", { runner });
+      case "own-denied": return t("{runner} may not take {repo}", { runner, repo });
+      case "own-none": return whose === undefined ? t("the implementation runs only on your own Task Runner, and you have none") : t("the implementation runs only on {runner}, which is not set up", { runner });
+      case "held": return until ? t("the Task Runners that may take {repo} are held by their usage limit until {time}", { repo, time: until }) : t("the Task Runners that may take {repo} are held by their usage limit", { repo });
+      case "tier": return t("no ready Task Runner that may take {repo} offers a {tier} tier model", { repo, tier: room.tier ?? "" });
+      case "repo": return t("the ready Task Runners do not take {repo}", { repo });
+      case "none": return t("no Task Runner that may take {repo} is ready", { repo });
+    }
+  })();
   const line = t("No Task Runner can take this right now ({reason}). It starts when one is free.", { reason });
-  return room.own ? line : `${line} ${t("Set up your own Task Runner: {url}", { url: connect })}`;
+  return room.own ? line : `${line} ${setup}`;
 }
 
 /**

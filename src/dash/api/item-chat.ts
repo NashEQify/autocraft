@@ -224,7 +224,9 @@ export function entriesOf(c: Ctx, s: Sources): ChatEntry[] {
       if (ev?.line) parts.push({ at: ev.at < m.at ? m.at : ev.at, rank: 1, key: `workflow:${ev.id}`, entry: { t: "reply", id: `workflow:${ev.id}`, at: ev.at, body: hide(ev.line), findings: [], ask: null } });
       continue;
     }
-    parts.push({ at: m.at, rank: 1, key: `msg:${m.id}`, entry: { t: "reply", id: `msg:${m.id}`, at: m.at, body: hide(m.body), ...recommended(c, m, s.workflows) } });
+    // A Task Runner notice names whose runner and why only to operators and maintainers.
+    const body = m.kind === "notice" && !c.staff ? t("Waiting for a Task Runner") : hide(m.body);
+    parts.push({ at: m.at, rank: 1, key: `msg:${m.id}`, entry: { t: "reply", id: `msg:${m.id}`, at: m.at, body, ...recommended(c, m, s.workflows) } });
   }
 
   for (const x of s.turns) {

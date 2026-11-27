@@ -7,7 +7,7 @@ import { CHAT_AUTHOR, conversationTitle, finishedMessage, recommendedMessage, UN
 import { ASKING_STATES, type Entry, type PlanPart, type Recommendation, type WorkflowState } from "../../workflow/types.ts";
 import type { WorkflowPatch } from "../workflow/types.ts";
 import { recordMessages } from "./messages.ts";
-import type { NewChatMessage } from "./types.ts";
+import type { NewChatMessage, WorkflowNotice } from "./types.ts";
 
 const ASKING: readonly string[] = ASKING_STATES;
 const ENDS: readonly string[] = ["done", "closed"] satisfies WorkflowState[];
@@ -87,4 +87,20 @@ export async function retitleConversations(db: Db, started: readonly { repo: str
         .where(kx.refIn(db, "main.chat_conversations", refs)));
     }
   });
+}
+
+/** The Task Runner notices of each workflow, oldest first. */
+export async function loadNotices(db: Db, ids: readonly number[]): Promise<Map<number, WorkflowNotice[]>> {
+  const out = new Map<number, WorkflowNotice[]>();
+  const q = queryDb(db);
+  for (const part of kx.chunks([...new Set(ids)])) {
+    const rows = await q.all(q.k.selectFrom("main.chat_messages").select(["id", "workflow_id", "body", "payload", "at"]).where("kind", "=", "notice")
+      .where(kx.inList(db, "workflow_id", part, "bigint")).orderBy("id"), { label: "chat.loadNotices" });
+    for (const r of rows) {
+      const workflowId = Number(r.workflow_id);
+      const reason = json<{ reason?: unknown }>(r.payload, {}).reason;
+      (out.get(workflowId) ?? out.set(workflowId, []).get(workflowId)!).push({ id: Number(r.id), workflowId, body: r.body, reason: typeof reason === "string" ? reason : "", at: r.at });
+    }
+  }
+  return out;
 }

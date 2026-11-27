@@ -23,6 +23,7 @@
 import { createHash } from "node:crypto";
 import { runModelStep, type ClaudeStep } from "../agents/step.ts";
 import { exclusive } from "../async-seq.ts";
+import { loadNotices } from "../data/chat/index.ts";
 import * as dc from "../data/discord/index.ts";
 import type { FollowPost } from "../data/discord/index.ts";
 import { loadStatusCommentIds, loadWorkflowHistory } from "../data/workflow/index.ts";
@@ -45,7 +46,7 @@ import { discordDetail, type DiscordDetail } from "./visibility.ts";
 /** Discord allows 2000 characters per message; a result is kept under this. */
 export const RESULT_MAX = 1900;
 const POLL_MS = 2000;
-const TOPICS = ["workflows"];
+const TOPICS = ["workflows", "chat"];
 /** Link buttons in one action row. */
 const ROW_BUTTONS = 5;
 /** The back-off of a target after a failed send: the first wait, doubled per failure in a row up to the last. */
@@ -54,9 +55,12 @@ export const FAIL_MAX_MS = 30 * 60_000;
 /** Result texts kept in memory by hash. */
 const TEXT_CACHE = 200;
 
-/** What the thread shows of one item. `result`: the parts and recommendation, null while nothing waits for a person or where only status may show. */
+/**
+ * What the thread shows of one item. `result`: the parts and recommendation, null while nothing waits for a person or where only status may
+ * show. `notice`: the latest Task Runner notice of its workflow (src/core/runner-room.ts stallNotices).
+ */
 export type ItemView = {
-  ref: ItemRef; key: string; url: string; status: string; detail: DiscordDetail;
+  ref: ItemRef; key: string; url: string; status: string; detail: DiscordDetail; notice: Notice | null;
   result: { key: string; parts: { n: number; title: string; state: "planned" | "dropped" | "fixed"; major?: boolean }[]; rec: string | null } | null;
 };
 
@@ -86,8 +90,9 @@ const hash = (s: string): string => createHash("sha256").update(s).digest("base6
 /** Text from GitHub or a model in a message: no mention or link syntax, one line. */
 const plain = (s: string): string => s.replace(/[<>]/g, " ").replace(/\s+/g, " ").trim();
 
-/** What is read of every followed item each pass: its shown workflow, visibility and status comment id; `sig` changes when any does. */
-type Glance = { wf: ItemWorkflow | undefined; detail: DiscordDetail; commentId: string | undefined; sig: string };
+type Notice = { id: number; body: string; at: string };
+/** What is read of every followed item each pass: its shown workflow, visibility, status comment id and latest Task Runner notice; `sig` changes when any does. */
+type Glance = { wf: ItemWorkflow | undefined; detail: DiscordDetail; commentId: string | undefined; notice: Notice | null; sig: string };
 
 export async function glances(db: Db, refs: readonly ItemRef[]): Promise<Map<string, Glance>> {
   const out = new Map<string, Glance>();
@@ -95,11 +100,14 @@ export async function glances(db: Db, refs: readonly ItemRef[]): Promise<Map<str
   const [history, detail, commentIds] = await db.together(() => Promise.all([
     loadWorkflowHistory(db, [...refs]), discordDetail(db, refs), loadStatusCommentIds(db, refs.map(shortKey)),
   ]));
+  const shown = new Map(refs.map((ref) => [shortKey(ref), shownWorkflow(history.get(shortKey(ref)) ?? []) ?? undefined]));
+  const notices = await loadNotices(db, [...shown.values()].flatMap((wf) => (wf ? [wf.id] : [])));
   for (const ref of refs) {
     const key = shortKey(ref);
-    const wf = shownWorkflow(history.get(key) ?? []) ?? undefined;
+    const wf = shown.get(key);
     const d = detail.get(key) ?? "status", commentId = commentIds.get(key);
-    out.set(key, { wf, detail: d, commentId, sig: `${wf ? `${wf.id}:${wf.version}` : "-"}|${d}|${commentId ?? ""}` });
+    const n = wf ? notices.get(wf.id)?.at(-1) : undefined, notice = n ? { id: n.id, body: n.body, at: n.at } : null;
+    out.set(key, { wf, detail: d, commentId, notice, sig: `${wf ? `${wf.id}:${wf.version}` : "-"}|${d}|${commentId ?? ""}|${notice?.id ?? ""}` });
   }
   return out;
 }
@@ -131,7 +139,7 @@ export async function itemViews(db: Db, refs: readonly ItemRef[], seen?: Map<str
     const open = wf && status.step !== "Merged" && status.step !== "Closed" ? openQuestion(wf) : null;
     const asking = !!wf && (ASKING_STATES as readonly WorkflowState[]).includes(wf.state) && !!open;
     out.set(key, {
-      ref, key, url: at.commentId ? `${status.url}#issuecomment-${at.commentId}` : status.url, status: line, detail,
+      ref, key, url: at.commentId ? `${status.url}#issuecomment-${at.commentId}` : status.url, status: line, detail, notice: at.notice,
       result: asking && detail === "full" ? {
         key: `${wf!.id}|${wf!.recAt ?? ""}|${wf!.state}`,
         parts: wf!.plan.map((p) => ({ n: p.n, title: plain(p.title), state: p.state, ...(p.major ? { major: true } : {}) })),
@@ -304,11 +312,14 @@ export class ThreadResults {
     const { db, keys, rest } = this.#d;
     const at = new Date(this.#now()).toISOString();
     const changed: { v: ItemView; post: FollowPost }[] = [];
+    // A notice newer than the item's last post here (than the command, before its first) is posted once, after the status lines.
+    const notices: ItemView[] = [];
     for (const item of items) {
       const v = views.get(shortKey(item));
       if (!v) continue;
       const base = { targetHash: f.targetHash, repo: item.repo, number: item.number };
       const prev = posts.get(dc.followPostKey(base));
+      if (v.notice && v.notice.at > (prev?.at ?? f.at)) notices.push(v);
       const statusHash = hash(v.status);
       const msg = prev?.sealed ? keys.open(prev.sealed, sealAad(base))?.messageId : undefined;
       const save = async (p: FollowPost): Promise<void> => { await dc.saveFollowPosts(db, [p]); posts.set(dc.followPostKey(p), p); };
@@ -336,11 +347,22 @@ export class ThreadResults {
       if (prev?.statusHash === statusHash) continue;
       changed.push({ v, post: { ...base, statusHash, resultKey: prev?.resultKey ?? "", resultHash: prev?.resultHash ?? "", linkHash: prev?.linkHash ?? "", sealed: prev?.sealed ?? "", at } });
     }
-    if (!changed.length) return;
-    const content = changed.map(({ v }) => `**${v.key}** ${v.status}`).join("\n").slice(0, RESULT_MAX);
-    await sendToFollow(rest, f.target, { content, components: rows(changed.slice(0, 25).map(({ v }) => button(v.key, v.url))) });
-    await dc.saveFollowPosts(db, changed.map((c) => c.post));
-    for (const c of changed) posts.set(dc.followPostKey(c.post), c.post);
+    if (changed.length) {
+      const content = changed.map(({ v }) => `**${v.key}** ${v.status}`).join("\n").slice(0, RESULT_MAX);
+      await sendToFollow(rest, f.target, { content, components: rows(changed.slice(0, 25).map(({ v }) => button(v.key, v.url))) });
+      await dc.saveFollowPosts(db, changed.map((c) => c.post));
+      for (const c of changed) posts.set(dc.followPostKey(c.post), c.post);
+    }
+    if (!notices.length) return;
+    // Where only the status may show, the notice says only that the work waits.
+    await sendToFollow(rest, f.target, { content: notices.map((v) => `**${v.key}** ${v.detail === "full" ? plain(v.notice!.body) : t("Waiting for a Task Runner")}`).join("\n").slice(0, RESULT_MAX) });
+    // Each item's post is stamped now, so the notice is behind it.
+    const stamped = notices.flatMap((v) => {
+      const p = posts.get(dc.followPostKey({ targetHash: f.targetHash, repo: v.ref.repo, number: v.ref.number }));
+      return p ? [{ ...p, at }] : [];
+    });
+    await dc.saveFollowPosts(db, stamped);
+    for (const p of stamped) posts.set(dc.followPostKey(p), p);
   }
 
   /** The full result when it fits, else Haiku's summary, else the result cut to fit; kept by `resultHash`. */
