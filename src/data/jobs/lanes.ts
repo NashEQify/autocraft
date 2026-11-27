@@ -4,7 +4,7 @@ import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { itemsStartedSince, limitResets } from "./cross.ts";
 import { loadHeldLeaseKeys } from "./leases.ts";
-import { RUNNER_STOPPED } from "./fragments.ts";
+import { CALL_WAIT_LIMIT, RUNNER_STOPPED } from "./fragments.ts";
 import { loadLiveJobs } from "./queue.ts";
 import { approvedOf, nowIso, numberOf } from "./sql.ts";
 import type { EndedJob, FpRecord, JobState, LaneInputs, LaneRun, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow, WorkflowFailure } from "./types.ts";
@@ -141,7 +141,8 @@ export async function claimMark(db: Db, name: string, nowMs: number, minGapMs: n
 
 /**
  * The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs`, that ended after `since`, oldest first.
- * A job the runner stopped and one whose write the pacing held back are left out, as the failure streaks leave them out.
+ * A job the runner stopped and one whose write the pacing held back are left out, as the failure streaks leave them out; so are a job stopped
+ * at its step's deadline and one whose model call no Task Runner took in time: they say a Task Runner was away, not that the step fails.
  */
 export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number: number }[], since: string, steps: readonly string[]): Promise<LaneRun[]> {
   if (!refs.length || !steps.length) return [];
@@ -149,7 +150,11 @@ export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number
   const rows = await q.all(q.k.selectFrom("jobs").select((eb) => ["repo", "step", "id", "state", "ended_at", numberOf(db).as("number")])
     .where("requested_by", "=", PIPELINE_USER).where("ended_at", ">", since).where("state", "in", ["done", "failed"])
     .where((eb) => kx.inList(db, eb.ref("step"), steps)).where((eb) => kx.inList(db, eb.ref("repo"), [...new Set(refs.map((r) => r.repo))]))
-    .where((eb) => eb.and([approvedOf(db, eb), eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED), eb.not(kx.like(db, eb.fn.coalesce("error", eb.val("")), eb.val("write paced:%")))]))
+    .where((eb) => {
+      const error = eb.fn.coalesce("error", eb.val(""));
+      return eb.and([approvedOf(db, eb), eb(error, "<>", RUNNER_STOPPED), eb(error, "<>", CALL_WAIT_LIMIT),
+        ...["write paced:%", "stopped: ran past %", "stopped: no progress for %"].map((p) => eb.not(kx.like(db, error, eb.val(p))))]);
+    })
     .orderBy("id"));
   const wanted = new Set(refs.map((r) => `${r.repo}#${r.number}`));
   return rows.flatMap((r) => {

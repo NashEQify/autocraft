@@ -53,11 +53,14 @@ export function workflowOf(r: WorkflowRow): ItemWorkflow {
 }
 
 const factOf = (w: ItemWorkflow, own: boolean, goOn: string | null): WorkflowFact => {
-  const dropped = w.plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase());
+  const gone = w.plan.filter((p) => p.state === "dropped");
+  const dropped = gone.filter((p) => !p.premerge).map((p) => p.title.toLowerCase());
+  // Only a person who settles an approved merge overrules a pre-merge finding (G2).
+  const droppedFindings = w.approvedBy === null ? [] : gone.filter((p) => p.premerge).map((p) => ({ title: p.title.toLowerCase(), head: p.droppedAt ?? null }));
   return {
     id: w.id, entry: w.entry, approved: w.approvedBy !== null, approvedBy: w.approvedBy, startedBy: w.startedBy, startedAt: w.startedAt, weight: w.weight, state: w.state, own,
     since: goOn !== null && goOn > w.startedAt ? goOn : w.startedAt, reviewAskedAt: w.reviewAskedAt, baseHead: w.baseHead,
-    ...(dropped.length ? { dropped } : {}),
+    ...(dropped.length ? { dropped } : {}), ...(droppedFindings.length ? { droppedFindings } : {}),
   };
 };
 

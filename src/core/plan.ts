@@ -108,8 +108,13 @@ export type WorkflowFact = {
   startedAt: string;
   /** False on an implementation PR, which carries the workflow of its issue. */
   own: boolean;
-  /** The lower-case titles of the parts a person dropped from its plan; absent when none. */
+  /** The lower-case titles of the parts a person dropped from its plan, but the pre-merge review's findings; absent when none. */
   dropped?: string[];
+  /**
+   * The lower-case titles of the pre-merge findings a person dropped, which overrule them at the PR's head: only on a workflow approved for merge,
+   * and only while the head is the one they were dropped at or follows it through our own pushes (an accepted push of the author ends them).
+   */
+  overruled?: string[];
 };
 
 /** The state of an item's latest workflow when none is live (src/workflow/types.ts WorkflowState). Each means hands off (done: an open PR whose workflow ended with an answer that runs nothing): not even the auto path takes the item up again until someone starts it. */

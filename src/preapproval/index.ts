@@ -631,10 +631,10 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     }
     const all = findingsOf(pm);
     // On the leg of a PR approved for merge only blocking defects stop it; the others are filed as follow-ups (core/decide.ts) and it merges.
-    // A defect a person dropped from the workflow's plan stops nothing: they overruled it.
+    // A defect a person dropped from the workflow's plan at this head, or at one our own pushes led here from, stops nothing: they overruled it.
     const wf = all.some((x) => x.severity === "defect") ? (await factOf())?.workflow : undefined;
-    const overruled = wf?.dropped?.length ? stoppingDefects(all, !!wf.approved).length - stoppingDefects(all, !!wf.approved, wf.dropped).length : 0;
-    const defects = all.some((x) => x.severity === "defect") ? stoppingDefects(all, !!wf?.approved, wf?.dropped).length : 0;
+    const overruled = wf?.overruled?.length ? stoppingDefects(all, !!wf.approved).length - stoppingDefects(all, !!wf.approved, wf.overruled).length : 0;
+    const defects = all.some((x) => x.severity === "defect") ? stoppingDefects(all, !!wf?.approved, wf?.overruled).length : 0;
     if (defects) {
       const found = `the pre-merge review found ${defects} defect${defects === 1 ? "" : "s"}`;
       // Safe fixes get up to PREMERGE_FIX_ROUNDS fix-up rounds, whose pushes are our own; a defect that comes back or what is left after the last round is a person's.

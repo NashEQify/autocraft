@@ -7,4 +7,4 @@ export * from "./lanes.ts";
 export * from "./views.ts";
 export * from "./stats.ts";
 export type * from "./types.ts";
-export { RUNNER_STOPPED } from "./fragments.ts";
+export { CALL_WAIT_LIMIT, RUNNER_STOPPED } from "./fragments.ts";

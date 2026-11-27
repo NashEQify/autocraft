@@ -84,7 +84,7 @@ function entryOf(f: PrFacts, plan: ReturnType<typeof decidePr>, title: string, p
   if (x.premerge) {
     const all = findingsOf(premergeRow);
     const approved = !!f.workflow?.approved;
-    const defects = stoppingDefects(all, approved, f.workflow?.dropped), followUps = approved ? followUpDefects(all) : [];
+    const defects = stoppingDefects(all, approved, f.workflow?.overruled), followUps = approved ? followUpDefects(all) : [];
     premerge = { state: x.premerge, defects, unknownClaims: claimsOf(premergeRow).filter((c) => c.impact === "unknown"), followUps, minor: all.length - defects.length - followUps.length, error: premergeRow?.error ?? null };
   }
   return {

@@ -1191,7 +1191,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
         if (!warned.has(key)) { warned.add(key); log(`autopilot: ${stepName}: failed ${b.failures} times in a row; retry at ${hhmm(b.until)}`); }
         return null;
       }
-      if (!poll && await unchangedSinceIdle(db, stepName, repo, fp, pr)) { note(stepName, "nothing to do: its input has not changed since the last run"); return null; }
+      if (!poll && await unchangedSinceIdle(db, stepName, repo, fp, pr, refs !== undefined)) { note(stepName, "nothing to do: its input has not changed since the last run"); return null; }
       if (lane.minGapMs) {
         const last = await lastJobEnd(db, stepName, repo, AUTOPILOT_USER);
         const next = last ? Date.parse(last.endedAt) + lane.minGapMs : 0;
@@ -1304,10 +1304,14 @@ async function skippedLeaseHeld(db: Db, keys: string[] | null): Promise<boolean>
   return keys === null ? held.size > 0 : keys.some((k) => held.has(k));
 }
 
-/** True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it. */
-async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp: string, lane: number | null = null): Promise<boolean> {
+/**
+ * True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it.
+ * A job proposed for its items (`byRefs`) whose calls were only withdrawn for want of a taker is not idle: the gate on its items' takers already
+ * holds it back while nobody can take them, and the same Task Runner coming back leaves the taker signature as it was.
+ */
+async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp: string, lane: number | null = null, byRefs = false): Promise<boolean> {
   const last = await lastJobEnd(db, step, repo, AUTOPILOT_USER, lane);
-  if (!last || last.state !== "done" || !(wasIdle(last) || onlyUntaken(last))) return false;
+  if (!last || last.state !== "done" || !(wasIdle(last) || (!byRefs && onlyUntaken(last)))) return false;
   // A job that skipped items another job was working retries once no running job holds a lease on any of them. While one does, the step stays parked, so the planner does not queue it in a loop.
   // Skips for want of a taker do not count: such a step is woken by the taker signature in its fingerprint.
   const leaseKeys = leaseSkipKeys(last.lease_skip_keys);

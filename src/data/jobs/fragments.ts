@@ -51,6 +51,8 @@ export const itemsSumSince = (eb: kx.AnyEb, step: string, sinceRef: kx.Ex): Expr
 
 /** Error text of jobs a runner stop or restart ended without resuming them; the planner does not count them as failures. */
 export const RUNNER_STOPPED = "The runner stopped while this job ran; start it again if needed.";
+/** Error text of a job whose model call no Task Runner took within the queue's wait limit (src/remote/calls.ts). */
+export const CALL_WAIT_LIMIT = "no user-local helper took the call in time";
 
 /** The items one job handled: `{ jobId }`, for `mirror.loadShown` in the same statement as the job's items. */
 registerKeySource<{ jobId: number }>("jobs.itemsOfJob", (db, a) => queryDb(db).k.selectFrom("job_items").select(["repo", "number"]).where("job_id", "=", a.jobId));

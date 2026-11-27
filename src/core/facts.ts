@@ -322,7 +322,9 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const acts = { act: d.act, identity: c.identity, now, soon: (at: number | undefined) => refresh.soon(ref, at) };
   base.implementation = implementation ? { issue: implementation.issue, state: implementation.state, revisedHeads: implementation.revisedHeads,
     ...queuerIn(d.workflow.actors.get(d.workflow.ofPr.get(ref)?.id ?? -1), repo, acts) } : null;
-  base.workflow = wfFact;
+  // The pre-merge findings a person dropped overrule the review at the head they were dropped at and at the heads our own pushes made from it.
+  const overruled = head && wfFact?.droppedFindings ? wfFact.droppedFindings.filter((x) => x.head !== null && pushChainOf(patch.pushes, head).includes(x.head)).map((x) => x.title) : [];
+  base.workflow = wfFact && overruled.length ? { ...wfFact, overruled } : wfFact;
   // The merge approval's own count of our pushes and tries starts when its person approved it or last went on with it.
   const owned = wfFact && (wfFact.approved || wfFact.entry === "merge") ? (wfRow?.approvedAt && wfRow.approvedAt > wfFact.since ? wfRow.approvedAt : wfFact.since) : null;
   if (owned !== null && head) base.ownPushes = diffPushesSince(ours, head, owned);
@@ -500,7 +502,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.followUps = { heads: pmTries.tried, reviewHeads: rvTries.tried, issue, ...(untils.length ? { retry: { heads: pmTries.waiting, reviewHeads: rvTries.waiting, at: Math.min(...untils) } } : {}) };
   }
   if (pmRow) {
-    const all = findingsOf(pmRow), approved = !!wfFact?.approved, dropped = wfFact?.dropped ?? [];
+    const all = findingsOf(pmRow), approved = !!wfFact?.approved, dropped = base.workflow?.overruled ?? [];
     const defects = stoppingDefects(all, approved, dropped), followUps = approved ? followUpDefects(all).length : 0;
     base.premerge = { head: qh, at: pmRow.at, tries: pmRow.tries, hasFindings: pmRow.findings !== null, unsure: pmRow.unsure !== 0, defects: defects.length, followUps, fixesSafe: parseFixes(JSON.stringify(defects.map(defectFix))).length === defects.length, minor: all.length - defects.length - followUps, error: pmRow.error ?? null };
     if (defects.length) {

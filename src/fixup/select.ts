@@ -96,7 +96,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
       // Only a branch we can push to gets a pre-merge round; otherwise the step leaves it alone.
       if (!f.pushable) continue;
       const row = await premergeAt(db, repo, f.number, head);
-      const defects = stoppingDefects(findingsOf(row), !!f.workflow?.approved);
+      const defects = stoppingDefects(findingsOf(row), !!f.workflow?.approved, f.workflow?.overruled);
       fix.push({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map(defectFix))), attempt: 1, model: row?.model ?? null, source: "premerge" });
     } else {
       const r = reads.reviews.get(`${repo}#${f.number}@${head}`);
@@ -124,7 +124,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
         if (o && w.operatorFix === o.id) list({ repo, number: f.number, head, reason: "an operator's instructions", fixes: [], attempt: w.attempt, model: null, source: "operator", operator: { id: o.id, instructions: o.instructions }, lint });
       } else if (source === "premerge") {
         const pm = await premergeAt(db, repo, f.number, head);
-        const defects = stoppingDefects(findingsOf(pm), !!f.workflow?.approved);
+        const defects = stoppingDefects(findingsOf(pm), !!f.workflow?.approved, f.workflow?.overruled);
         list({ repo, number: f.number, head, reason: "pre-merge review", fixes: parseFixes(JSON.stringify(defects.map(defectFix))), attempt: w.attempt, model: pm?.model ?? null, source: "premerge", lint });
       } else {
         const r = reads.reviews.get(`${repo}#${f.number}@${head}`);

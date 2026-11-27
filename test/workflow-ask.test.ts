@@ -23,6 +23,7 @@ import type { ItemWorkflow } from "../src/workflow/types.ts";
 import { legWait } from "../src/workflow/waits.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
 import { setFeature } from "../src/build/features.ts";
+import { savePremerge } from "../src/premerge/store.ts";
 import { factsOf, prng, randomPrRows, rnd } from "./random-pr.ts";
 import { OPERATOR, T0, T1, untilQuiet, world, type World } from "./world-db.ts";
 
@@ -289,6 +290,25 @@ test("a merge entry whose verification failed is asked once, after its pre-merge
     else assert.ok(due.some((a) => a.kind === "fixup" && a.params?.source === (fixable ? "premerge" : "operator")));
     w.close();
   }
+});
+
+test("the word merge past a pre-merge review that failed for good hands the approved PR over, which merges once verified on green CI", async () => {
+  const w = current = await (await (await world()).repo(["merge", "push"])).acting(MAINT, ANN);
+  await w.pr(1, { label: "feature" });
+  await say(w, "review and merge");
+  await w.review(1);
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date().toISOString() }));
+  await settle(w);
+  await savePremerge(w.db, { repo: "app", number: 1, head: "sha1", at: new Date().toISOString(), error: "no answer", final: true });
+  await settle(w);
+  assert.equal((await wf(w)).state, "blocked");
+  await pause();
+  await say(w, "merge");
+  await settle(w);
+  assert.equal(await leg(w), "queued");
+  assert.deepEqual((await actions(w)).filter((a) => a === "verify" || a === "merge"), ["verify"]);
+  await w.verified(1);
+  assert.ok((await actions(w)).includes("merge"));
 });
 
 /** `text` said, and the review at sha1 (or a new one) failed for good. */

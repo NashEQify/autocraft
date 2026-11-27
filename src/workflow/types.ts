@@ -45,6 +45,8 @@ export type PlanPart = {
   premerge?: true;
   /** Who dropped it from the plan. */
   droppedBy?: string;
+  /** The PR head it was dropped at: a dropped pre-merge finding stays overruled only while the PR's head is that one or follows it through our own pushes. */
+  droppedAt?: string;
   state: "planned" | "dropped" | "fixed";
 };
 

@@ -15,6 +15,7 @@ import { scrub } from "../runner/scrub.ts";
 import { remoteToolRows } from "../agents/tools.ts";
 import { loadFreshWrites, permKey } from "../data/access/index.ts";
 import { setting } from "../data/control/index.ts";
+import { CALL_WAIT_LIMIT } from "../data/jobs/index.ts";
 import * as runners from "../data/runners/index.ts";
 import { LEASE_IDLE_MS } from "../data/runners/index.ts";
 import { ERROR_MAX } from "../data/inference/types.ts";
@@ -1018,7 +1019,7 @@ async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceSer
         }
         // Only time in the queue counts; a helper running the call is not waiting.
         if (opts.maxWaitMs !== undefined && queued.queuedMs + (queued.queuedSince === null ? 0 : nowMs - queued.queuedSince) >= opts.maxWaitMs) {
-          if (await withdrawCall(db, id, "no helper took the call in time", ["queued"])) throw new WaitLimitError("no user-local helper took the call in time");
+          if (await withdrawCall(db, id, "no helper took the call in time", ["queued"])) throw new WaitLimitError(CALL_WAIT_LIMIT);
           continue;
         }
         if (nowMs - lastLog >= allocation.logEveryMs) {

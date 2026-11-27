@@ -16,8 +16,12 @@ export type WorkflowFact = {
   reviewAskedAt: string | null;
   /** The PR head the workflow last accepted (`base_head`); for an issue, the implementation head its files were shown at. */
   baseHead: string | null;
-  /** The lower-case titles of the parts a person dropped from its plan; absent when none. */
+  /** The lower-case titles of the parts a person dropped from its plan, but the pre-merge review's findings; absent when none. */
   dropped?: string[];
+  /** The pre-merge findings a person dropped from the plan of a workflow approved for merge: lower-case title and the head they were dropped at; absent when none. */
+  droppedFindings?: { title: string; head: string | null }[];
+  /** The lower-case titles of `droppedFindings` that still overrule the pre-merge review at the PR's head (the PR facts set it, src/core/facts.ts). */
+  overruled?: string[];
 };
 /** Live workflows of PRs, by the PR. */
 export type PrWorkflows = Map<RefKey, ItemWorkflow>;
