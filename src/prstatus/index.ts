@@ -158,15 +158,15 @@ const isWorkflowText = (line: string | null | undefined): boolean => !!line?.inc
 export const WAIT_FLIP_MS = 60 * 60_000;
 
 /**
- * Whether two comment texts differ only in their head line flipping between "Running: <step>" and "Waiting for <login>'s Task Runner
- * (<why>)": a step that waits for a Task Runner is claimable for a moment each time the runner reports, which flips the line without
+ * Whether two comment texts differ only in their head line flipping between "Running: <step>" and "Waiting for a Task Runner" (or
+ * "Waiting for <login>'s Task Runner (<why>)", which comments already on GitHub may carry): a step that waits for a Task Runner is claimable for a moment each time the runner reports, which flips the line without
  * any change an editor of the comment needs to see.
  */
 export function onlyWaitFlip(prev: string, line: string): boolean {
   const split = (s: string): [string, string] => { const i = s.indexOf("\n\n"); return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i)]; };
   const [a, rest] = split(prev), [b, rest2] = split(line);
   const running = (h: string) => h.startsWith("**Running: ");
-  const waiting = (h: string) => /^\*\*Waiting for .+'s Task Runner \(.+\)\*\*$/.test(h);
+  const waiting = (h: string) => /^\*\*Waiting for (?:a Task Runner|.+'s Task Runner \(.+\))\*\*$/.test(h);
   return rest === rest2 && a !== b && ((running(a) && waiting(b)) || (waiting(a) && running(b)) || (waiting(a) && waiting(b)));
 }
 
@@ -212,7 +212,8 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
   if (!refs.length) return out;
   const wfs = refs.flatMap(({ repo, number }) => { const w = inputs.get(repo)!.started.get(number); return w ? [w.wf] : []; });
   const [statuses, { batches, answered, quiet }, waits] = await db.together(() => Promise.all([
-    commentStatuses(db, refs), loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs),
+    // The comment is public: it names no person's Task Runner (waits.ts WaitReader).
+    commentStatuses(db, refs), loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs, Date.now(), { shown: false }),
   ]));
   for (const { repo, number: n } of refs.sort((a, b) => a.number - b.number)) {
     const key = `${repo}#${n}`, { inScope, started } = inputs.get(repo)!;

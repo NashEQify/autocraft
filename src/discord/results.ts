@@ -110,7 +110,7 @@ export async function itemViews(db: Db, refs: readonly ItemRef[], seen?: Map<str
   if (!refs.length) return out;
   const [g, statuses] = await Promise.all([seen ?? glances(db, refs), commentStatuses(db, refs)]);
   const wfs = refs.flatMap((r) => g.get(shortKey(r))?.wf ?? []);
-  const [extras, waits, unposted] = await Promise.all([loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs), notPostedLines(db, wfs)]);
+  const [extras, waits, unposted] = await Promise.all([loadStatusExtras(db, refs, wfs.map((w) => w.id)), legWaits(db, wfs, Date.now(), { shown: false }), notPostedLines(db, wfs)]);
   for (const ref of refs) {
     const key = shortKey(ref);
     const status = statuses.get(key), at = g.get(key);
