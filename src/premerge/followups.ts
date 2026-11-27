@@ -1,7 +1,7 @@
 // The follow-up issue of a PR a maintainer approved for merge: what its reviews found that does not stop the merge, filed so that a
 // maintainer finds it in the item queue like any issue. Two sources: the Opus review's fixes and hold that do not block
-// (src/core/review-blocking.ts), which are not made, and the pre-merge review's defects that do not block (src/premerge/types.ts
-// followUpDefects). One issue per PR, opened by the first filing; a later head's or source's follow-ups are a comment on it. Runs the
+// (src/core/review-blocking.ts), which are not made, with its code-incomplete claims that no fix covers (followUpClaims), and the
+// pre-merge review's defects that do not block (src/premerge/types.ts followUpDefects). One issue per PR, opened by the first filing; a later head's or source's follow-ups are a comment on it. Runs the
 // Plan's `followups` actions (src/core/decide.ts followUpsDue, reviewFollowUpsDue); the PR's merge waits for the try, not for its success.
 //
 // A head's row (premerge_followups for the pre-merge review's head, review_followups for the reviewed head) is written in state
@@ -15,7 +15,7 @@ import { CLI_BY, type By } from "../core/gates.ts";
 import { planned } from "../core/select.ts";
 import { claimFollowup, deferFollowup, loadFollowupRows, loadPremerge, loadReviewsAt, settleFollowup, unsentTries, type FollowupSource, type ReviewRow } from "../data/review/index.ts";
 import { unsentAsk } from "../core/rules.ts";
-import { reviewFollowUps } from "../core/review-blocking.ts";
+import { followUpClaims, reviewFollowUps } from "../core/review-blocking.ts";
 import { partTitle } from "../workflow/work.ts";
 import { loadShown } from "../data/mirror/index.ts";
 import type { Db } from "../db/index.ts";
@@ -24,9 +24,11 @@ import { createIssue, ghFollowupComment, IssueError, type Writer } from "../gith
 import { isUnsent } from "../github/unsent.ts";
 import { issueText, issueTitle, refusal } from "../postmerge/template.ts";
 import { CARRIED } from "../review/carry.ts";
+import { postSourcesOf, type PostSource } from "../review/post-source.ts";
 import { pipelineLogin } from "../review/discussion.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { findingsOf, premergeAt } from "./store.ts";
+import { claimFindings } from "./parse.ts";
 import { followUpDefects, type PremergeFinding } from "./types.ts";
 
 export const ACTOR = "premerge-followup";
@@ -68,6 +70,13 @@ export const reviewEntries = (r: Pick<ReviewRow, "verdict" | "fixes" | "workflow
   ];
 };
 
+/**
+ * The Opus review's code-incomplete claims that it did not turn into a fix (src/core/review-blocking.ts followUpClaims), worded as the
+ * pre-merge review words the same claim, so a gap both reviews raised is listed once. `src`: the review at the head, or the one a carried
+ * review came from. These are filed whether or not a pre-merge call ran: a carried pre-merge review reads no claims.
+ */
+const claimEntries = (src: PostSource | null): FollowupEntry[] => (src ? premergeEntries(claimFindings(followUpClaims({ ...src, verdict: src.sourceVerdict }), [])) : []);
+
 /** The follow-ups of one head, numbered: where, what to change or what goes wrong, and why it does not stop the merge. */
 export function followupBody(pr: number, head: string, source: FollowupSource, fs: readonly FollowupEntry[], first: boolean): string {
   const found = source === "review" ? "found these changes to make" : "found these defects";
@@ -105,7 +114,9 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
     const rv = source === "review" ? [...(await loadReviewsAt(db, [{ repo, number, head: rowHead }])).values()][0] ?? null : null;
     const pm = source === "premerge" ? await premergeAt(db, repo, number, head) : null;
     const row = rv ?? pm;
-    const all = rv ? reviewEntries(rv, dropped) : pm ? premergeEntries(findingsOf(pm)) : [];
+    const sources = await postSourcesOf(db, [ref]);
+    const claimsAt = async (h: string) => claimEntries(await sources(repo, number, h));
+    const all = rv ? [...reviewEntries(rv, dropped), ...await claimsAt(rowHead)] : pm ? premergeEntries(findingsOf(pm)) : [];
     if (!all.length) { await skip(`the ${source === "review" ? "review" : "pre-merge review"} at the head has none`); continue; }
     const g = await guard(db, { repo, number }, { kind: "followups", head, source }, by);
     if ("refused" in g) { await skip(g.refused); continue; }
@@ -119,7 +130,8 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
       loadPremerge(db, pmBefore.map((x) => ({ repo, number, head: x.head_oid }))),
       loadReviewsAt(db, rvBefore.map((x) => ({ repo, number, head: x.head_oid }))),
     ]);
-    const sent = new Set([...[...earlierPm.values()].flatMap((r) => premergeEntries(findingsOf(r))), ...[...earlierRv.values()].flatMap((r) => reviewEntries(r, dropped))].map(entryKey));
+    const earlierClaims = (await Promise.all(rvBefore.map((x) => claimsAt(x.head_oid)))).flat();
+    const sent = new Set([...[...earlierPm.values()].flatMap((r) => premergeEntries(findingsOf(r))), ...[...earlierRv.values()].flatMap((r) => reviewEntries(r, dropped)), ...earlierClaims].map(entryKey));
     const fs = all.filter((x) => !sent.has(entryKey(x)));
     const prev = [...mine, ...other].filter((x) => x.issue_number !== null && x.url !== null).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).at(-1);
     const shown = await loadShown(db, [{ repo, number }, ...(prev ? [{ repo, number: prev.issue_number! }] : [])]);

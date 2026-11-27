@@ -56,7 +56,7 @@ function entries(text: string, ref: string): { entries: Entry[]; searched: strin
  * The defects that claims make. A claim whose code is wrong blocks: the PR does not do what it says. A claim that holds in the code the
  * PR changes but not on other paths or in edge cases does not: on a PR approved for merge it is filed as a follow-up.
  */
-function claimFindings(claims: Claim[], files: readonly string[]): PremergeFinding[] {
+export function claimFindings(claims: readonly Claim[], files: readonly string[]): PremergeFinding[] {
   return claims.filter((c) => c.impact === "code-wrong" || c.impact === "code-incomplete").map((c) => {
     const at = evidenceAt(c.evidence, files), file = at && safePath(at.path) ? at.path : "(description)";
     const wrong = c.impact === "code-wrong";

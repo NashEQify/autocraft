@@ -11,7 +11,8 @@ import { auditIdentity, githubIdentity } from "../github/identity.ts";
 import { ownerOf } from "../owners.ts";
 import { planned, runnable } from "../core/select.ts";
 import { isQueueState, type PrFacts } from "../core/plan.ts";
-import { fixesToMake, reviewFollowUps } from "../core/review-blocking.ts";
+import { fixesToMake, followUpClaims, reviewFollowUps } from "../core/review-blocking.ts";
+import { claimFindings } from "../premerge/parse.ts";
 import { mayRun } from "../core/authority.ts";
 import { partTitle } from "../workflow/work.ts";
 import { CLI_BY, mergeAllowed, pushAllowed, type By } from "../core/gates.ts";
@@ -83,13 +84,14 @@ async function postsDue(db: Db, repo: string, by: By): Promise<{ due: PostCandid
 }
 
 /**
- * On a PR approved for merge, what the review's post lists apart: the fixes made before the merge, and the fixes and hold that do not
- * block it and are filed as a follow-up issue (src/core/review-blocking.ts). Null elsewhere, or when nothing is filed.
+ * On a PR approved for merge, what the review's post lists apart: the fixes made before the merge, and the fixes, hold and claims
+ * covered only in part that do not block it and are filed as a follow-up issue (src/core/review-blocking.ts). Null elsewhere, or when nothing is filed.
  */
 function postFollowUps(o: PostSource, f: PrFacts): { fixes: string[]; later: string[]; notFiled: string | null } | null {
   if (!f.workflow?.approved) return null;
   const fu = reviewFollowUps({ verdict: o.sourceVerdict, fixes: o.fixes, hold: o.hold, blockedBy: o.blockedBy }, f.workflow.dropped);
-  const later = [...fu.fixes.map(partTitle), ...(fu.hold ? [fu.hold] : [])];
+  const claims = claimFindings(followUpClaims({ ...o, verdict: o.sourceVerdict }), []).map((x) => x.title);
+  const later = [...fu.fixes.map(partTitle), ...(fu.hold ? [fu.hold] : []), ...claims];
   if (!later.length) return null;
   // The same gate as the filing itself (src/core/decide.ts reviewFollowUpsDue): a refused one says why.
   const may = mayRun({ facts: f, action: { kind: "followups", head: f.head } }, "pipeline");

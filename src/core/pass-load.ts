@@ -92,6 +92,7 @@ export type PrPassData = {
   settled: Map<RefKey, Settled>;
   /** Tiers of the authors of the PRs in scope. */
   tiers: Awaited<ReturnType<typeof tiersOf>>;
+  /** The review texts of PRs whose latest review is carried or that a person approved for merge (their follow-up claims). */
   postSource: Awaited<ReturnType<typeof postSourcesOf>>;
   /** The reviews that may carry to the PR's head (`carryHead`), whether or not they are stale. */
   carried: Map<RefKey, Carried>;
@@ -224,7 +225,7 @@ export async function loadPrPass(db: Db, keys: KeySource, o: PrPassOptions, endW
   const [tasks, ownCommits, premerge, membersInScope, settled, tiers, postSource, reads, act] = await Promise.all([
     loadTaskStates(db, patchTaskIds(patches)), loadOwnCommits(db, pairs),
     loadPremerge(db, entryHeads), loadInScope(db, members), loadSettled(db, rows.scoped.map(asRef), o.base.run), tiersOf(db, authors),
-    postSourcesOf(db, rows.all.filter((key) => review.latest.get(key)?.mode === CARRIED)), loadBlockerReads(db, blockers),
+    postSourcesOf(db, rows.all.filter((key) => review.latest.get(key)?.mode === CARRIED || workflow.live.get(key)?.approved)), loadBlockerReads(db, blockers),
     actors.length ? loadActFacts(db, actors) : Promise.resolve(new Map<PermKey, ActFacts>()),
   ]);
   for (const k of membersInScope) data.inScope.add(k);

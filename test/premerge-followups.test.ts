@@ -193,3 +193,33 @@ test("the posted review of an approved PR tells the fixes made before the merge 
   assert.match(none, /Follow-ups, to be filed as an issue:\n- Clearer name[\s\S]*\nRecommendation: merge after CI and checks pass/);
   assert.match(some, /^Small fixes needed:[\s\S]*Fixes before the merge:\n- Check the bound\n\nFollow-ups, to be filed as an issue:\n- Clearer name[\s\S]*\nRecommendation: merge after the fixes above; the follow-ups/);
 });
+
+test("an approved PR with a carried pre-merge review files the review's code-incomplete claim that no fix covers, and not the one our fix-up made", async () => {
+  const w = await unstarted(false);
+  await run(w, "fix-up");
+  await settle(w);
+  // The review at sha1: one claim names no fix; the other's fix is the review's own fix, which our fix-up makes before the approval.
+  const made = { file: "src/open.rs", change: "queue the panel's documents too" };
+  const claim = (text: string, fix?: typeof made) => ({ claim: text, status: "contradicted", evidence: "src/open.rs:88 orders the queue", impact: "code-incomplete", ...(fix ? { fix } : {}) });
+  const fixes: Fix[] = [{ ...made, title: "Queue the panel", blocking: { class: null, why: "The other paths open as on the base branch." } }];
+  await reviewed(w, 1, { head: "sha1", verdict: "take-fix", fixes });
+  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ claims: JSON.stringify([claim("documents open in request order"), claim("the panel keeps the order", made)]) }));
+  await settle(w);
+  await ourPush(w, "sha1", "sha2");
+  // The verdict carries over the checked fix-up, and so does the pre-merge review: no model reads sha2.
+  await w.db.run(w.db.k.insertInto("main.opus_reviews").values({ repo: "app", number: 1, head_oid: "sha2", run_id: "carry", at: new Date(Date.now() + 2000).toISOString(), model: "carried", mode: "carried", base_head: "sha1", verdict: "take", reason: "carried from sha1", sure: 1 }));
+  await (await w.verified(1)).premerge(1, "clean");
+  await w.db.run(w.db.k.updateTable("main.premerge_reviews").set({ model: "carried" }).where("head_oid", "=", "sha2"));
+  await settle(w);
+  await run(w, "merge");
+  await settle(w);
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "followups" && a.params?.source === "review"), (await kinds(w)).join(", "));
+  const { s, posted } = await file(w);
+  assert.deepEqual(s.filed, ["app#1"]);
+  assert.match(posted, /documents open in request order/);
+  assert.doesNotMatch(posted, /panel keeps the order/);
+  await settle(w);
+  assert.equal((await kinds(w)).includes("followups"), false);
+  await mergesAsPerson(w, "sha2");
+  w.close();
+});

@@ -34,7 +34,7 @@ import { standingFor } from "./standing.ts";
 import { mergeWaits, workflowGate } from "./may.ts";
 import type { WorkflowFact } from "../data/workflow/types.ts";
 import { settlerOf } from "../workflow/work.ts";
-import { fixesToMake, reviewFollowUps, verdictToAct } from "./review-blocking.ts";
+import { fixesToMake, followUpClaims, reviewFollowUps, verdictToAct } from "./review-blocking.ts";
 import { inStep, loadPassBase, loadPrPass, type EndWave, type PassBase, type PrPassData, type SharedDupes } from "./pass-load.ts";
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import type { Db } from "../db/index.ts";
@@ -413,9 +413,13 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const chain = take ? pushChainOf(patch.pushes, qh) : [qh];
   if (!mx) {
     const unsure = take && (!latest!.sure || chain.some((h) => d.review.unsureHeads.has(`${ref}@${h}`)));
+    // The claims come from the review a carried one came from; the filing of that review's head listed them already.
+    const source = approved ? await d.postSource(repo, number, qh) : null;
+    const claimsOwed = source && (source.reviewedAt === qh || !(d.review.reviewFollowups.get(ref) ?? []).some((x) => x.head_oid === source.reviewedAt))
+      ? followUpClaims({ ...source, verdict: source.sourceVerdict }).length : 0;
     base.review = {
       head: qh, at: qAt, verdict: verdict!, unsure, reason: latest!.reason ?? "", fixes: fixes.length,
-      followUps: approved ? (({ fixes: x, hold }) => x.length + (hold ? 1 : 0))(reviewFollowUps({ ...latest!, hold: latest!.workflow?.hold, blockedBy: latest!.blocked_by }, wfFact?.dropped)) : 0,
+      followUps: approved ? (({ fixes: x, hold }) => x.length + (hold ? 1 : 0))(reviewFollowUps({ ...latest!, hold: latest!.workflow?.hold, blockedBy: latest!.blocked_by }, wfFact?.dropped)) + claimsOwed : 0,
       leadsToHead: !!head && (qh === head || pushChainOf(patch.pushes, head).includes(qh)),
       stale: c.stale.has(`${ref}@${qh}`), staleActionable: c.staleActionable.has(`${ref}@${qh}`),
     };
