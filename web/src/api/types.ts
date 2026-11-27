@@ -2223,7 +2223,7 @@ export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: strin
 export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean; };
 
 /** Why a queued model call waits, most specific first: picked by a user; waiting for the runner that holds its session; no runner ready for its tier; every ready runner is Manual only; every runner that may take it is busy; no ready runner's user can take calls on its repo; calls ahead of it. */
-export type ModelQueueWhyCode = "picked" | "session" | "bound" | "bound-off" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
+export type ModelQueueWhyCode = "picked" | "session" | "bound" | "bound-off" | "owner" | "owner-off" | "login" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
 
 /** One queued model call of the user-local inference mode, as GET /api/model-queue shows it to the signed-in user's role. */
 export interface ModelQueueCall {
@@ -2741,7 +2741,11 @@ export interface ItemConversation {
   canReply: boolean;
   /** AutoCraft is working: the running step's line. */
   working: string | null;
+  /** Work about the item that is queued, oldest first (the main conversation only). */
+  queued: ChatQueued[];
 }
+/** A queued job or model call about the item: `why` is the one line that says what holds it back, null when nothing known does. */
+export interface ChatQueued { id: string; title: string; since: string; why: string | null }
 /** Where AutoCraft is with an item, for the item header. */
 export type ItemChatState = "running" | "waiting" | "held" | "done" | "idle";
 /** `status` is the one line the item header shows; `next` is what follows (null when nothing does). `stamp` as for `ItemTrace`. */

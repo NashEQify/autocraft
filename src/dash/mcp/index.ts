@@ -36,6 +36,7 @@ import { loadLegPass, loadPrWorkflows } from "../../data/workflow/index.ts";
 import { loadQuiet } from "../../data/security/index.ts";
 import { loadUserRuns } from "../../data/inference/index.ts";
 import { loadHeldFixups } from "../../data/views/held-fixups.ts";
+import { queuedOfItems } from "../../runner/why-queued.ts";
 
 export const MCP_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LIST_MAX = 25;
@@ -175,7 +176,7 @@ const ITEM_HELP = "The item: a GitHub URL, repo#number or owner/repo#number.";
 export const WORKFLOW_READ_TOOLS = [
   {
     name: "get_item",
-    description: "One item's workflow as every surface shows it: where it stands, the open question (its recommendation, how to answer it, and who it asks: the item's starter and approver), who started, approved and holds it, the plan's parts and the latest commands sent. An item only the automatic merge rule started asks nobody: its state says why it stopped and what AutoCraft would do, and a yes runs that and takes the item over. Only for repositories switched to AutoCraft commands.",
+    description: "One item's workflow as every surface shows it: where it stands, the open question (its recommendation, how to answer it, and who it asks: the item's starter and approver), who started, approved and holds it, the plan's parts, the latest commands sent, and the queued jobs and model calls about it with what holds each back. An item only the automatic merge rule started asks nobody: its state says why it stopped and what AutoCraft would do, and a yes runs that and takes the item over. Only for repositories switched to AutoCraft commands.",
     inputSchema: { type: "object", additionalProperties: false, required: ["item"], properties: { item: { type: "string", description: ITEM_HELP } } },
     annotations: { readOnlyHint: true },
   },
@@ -322,7 +323,9 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   if (role !== "operator" && role !== "maintainer" && quiet.has(ref)) {
     return show(`${ref}: ${it.state}`, "item", { item: ref, kind: it.kind, title: it.title, state: it.state, link: link(env, itemPath(r.repo, r.number)), workflow: null, latestCommands: [] });
   }
-  const [wait, notPosted] = wf ? await Promise.all([legWait(env.db, wf), notPostedLine(env.db, wf)]) : [null, null];
+  const [wait, notPosted, queuedBy] = await Promise.all([wf ? legWait(env.db, wf) : null, wf ? notPostedLine(env.db, wf) : null, queuedOfItems(env.db, [r], { shown: role === "operator" || role === "maintainer" })]);
+  // Queued jobs and model calls about the item, with what holds each back, as the item page shows them.
+  const queued = (queuedBy.get(ref) ?? []).map((q) => ({ work: q.title, kind: q.kind, since: q.since, why: q.why }));
   const events = (on ? await eventsOf(env.db, wf!.repo, wf!.number) : said).slice(-10);
   const open = openQuestion(wf);
   const data = {
@@ -335,9 +338,11 @@ async function getWorkflowItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
       plan: wf.plan.map((p) => ({ n: p.n, title: p.title, state: p.state, major: p.major ?? false })),
     } : null,
     latestCommands: events.map((e) => ({ login: e.login, via: e.via, kind: e.kind, at: e.at, reply: e.line })),
+    queued,
   };
   const header = (open ? `${ref} waits for an answer from ${listText(open.to)}. Show your user the recommendation; send "yes" with command only if they agree, or what they want instead, with workflow.open.asked as asked.` : `${on ?? ref}: ${wf ? stateLine(wf, undefined, undefined, wait) : t("No workflow running.")}`)
-    + (notPosted ? ` ${notPosted}.` : "");
+    + (notPosted ? ` ${notPosted}.` : "")
+    + queued.map((q) => ` ${q.work} is queued${q.why ? `: ${q.why}` : ""}.`).join("");
   return show(on ? `${t("{ref} is part of the work on {on}.", { ref, on })} ${header}` : header, "item", data);
 }
 

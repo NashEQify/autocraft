@@ -4,6 +4,8 @@ import type { ItemRef, ModelQueueWhyCode } from "../../web/src/api/types.ts";
 import { orderedOf } from "./cands.ts";
 import { gating } from "./claim-class.ts";
 import { pickCounts } from "./picks-rules.ts";
+import { heldFor, startedOf } from "./started.ts";
+import { loginWaitIn, runnerWaitText, waitingOnIn, type RunnerWait } from "./takers.ts";
 import { runnerTakes } from "./rules.ts";
 import { skipsIn, taskOfStep, TASK_CHOICES } from "./my-tasks.ts";
 import { itemsFit, type ItemFilter } from "./task-items.ts";
@@ -27,11 +29,15 @@ export const readyIn = (v: RemoteView): ReadyRunner[] =>
 /** What whyWaiting reads of a queued call. `picked`: its live pick (login null when the viewer may not see it). */
 export type WhyCall = { tier: Tier; promptId: string; step: string; repos: readonly string[]; refs?: readonly ItemRef[]; followUp: boolean; picked: { login: string | null } | null;
   /** The user whose own runners alone take it; `shown`: the viewer may see the login. */
-  bound?: { login: string; shown: boolean } | null };
+  bound?: { login: string; shown: boolean } | null;
+  /** The one person whose runner it waits for (waitOf); `shown` as for `bound`. */
+  waits?: ({ kind: "owner-off" } & RunnerWait | { kind: "owner"; login: string } | { kind: "login"; login: string; renewsAt: number }) & { shown: boolean } | null };
 
 /**
  * Why a queued call waits, most specific first: its pick; the runner that holds its session; the user it is bound to (their
- * runners not ready, busy or next); no ready runner for its tier;
+ * runners not ready, busy or next); the people whose started work it is, whose runners alone take it and cannot claim now
+ * (src/remote/takers.ts waitingOn); the one of them it is held for (started.ts heldForOwner); the harness login every runner
+ * that takes it waits to renew (takers.ts loginWaitIn); no ready runner for its tier;
  * every such runner Manual only; no such runner's user may take it (role rules, write permission as last confirmed, My
  * repos); none of them takes its task (my-tasks.ts); none of those takes its items (task-items.ts); every runner that may take
  * it busy; else the calls ahead of it.
@@ -45,6 +51,10 @@ export function whyWaiting(c: WhyCall, runners: readonly ReadyRunner[], ahead: n
     if (!own.length) return { code: "bound-off", text: `Runs only on ${whose}, which is not ready` };
     return { code: "bound", text: own.some((r) => r.free > 0) ? `Next on ${whose}` : `Waiting for ${whose}: it is busy` };
   }
+  const w = c.waits;
+  if (w?.kind === "owner-off") return { code: "owner-off", text: runnerWaitText(w, w.shown) };
+  if (w?.kind === "owner") return { code: "owner", text: w.shown ? `Held for ${w.login}'s Task Runner: the work is theirs` : "Waiting for a Task Runner" };
+  if (w?.kind === "login") return { code: "login", text: runnerWaitText(w, w.shown) };
   const forTier = runners.filter((r) => r.tiers.has(c.tier));
   if (!forTier.length) return { code: "no-runner", text: `No Task Runner is ready for the ${c.tier} tier` };
   const auto = forTier.filter((r) => !r.manual);
@@ -79,14 +89,15 @@ export async function queueView(db: Db, nowMs: number, showPicker: boolean, canW
   const snap = orderedOf(queue, nowMs).all.filter((r) => r.seen_at >= nowMs - CALLER_STALE_MS);
   if (!snap.length) return { calls: [], runners };
   const canWrite = canWriteOf?.(runners.map((r) => r.login)) ?? roomCanWrite(v.snapshot);
-  const fresh = pickerLoginsOf(v.snapshot, nowMs);
+  const fresh = pickerLoginsOf(v.snapshot, nowMs), started = startedOf(v);
   const ahead = new Map<Tier, number>();
   const calls: QueuedCall[] = [];
   for (const r of snap) {
     const picked = pickCounts(r, nowMs, (l) => fresh.has(l)) ? r.pickedBy : null;
     const followUp = r.parent_id !== null;
     const n = ahead.get(r.tier) ?? 0;
-    const why = whyWaiting({ tier: r.tier, promptId: r.prompt_id, step: r.step, repos: r.repos, refs: r.refs, followUp, picked: picked === null ? null : { login: showPicker ? picked : null }, bound: r.forLogin === null ? null : { login: r.forLogin, shown: showPicker } }, runners, n, canWrite);
+    const waits = followUp || picked !== null || r.forLogin !== null ? null : waitOf(v, started, r, nowMs, showPicker);
+    const why = whyWaiting({ tier: r.tier, promptId: r.prompt_id, step: r.step, repos: r.repos, refs: r.refs, followUp, picked: picked === null ? null : { login: showPicker ? picked : null }, bound: r.forLogin === null ? null : { login: r.forLogin, shown: showPicker }, waits }, runners, n, canWrite);
     // A call of repos or a task no ready runner takes is passed over, so it is no call ahead of the next; nor is one bound to a user.
     if (!followUp && picked === null && r.forLogin === null && why.code !== "task-off" && why.code !== "items-off" && why.code !== "no-repo-access") ahead.set(r.tier, n + 1);
     calls.push({
@@ -96,4 +107,15 @@ export async function queueView(db: Db, nowMs: number, showPicker: boolean, canW
     });
   }
   return { calls, runners };
+}
+
+/** The one person whose Task Runner a queued call waits for (WhyCall.waits), from the same rules the claims and the taker rule use; null when none. */
+function waitOf(v: RemoteView, started: ReturnType<typeof startedOf>, r: ReturnType<typeof orderedOf>["all"][number], nowMs: number, shown: boolean): WhyCall["waits"] {
+  const call = { prompt_id: r.prompt_id, repos: r.repos, step: r.step, refs: r.refs, tier: r.tier };
+  const [off] = waitingOnIn(v, call);
+  if (off) return { kind: "owner-off", ...off, shown };
+  const owner = heldFor(started, r, null, nowMs);
+  if (owner) return { kind: "owner", login: owner, shown };
+  const renew = loginWaitIn(v, call);
+  return renew ? { kind: "login", login: renew.login, renewsAt: renew.at, shown } : null;
 }

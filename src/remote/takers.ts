@@ -75,19 +75,36 @@ export type RunnerHold = "offline" | "usage-limit" | "cooling-off" | "not-ready"
  * people whose started work it is (StartedCalls.waitersFor), none of which may claim it now; with why each one cannot. Empty
  * when a runner may claim it now, or when it has no taker at all.
  */
-export async function waitingOn(db: Db, c: TakerCall, nowMs: number = Date.now()): Promise<{ login: string; hold: RunnerHold }[]> {
+export async function waitingOn(db: Db, c: TakerCall, nowMs: number = Date.now()): Promise<RunnerWait[]> {
   return waitingOnIn(await loadView(db, nowMs), c);
 }
 
-export function waitingOnIn(v: RemoteView, c: TakerCall): { login: string; hold: RunnerHold }[] {
+/** One person whose Task Runner a call waits for, and why; `until`: for a usage limit, the earliest time one of their runners reported it ends. */
+export type RunnerWait = { login: string; hold: RunnerHold; until: number | null };
+
+export function waitingOnIn(v: RemoteView, c: TakerCall): RunnerWait[] {
   const runners = takersIn(v), canWrite = canWriteOf(v.snapshot), s = startedOf(v), nowMs = v.now;
   if (runners.some((r) => runnerTakes(r, c, canWrite)) || [...s.ownersFor(c)].some((o) => s.canTake(o, c))) return [];
   const logins = [...s.waitersFor(c)].sort();
   return logins.map((login) => {
     const fresh = v.snapshot.runners.filter((r) => r.login.toLowerCase() === login && r.reportedAt !== null && r.reportedAt >= nowMs - STATUS_FRESH_MS);
     const hold: RunnerHold = !fresh.length ? "offline" : fresh.some((r) => r.readiness === "quota-held") ? "usage-limit" : v.snapshot.cooled.has(login) || fresh.some((r) => r.readiness === "cooled-off") ? "cooling-off" : "not-ready";
-    return { login, hold };
+    const ends = hold === "usage-limit" ? fresh.flatMap((r) => (r.readiness === "quota-held" && r.until !== null && Date.parse(r.until) > nowMs ? [Date.parse(r.until)] : [])) : [];
+    return { login, hold, until: ends.length ? Math.min(...ends) : null };
   });
+}
+
+const HOLD_TEXT: Record<RunnerHold, string> = { offline: "offline", "usage-limit": "usage limit", "cooling-off": "cooling off", "not-ready": "not ready" };
+const hhmm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
+
+/**
+ * The line of work that waits for one person's Task Runner (waitingOnIn, or loginWaitIn's renewal). `shown`: the reader may see
+ * whose runner it is and why it cannot claim (operators and maintainers); others read only that it waits for a Task Runner.
+ */
+export function runnerWaitText(w: RunnerWait | { login: string; renewsAt: number }, shown: boolean): string {
+  if (!shown) return "Waiting for a Task Runner";
+  const why = "renewsAt" in w ? `login renews at ${hhmm(w.renewsAt)} UTC` : `${HOLD_TEXT[w.hold]}${w.until !== null ? ` until ${hhmm(w.until)} UTC` : ""}`;
+  return `Waiting for ${w.login}'s Task Runner (${why})`;
 }
 
 /**

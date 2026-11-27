@@ -1,10 +1,11 @@
-// `workflow status [repo]`: the live workflows, per tracked repo. `workflow auto-stops [repo]`: the workflows the next workflow pass
+// `workflow status [repo]`: the live workflows, per tracked repo; with a repo, each one's queued jobs and model calls and what holds each back. `workflow auto-stops [repo]`: the workflows the next workflow pass
 // starts for PRs the automatic merge rule stopped for a person (auto-stop.ts), by wait code; it writes nothing.
 import { loadTrackedRepos, readConfig, SETTINGS } from "../data/control/index.ts";
 import { listWorkflows } from "../data/workflow/index.ts";
 import { openDb } from "../db/open.ts";
 import { findAutoStops } from "./auto-stop.ts";
 import { notPostedLines } from "./waits.ts";
+import { queuedOfItems } from "../runner/why-queued.ts";
 
 const USAGE = "usage: workflow status [repo] | workflow auto-stops [repo]";
 
@@ -18,13 +19,14 @@ async function status(repo: string | undefined): Promise<void> {
     if (!repo && !mine.length) continue;
     console.log(`${r}: ${mine.length} live workflow${mine.length === 1 ? "" : "s"}`);
     if (!repo) continue;
-    const unposted = await notPostedLines(db, mine);
+    const [unposted, queued] = await Promise.all([notPostedLines(db, mine), queuedOfItems(db, mine, { shown: true })]);
     for (const w of mine) {
       const approved = w.approvedBy ? `approved by ${w.approvedBy}` : "not approved";
       const blocker = w.blocker ? `, blocker ${w.blocker}` : "";
       console.log(`  #${w.number} ${w.kind} entry ${w.entry} ${w.state} weight ${w.weight}, started by ${w.startedBy}, ${approved}${blocker}`);
       const notPosted = unposted.get(w.id);
       if (notPosted) console.log(`    ${notPosted}`);
+      for (const q of queued.get(`${w.repo}#${w.number}`) ?? []) console.log(`    queued ${q.kind} ${q.id} (${q.title})${q.why ? `: ${q.why}` : ""}`);
     }
   }
   if (!repo && !live.length) console.log("no live workflows");

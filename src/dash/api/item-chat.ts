@@ -1,8 +1,9 @@
 // GET /api/items/:repo/:n/chat: an item's conversations with AutoCraft. What people said (from any surface) and AutoCraft's replies
 // come from the chat messages, the workflow events they produced and the Opus turns; the work AutoCraft did, the GitHub activity and the
 // Discord mentions come from the item trace (trace.ts), GitHub and Discord folded into one line per run between two other entries.
+// Queued jobs and model calls about the item come with the one line that says what holds each back (src/runner/why-queued.ts).
 // A fixed number of set-based reads per request: the stamp's wave, then the trace, the thread and the merge leg's wait.
-import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
+import type { ChatDiscordLink, ChatEntry, ChatFinding, ChatQueued, ChatShot, ChatVia, ItemChat, ItemChatState, ItemChatUnchanged, ItemConversation } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
 import { loadArtifacts } from "../../data/build/index.ts";
 import { ensureMainConversation, linkMessage, loadConversationsOfItem, loadMessages, setMessageRefusal, type ChatMessageRow, type ConversationRow } from "../../data/chat/index.ts";
@@ -18,6 +19,7 @@ import { askedLogins } from "../../workflow/asked.ts";
 import { yesClause, yesNext } from "../../workflow/status.ts";
 import { ENTRY_LABEL } from "../../workflow/vocab.ts";
 import { legWait } from "../../workflow/waits.ts";
+import { queuedOfItems } from "../../runner/why-queued.ts";
 import { openRecommendation, shownWorkflow, type ItemWorkflow, type PlanPart, type Recommendation } from "../../workflow/types.ts";
 import type { Req } from "../types.ts";
 import { parse } from "../../workflow/parse.ts";
@@ -30,6 +32,7 @@ import { discordKeys, type ItemMention } from "./discord.ts";
 import { statusOf } from "./maintain-item.ts";
 import { clip, context, contextScope, eventsFrom, fingerprint, headerOf, loadTraceRows, shape, visibleItem, type Ctx, type Ev } from "./trace.ts";
 import { blankIfHidden } from "./visible.ts";
+import { canSeeInternals } from "./staff.ts";
 
 /** A folded GitHub line keeps this many of its events. */
 export const FOLD_KEEP = 5;
@@ -39,7 +42,7 @@ const WAITING = new Set(["pending", "answering"]);
 const MAIN = "main";
 
 /** What the stamp and the answer both need, read once. */
-type Base = { c: Ctx; convs: ConversationRow[]; messages: Map<number, ChatMessageRow[]>; history: ItemWorkflow[]; leg: { workflowId: number | null; state: string } | null; canReply: boolean; reader: string; stamp: string };
+type Base = { c: Ctx; convs: ConversationRow[]; messages: Map<number, ChatMessageRow[]>; history: ItemWorkflow[]; leg: { workflowId: number | null; state: string } | null; canReply: boolean; reader: string; queued: ChatQueued[]; stamp: string };
 
 async function base(db: Db, req: Req): Promise<Base> {
   const ref = await visibleItem(db, req);
@@ -50,16 +53,19 @@ async function base(db: Db, req: Req): Promise<Base> {
     loadConversationsOfItem(db, ref.repo, ref.number).then(async (convs) => ({ convs, messages: await loadMessages(db, convs.map((x) => x.id)) })),
     loadWorkflowHistory(db, [ref]), loadLegs(db, [ref], { latestOnly: true }),
     canTalk(db, req.user, ref.repo),
+    queuedOfItems(db, [ref], { shown: canSeeInternals(req) }).then((m) => m.get(key) ?? []),
   ]);
   void reads.catch(() => {});
   const c = await context(db, req);
-  const [sources, { convs, messages }, histories, legs, canReply] = await reads;
+  const [sources, { convs, messages }, histories, legs, canReply, work] = await reads;
   const history = histories.get(key) ?? [];
   const legRow = legs.get(key)?.[0];
   const leg = legRow ? { workflowId: legRow.workflow_id, state: legRow.state } : null;
   const said = [...messages.values()].flat().map((m) => [m.id, m.at, m.workflowEventId, m.turnId, m.payload]);
-  const stamp = fingerprint(c, JSON.stringify(["chat", c.veiled, canReply, discordKeys() !== null]), [...sources, convs.map((x) => [x.id, x.title]), said, history, leg]);
-  return { c, convs, messages, history, leg, canReply, reader: req.user.login, stamp };
+  // A quiet pull request shows a viewer no queued work, as it shows no work titles.
+  const queued = c.veiled ? [] : work.map((w): ChatQueued => ({ id: `${w.kind}:${w.id}`, title: w.title, since: w.since, why: w.why }));
+  const stamp = fingerprint(c, JSON.stringify(["chat", c.veiled, canReply, discordKeys() !== null]), [...sources, convs.map((x) => [x.id, x.title]), said, history, leg, queued]);
+  return { c, convs, messages, history, leg, canReply, reader: req.user.login, queued, stamp };
 }
 
 export async function itemChat(db: Db, req: Req): Promise<ItemChat | ItemChatUnchanged> {
@@ -106,6 +112,7 @@ async function chatFrom(db: Db, b: Base): Promise<ItemChat> {
       open: main ? openOf(c, wf) : null,
       canReply: b.canReply,
       working: running?.t === "work" ? running.title : null,
+      queued: main ? b.queued : [],
     };
   });
   return { repo: c.repo, number: c.n, stamp: b.stamp, ...head, conversations };

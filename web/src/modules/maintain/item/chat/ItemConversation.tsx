@@ -11,6 +11,7 @@ import { ChatComposer } from "../../../../ui/molecules/chat/ChatComposer";
 import { DiscordLine } from "../../../../ui/molecules/chat/DiscordLine";
 import { GithubLine } from "../../../../ui/molecules/chat/GithubLine";
 import { FOLD_FROM, WorkGroup, WorkRow } from "../../../../ui/molecules/chat/WorkRow";
+import { QueuedLine } from "../../../../ui/molecules/chat/QueuedLine";
 import { WorkingLine } from "../../../../ui/molecules/chat/WorkingLine";
 
 type Said = Extract<ChatEntry, { t: "said" }>;
@@ -114,7 +115,7 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
     if (seen.current === null) toBottom();
     else if (atBottom.current) toBottom();
     else setNewBelow(true);
-  }, [c.entries.length, last?.id, c.working, answer, toBottom]);
+  }, [c.entries.length, last?.id, c.working, c.queued.length, answer, toBottom]);
 
   // Fonts and Markdown settle after the first paint; keep the end in view for that moment only, so expanding a row does not move the view.
   useEffect(() => {
@@ -158,6 +159,16 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
   });
 
   const running = last?.t === "work" && last.state === "running";
+  // What AutoCraft is on now, after its last entries: the running step's line, then the queued work and what holds each back.
+  const now = (
+    <>
+      {c.working && !running && <WorkingLine line={c.working} />}
+      {c.queued.map((q) => (
+        <QueuedLine key={q.id} q={q} />
+      ))}
+    </>
+  );
+  const nowShown = (!!c.working && !running) || c.queued.length > 0;
   const bs = blocks(c.entries);
   const lastBlock = bs[bs.length - 1];
   const placed = placeAnswer(c.entries, answer);
@@ -186,13 +197,13 @@ export function ItemConversation({ c, onSend, onEvent, onGithub, blockedReason, 
                 {folded(b.items).map((e) =>
                   Array.isArray(e) ? <WorkGroup key={e[0]!.id} items={e} onEvent={onEvent} /> : e.t === "reply" ? <AutoCraftMessage key={e.id} e={e} open={e === openReply} /> : <WorkRow key={e.id} e={e} onEvent={onEvent} />,
                 )}
-                {b === lastBlock && c.working && !running && <WorkingLine line={c.working} />}
+                {b === lastBlock && now}
               </AutoCraftTurn>
             ),
           )}
-          {c.working && !running && lastBlock?.k !== "turn" && (
-            <AutoCraftTurn at={last?.at ?? new Date().toISOString()} text={c.working}>
-              <WorkingLine line={c.working} />
+          {nowShown && lastBlock?.k !== "turn" && (
+            <AutoCraftTurn at={last?.at ?? new Date().toISOString()} text={c.working && !running ? c.working : t("{work} queued", { work: c.queued[0]!.title })}>
+              {now}
             </AutoCraftTurn>
           )}
         </ol>

@@ -140,7 +140,23 @@ export const wantOf = (step: string, params: Params | string): Want => {
  * A queued job that `untaken` says waits for a Task Runner counts as the same work but takes no repo of the capacity; a
  * pass that asks many times passes one test.
  */
-export async function jobBlock(db: Db, steps: Map<string, StepDef>, want: Want, o: { states?: ("queued" | "running")[]; extra?: Active[]; reserved?: Active[]; mutex?: boolean; precheck?: boolean; untaken?: UntakenTest; active?: Active[]; cap?: number } = {}): Promise<string | null> {
+export async function jobBlock(db: Db, steps: Map<string, StepDef>, want: Want, o: JobBlockOptions = {}): Promise<string | null> {
+  return blockText(want.step, await jobBlockOf(db, steps, want, o));
+}
+
+export type JobBlockOptions = { states?: ("queued" | "running")[]; extra?: Active[]; reserved?: Active[]; mutex?: boolean; precheck?: boolean; untaken?: UntakenTest; active?: Active[]; cap?: number };
+
+/** What holds a job back (jobBlock): a job doing the same work, the step at its repos at once, or a running job of the same mutex. */
+export type JobBlock = { kind: "same"; job: Active } | { kind: "parallel"; repos: number } | { kind: "mutex"; job: Active; mutex: string };
+
+const blockText = (step: string, b: JobBlock | null): string | null =>
+  b === null ? null
+    : b.kind === "same" ? `job ${b.job.id} of ${step} is ${b.job.state}`
+    : b.kind === "parallel" ? `${step} is working ${b.repos} repo${b.repos === 1 ? "" : "s"}, the most at once (step_parallel)`
+    : `job ${b.job.id} (${b.job.step}) is running with the same mutex (${b.mutex})`;
+
+/** jobBlock's answer as a value, for a reader that words it itself (src/runner/why-queued.ts). */
+export async function jobBlockOf(db: Db, steps: Map<string, StepDef>, want: Want, o: JobBlockOptions = {}): Promise<JobBlock | null> {
   // `active`: the queued and running jobs, read once by a caller that asks many times while no job changes.
   const jobsIn = async (states: ("queued" | "running")[] = ["queued", "running"]): Promise<Active[]> => (o.active ? o.active.filter((j) => (states as string[]).includes(j.state)) : await activeJobs(db, states));
   const held = [...await jobsIn(o.states), ...(o.reserved ?? [])].filter((j) => j.step === want.step);
@@ -148,19 +164,19 @@ export async function jobBlock(db: Db, steps: Map<string, StepDef>, want: Want, 
   if (!o.precheck) {
     const w: Work = { repo: want.repo, number: want.number ?? null, approved: !!want.approved, perItem: !!want.perItem };
     const clash = same.find((j) => sameWork(want.step, { repo: j.repo, number: j.number, approved: isApproved(j), perItem: isPerItem(j) }, w));
-    if (clash) return `job ${clash.id} of ${want.step} is ${clash.state}`;
+    if (clash) return { kind: "same", job: clash };
   }
   const cap = want.perItem ? Infinity : o.cap ?? await stepParallel(db);
   if (cap !== Infinity) {
     let untaken = o.untaken;
     const holds = async (j: Active): Promise<boolean> => !isPerItem(j) && (j.state !== "queued" || j.params === undefined || !await (untaken ??= await untakenTest(db, steps))(j));
     const repos = new Set((await filterSeq(held, holds)).map((j) => j.repo ?? ""));
-    if (repos.size >= cap && (o.precheck || !repos.has(want.repo ?? ""))) return `${want.step} is working ${repos.size} repo${repos.size === 1 ? "" : "s"}, the most at once (step_parallel)`;
+    if (repos.size >= cap && (o.precheck || !repos.has(want.repo ?? ""))) return { kind: "parallel", repos: repos.size };
   }
   const mutex = steps.get(want.step)?.exclusive;
   if (o.mutex && mutex) {
     const other = (await jobsIn(["running"])).find((j) => steps.get(j.step)?.exclusive === mutex);
-    if (other) return `job ${other.id} (${other.step}) is running with the same mutex (${mutex})`;
+    if (other) return { kind: "mutex", job: other, mutex };
   }
   return null;
 }

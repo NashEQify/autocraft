@@ -150,10 +150,17 @@ function buildStarted(v: RemoteView): StartedCalls {
  * user is never one of these. A runner's harness, effort and time limit are known only at its claim: a call none of the
  * owner's runners will lease for those is free once the hold ends.
  */
-export function heldForOwner(s: StartedCalls, c: { forLogin: string | null; refs: readonly ItemRef[]; repos: readonly string[]; prompt_id: string; step: string; tier: Tier; authors: ReadonlySet<string>; refusedToken: number | null; since: number }, login: string | null, nowMs: number): boolean {
-  if (c.forLogin !== null || c.since < nowMs - STARTED_HOLD_MS) return false;
+export function heldForOwner(s: StartedCalls, c: HeldCall, login: string | null, nowMs: number): boolean {
+  return heldFor(s, c, login, nowMs) !== null;
+}
+
+type HeldCall = { forLogin: string | null; refs: readonly ItemRef[]; repos: readonly string[]; prompt_id: string; step: string; tier: Tier; authors: ReadonlySet<string>; refusedToken: number | null; since: number };
+
+/** The owner (lowercase login) a queued call is held for, as heldForOwner decides it; null when it is held for none. */
+export function heldFor(s: StartedCalls, c: HeldCall, login: string | null, nowMs: number): string | null {
+  if (c.forLogin !== null || c.since < nowMs - STARTED_HOLD_MS) return null;
   const self = login?.toLowerCase() ?? null;
   const judging = judges(c.prompt_id);
-  for (const o of s.owners(c.refs, c.step)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return true;
-  return false;
+  for (const o of s.owners(c.refs, c.step)) if (o !== self && !(judging && c.authors.has(o)) && s.canTake(o, c)) return o;
+  return null;
 }

@@ -55,9 +55,9 @@ function usePage(repo: string, number: number) {
   });
 }
 
-/** Something moves without a topic: a message waiting for its answer, or a running step's progress. */
+/** Something moves without a topic: a message waiting for its answer, a running step's progress, or queued work and what holds it back. */
 const moving = (c: ItemChat | undefined) =>
-  !!c?.conversations.some((v) => v.working || v.entries.some((e) => (e.t === "said" && e.pending) || (e.t === "work" && e.state === "running")));
+  !!c?.conversations.some((v) => v.working || v.queued.length > 0 || v.entries.some((e) => (e.t === "said" && e.pending) || (e.t === "work" && e.state === "running")));
 
 /** The chat read, asked `since` its last stamp. `keep` stores a read the send already returned, so the next read is small. */
 function useChat(repo: string, number: number) {

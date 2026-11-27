@@ -17,8 +17,10 @@ type Beat =
   | { b: "discord"; min: number; channel: string | null }
   | { b: "plan"; min: number; summary: string; fields: Record<string, unknown> };
 
+/** Queued work about the item; `viewer`: the line a viewer reads, when it names a person's Task Runner. */
+type Queued = { title: string; min: number; why: string | null; viewer?: string };
 /** `quiet`: a quiet security pull request, which viewers see veiled (who and when only). */
-interface Story { title: string; status: string; state: ItemChatState; next: string | null; working: string | null; quiet?: boolean; beats: Beat[] }
+interface Story { title: string; status: string; state: ItemChatState; next: string | null; working: string | null; quiet?: boolean; queued?: Queued[]; beats: Beat[] }
 
 const SAID_ON: Record<ChatVia, string> = { dashboard: "the dashboard", github: "GitHub", discord: "Discord", agent: "an agent", cli: "the command line" };
 
@@ -76,6 +78,7 @@ const PR_455: Story = {
   next: "fix the hidden-group case, then merge",
   working: null,
   quiet: true,
+  queued: [{ title: "Duplicates", min: 9, why: "All 32 job slots are busy" }, { title: "Classify", min: 4, why: "No Task Runner takes Classify tasks on designcraft" }],
   beats: [
     { b: "gh", min: 2 * 1440, actor: "sable-ui", summary: "Opened the pull request" },
     { b: "gh", min: 2 * 1440 - 11, actor: "github-actions", summary: "CI passed on 2c9e4f1 (6 checks)" },
@@ -108,6 +111,10 @@ const ISSUE_77: Story = {
   state: "running",
   next: "open a PR and review it, then ask ochre-fox before merging",
   working: "Running the full test suite in the workspace",
+  queued: [
+    { title: "Verify", min: 5, why: "Waiting for another job on this item" },
+    { title: "Review", min: 3, why: "Waiting for ochre-fox's Task Runner (usage limit until 05:10 UTC)", viewer: "Waiting for a Task Runner" },
+  ],
   beats: [
     { b: "gh", min: 3 * 1440, actor: "brushstroke42", summary: "Opened the issue" },
     { b: "gh", min: 2 * 1440, actor: "quietgrid", summary: "Commented", body: "Would love this for conference talks." },
@@ -178,7 +185,8 @@ function chatOf(ref: string, s: Story, me: User): ItemConversation {
   const open = lastReply?.t === "reply" && lastReply.ask ? lastReply.ask : null;
   const [repo, num] = ref.split("#");
   const veiled = s.quiet && me.role === "viewer";
-  return { id: `${ref}:main`, title: s.title, item: { repo: repo!, number: Number(num) }, entries: veiled ? entries.map(veil) : entries, open: veiled && open ? { ...open, question: "" } : open, canReply: me.role !== "viewer", working: s.working };
+  const queued = veiled ? [] : (s.queued ?? []).map((q, i) => ({ id: `${ref}:q${i}`, title: q.title, since: at(q.min), why: me.role === "viewer" && q.viewer ? q.viewer : q.why }));
+  return { id: `${ref}:main`, title: s.title, item: { repo: repo!, number: Number(num) }, entries: veiled ? entries.map(veil) : entries, open: veiled && open ? { ...open, question: "" } : open, canReply: me.role !== "viewer", working: s.working, queued };
 }
 
 /** Every beat of a story as trace events, for the Events tab. */
