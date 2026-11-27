@@ -898,6 +898,29 @@ export interface DuplicateScans {
   at: string;
 }
 
+export interface EvalCauses {
+  cause_key: string;
+  detector: string;
+  summary: string;
+  state: string;
+  first_seen: string;
+  last_seen: string;
+  evidence: Generated<string>;
+  seen: Generated<number>;
+  investigated_at: string | null;
+  investigated_seen: Generated<number>;
+  verdict: string | null;
+  finding: string | null;
+  model: string | null;
+  run_id: string | null;
+  issue_number: number | null;
+  filed_at: string | null;
+  reported_seen: Generated<number>;
+  commented_at: string | null;
+  attempts: Generated<number>;
+  note: string | null;
+}
+
 export interface EverTrackedRepos {
   name: string;
 }
@@ -2770,6 +2793,7 @@ export interface DB {
   dupe_groups: DupeGroups;
   duplicate_pairs: DuplicatePairs;
   duplicate_scans: DuplicateScans;
+  eval_causes: EvalCauses;
   ever_tracked_repos: EverTrackedRepos;
   fast_track: FastTrack;
   final_reviews: FinalReviews;
@@ -2989,6 +3013,7 @@ export interface DB {
   "main.dupe_groups": DupeGroups;
   "main.duplicate_pairs": DuplicatePairs;
   "main.duplicate_scans": DuplicateScans;
+  "main.eval_causes": EvalCauses;
   "main.ever_tracked_repos": EverTrackedRepos;
   "main.fast_track": FastTrack;
   "main.final_reviews": FinalReviews;
@@ -3212,6 +3237,7 @@ export const COLUMNS = {
   dupe_groups: ["decision_id", "repo", "source", "applied_answer", "id"],
   duplicate_pairs: ["repo", "a", "b", "a_hash", "b_hash", "similarity", "jev_p", "haiku", "verdict", "canonical", "by_operator", "created_at", "checked_at"],
   duplicate_scans: ["repo", "number", "hash", "at"],
+  eval_causes: ["cause_key", "detector", "summary", "state", "first_seen", "last_seen", "evidence", "seen", "investigated_at", "investigated_seen", "verdict", "finding", "model", "run_id", "issue_number", "filed_at", "reported_seen", "commented_at", "attempts", "note"],
   ever_tracked_repos: ["name"],
   fast_track: ["id", "repo", "number", "added_by", "added_at", "weight"],
   final_reviews: ["repo", "number", "head_oid", "run_id", "at", "model", "verdict", "reason", "fixes", "risks", "sure", "mode", "base_head", "seen_at", "disc_hash"],

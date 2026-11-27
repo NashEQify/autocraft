@@ -13,6 +13,7 @@ import { parseRefereeReply, type Referee } from "../classify/parse.ts";
 import { lintOpusReply, parseOpusReply, publicTexts as opusTexts, rawReason, type OpusPr, type OpusReview } from "../review/opus-parse.ts";
 import { lintPremerge, parsePremerge, premergeTexts, type PremergeReview } from "../premerge/parse.ts";
 import { lintReply, parseFindings, publicTexts as postmergeTexts, type Finding, type PostmergePr } from "../postmerge/parse.ts";
+import { lintEvalReply, parseEvalReply, type EvalFinding, type EvalInput } from "../eval/prompt.ts";
 import { commentTexts, parseReply, type Parsed as ConversationReply } from "../conversations/cards.ts";
 import type { ConversationInput } from "../conversations/types.ts";
 import { parseCompareReply, parsePlanReply, parseScreenshotReply, type CompareParsed, type Parsed as PlanReply, type ScreenshotParsed } from "../verify/plan.ts";
@@ -222,6 +223,14 @@ export const POSTMERGE_OPUS: ClaudeStep<PostmergePr, Finding[], ReferenceCtx> = 
     return own === null ? null : [...own, ...await referenceProblems(postmergeTexts(text), c.dir, c.semantic, { stage, otherProblems: own.length })];
   } },
   parse: async (text, _x, ctx) => { const r = parseFindings(text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
+};
+
+/** The self-evaluation's investigation of one candidate group: evidence without path:line goes back as one fix turn. */
+export const EVAL_INVESTIGATE: ClaudeStep<EvalInput, EvalFinding> = {
+  provider: "claude", id: "eval.investigate",
+  toPrompt: (x) => [x], size: () => 1,
+  lint: { fields: ["evidence"], make: () => (text) => lintEvalReply(text) },
+  parse: async (text) => { const r = parseEvalReply(text); return r === null ? null : { value: r }; },
 };
 
 /** Comment cards are public text: a reference mention or quote goes back to the model as one fix turn. A reply without text is not linted and keeps the whole-call retry. */

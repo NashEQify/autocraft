@@ -3132,3 +3132,28 @@ CREATE INDEX IF NOT EXISTS fixups_linting ON fixups(state) WHERE state = 'lintin
 CREATE INDEX IF NOT EXISTS fixups_to_head ON fixups(to_head) WHERE state = 'pushed';
 CREATE INDEX IF NOT EXISTS ci_fixes_to_head ON ci_fixes(to_head) WHERE to_head IS NOT NULL;
 CREATE INDEX IF NOT EXISTS conflict_merges_to_head ON conflict_merges(to_head) WHERE to_head IS NOT NULL;
+
+-- The causes the hourly self-evaluation found (eval, src/eval): one row per cause key, with its evidence, the model's
+-- investigation and the issue filed for it on the eval repo.
+CREATE TABLE IF NOT EXISTS eval_causes (
+  cause_key TEXT PRIMARY KEY,
+  detector TEXT NOT NULL,
+  summary TEXT NOT NULL,              -- one line from the detector
+  state TEXT NOT NULL,                -- new | investigated | filing | filed | declined
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '[]', -- JSON [{id, at, note, ref?}], newest kept
+  seen INTEGER NOT NULL DEFAULT 0,    -- distinct evidence ids seen in all
+  investigated_at TEXT,
+  investigated_seen INTEGER NOT NULL DEFAULT 0, -- seen when the last investigation was asked
+  verdict TEXT,                       -- defect | not-defect | failed
+  finding TEXT,                       -- JSON: the investigation's reply as kept
+  model TEXT,
+  run_id TEXT,
+  issue_number INTEGER,
+  filed_at TEXT,
+  reported_seen INTEGER NOT NULL DEFAULT 0, -- seen when the issue or its last comment was posted
+  commented_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  note TEXT
+) WITHOUT ROWID;

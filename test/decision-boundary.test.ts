@@ -49,6 +49,7 @@ const SHOWS: Record<Kind, readonly string[]> = {
     "src/dash/api/maintain.ts",
     "src/dash/mcp/index.ts",
     "src/discord/alerts.ts",
+    "src/eval/detect.ts",
     "src/workflow/asked.ts",
     "src/workflow/cli.ts",
     "src/workflow/recommend.ts",

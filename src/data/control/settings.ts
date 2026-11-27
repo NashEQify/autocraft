@@ -100,6 +100,8 @@ export const SETTINGS = {
   /** Where model-call transcripts are stored (src/transcripts): JSON with the bucket's secret sealed; read through src/transcripts only. */
   transcriptStore: reg<string | null>("transcript_store", "json", null, { owner: "inference", shown: false }, (r) => r ?? null),
   planShadow: reg<"on" | "off">("plan_shadow", "text", "off", { owner: "planner" }, (r) => (r === "on" ? "on" : "off")),
+  /** The tracked repo the hourly self-evaluation reads and files its issues on (src/eval); null: the evaluation is off. */
+  evalRepo: reg<string | null>("eval_repo", "text", null, { owner: "eval" }, (r) => { const v = r?.trim(); return v && REPO_LIST_NAME.test(v) ? v : null; }),
   /** The instance-wide build feature switch (`build_feature:scan-tests`). */
   scanTestsEnabled: reg("build_feature:scan-tests", "bool", false, { owner: "build", shown: false }, (r) => r === "on"),
 };
