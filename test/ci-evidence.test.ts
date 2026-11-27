@@ -50,14 +50,24 @@ test("the planner, the review gate and the stored checks read the same CI", asyn
   }
 });
 
-test("red CI holds an automatic review of a PR with an earlier review, and not one a person's live workflow asks for", async () => {
-  const w = current = await (await (await world()).repo()).pr(1, { ci: "failure" });
-  await (await w.pr(2, { ci: "failure" })).review(1, { head: "old1" });
+test("red CI holds an automatic review, passes the one a person's live workflow asks for first or for the author's head, and holds our own pushes", async () => {
+  const w = current = await (await (await (await world()).repo()).pr(1, { ci: "failure" })).pr(2, { ci: "failure" });
+  await w.pr(4, { ci: "failure" });
+  await (await w.pr(3, { ci: "failure" })).review(1, { head: "old1" });
   await w.review(2, { head: "old2" });
+  await w.review(3, { head: "old3" });
+  await w.review(4, { head: "old4" });
+  await w.workflow(4, { approved: false });
   await w.workflow(2, { approved: false });
+  await w.workflow(3, { approved: false });
+  // PR 2's earlier review predates its workflow; PR 3's was made under it, and our fix-up made its head.
+  await w.db.run(w.db.k.updateTable("opus_reviews").set({ at: "2025-01-01T00:00:00Z" }).where("number", "=", 2));
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 3, from_head: "old3", to_head: "sha3", state: "pushed", attempt: 1, created_at: T1, source: "review" }));
   const hold = await reviewHolds(w.db);
   assert.deepEqual(await hold("app", 1, "sha1"), { kind: "ci", wait: "CI on the latest commit to pass", red: true });
   assert.equal(await hold("app", 2, "sha2"), null);
+  assert.equal((await hold("app", 3, "sha3"))?.kind, "ci");
+  assert.equal(await hold("app", 4, "sha4"), null, "a head the author made, reviewed under the workflow before, is asked for");
 });
 
 test("runs we approved that have not finished hold off the repair of a head our push turned red", async () => {
