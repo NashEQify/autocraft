@@ -15,6 +15,11 @@ export const recheckDelayMs = (failures: number): number => (failures < 2 ? 0 : 
 
 /** Retries AutoCraft makes itself of an implementation whose workspace did not start before its plan call; the next failure asks a person. */
 export const IMPLEMENT_START_RETRIES = 3;
+
+/** Issue review calls without a valid review before its maintainer is asked whether to try again (src/issuereview). */
+export const ISSUE_REVIEW_TRIES = 3;
+/** The wait before the next issue review call after `tries` calls without a valid review: 10, then 30 minutes. */
+export const issueReviewDelayMs = (tries: number): number => (tries <= 1 ? 10 : 30) * 60_000;
 const IMPLEMENT_START_DELAYS_MIN = [5, 15, 30] as const;
 
 /** The wait after the `failures`-th failed implementation start in a row: 5, 15, then 30 minutes. */

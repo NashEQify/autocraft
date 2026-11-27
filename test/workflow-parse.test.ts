@@ -34,7 +34,7 @@ describe("workflow commands", () => {
     assert.equal(resolve(p, pr()).kind, "ambiguous");
     assert.equal(run("please merge it soon", pr()).kind, "ambiguous");
     assert.equal(run("weight 12, merge", pr()).kind, "ambiguous");
-    assert.equal(run("review and implement", { kind: "issue", workflow: null }).kind, "ambiguous");
+    assert.equal(run("review and implement", { kind: "pr", workflow: null }).kind, "ambiguous");
   });
 
   test("ordinary phrasing around command words reads as the command; hedged replies stay unread", () => {

@@ -33,7 +33,7 @@ export const COMMANDS: readonly CommandDef[] = [
   {
     word: "review", usage: "review", aliases: ["review again", "take a look", "take a look at", "have a look", "have a look at"], entry: "review",
     short: tk("Start at Review."),
-    does: tk("Reviews the pull request. On a started item, reviews it again."),
+    does: tk("Reviews the pull request. On an issue, reviews the issue against the code and recommends implement, close, ask the reporter or backlog; review and implement goes on to implement when the review recommends it. On a started item, reviews it again."),
     back: tk("When the review is done, with one recommendation. If the merge is approved: only at a blocker."),
     example: "review",
   },

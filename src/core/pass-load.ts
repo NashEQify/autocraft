@@ -11,6 +11,7 @@ import { loadMainFixPrs, loadPatchFacts, pushChainOf, type PatchFacts, type Task
 import { loadAssignments, loadControl, loadMadePushes, loadOwnCommits, loadPushFacts, type ControlSnapshot, type PushFacts } from "../data/control/index.ts";
 import { loadStatements, type Statement } from "../data/conversations/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
+import { loadIssueReviewFacts, type IssueReviewFact } from "../data/issuereview/index.ts";
 import { loadHolds as loadOutsideHolds, type HoldInfo } from "../data/intake/index.ts";
 import { loadMergeFacts, loadOwnIntegration, type MergeFacts } from "../data/merge/index.ts";
 import {
@@ -263,6 +264,8 @@ export type ItemPassData = {
   openPrs: OpenPrRow[];
   /** The closes people commanded that are due, by item. */
   closes: Map<RefKey, DueAction>;
+  /** The newest review row of each issue whose workflow is live. */
+  issueReviews: Map<string, IssueReviewFact>;
   /** Second wave: the text of the items `needs` named. */
   texts: Map<RefKey, ItemOf<"text">>;
   /** Second wave: mirror state of the PRs `needs` named. */
@@ -283,18 +286,18 @@ export type ItemPassNeeds = { texts: Ref[]; prs: Ref[]; asked: { ref: Ref; since
  */
 export async function loadItemPass(db: Db, keys: KeySource, o: { now: number; base: PassBase; model: string; repo?: string | undefined; dupes?: SharedDupes | undefined; needs: (d: ItemPassData) => ItemPassNeeds }, endWave: EndWave): Promise<ItemPassData> {
   const repos = o.repo ? [o.repo] : undefined;
-  const [control, items, triage, outsideHolds, stages, workflow, implement, scoped, quiet, mainFixPrs, batchPrs, assignments, repoRows, openPrs, due] =
+  const [control, items, triage, outsideHolds, stages, workflow, implement, scoped, quiet, mainFixPrs, batchPrs, assignments, repoRows, openPrs, due, issueReviews] =
     await Promise.all([
       loadControl(db), loadItemsWithHashes(db, keys), loadTriageFacts(db, keys, { model: o.model, run: o.base.run, nowMs: o.now, dupes: o.dupes }), loadOutsideHolds(db, keys),
       loadStageFacts(db, keys), loadWorkflowFacts(db, keys, { nowMs: o.now }), loadImplementFacts(db, keys),
       loadInScope(db, keys),
       listQuietPrs(db, { repo: o.repo }), loadMainFixPrs(db, repos), loadOwnIntegration(db, repos),
       loadAssignments(db, o.repo ? { repo: o.repo } : {}), loadRepos(db, { all: true }), loadOpenPrLinks(db, repos ?? reposOf(keys)),
-      loadActionsDue(db, { kinds: ["close", "comment-close"], ...(repos && { repos }) }),
+      loadActionsDue(db, { kinds: ["close", "comment-close"], ...(repos && { repos }) }), loadIssueReviewFacts(db, keys),
     ]);
   const data: ItemPassData = {
     now: o.now, run: o.base.run, control, items, triage, outsideHolds, stages, workflow, implement, inScope: scoped,
-    ownLogins: o.base.own, quiet, mainFixPrs, batchPrs, assignments, repos: repoRows, openPrs, closes: new Map(due.map((a) => [refKey(a.repo, a.number), a])),
+    ownLogins: o.base.own, quiet, mainFixPrs, batchPrs, assignments, repos: repoRows, openPrs, closes: new Map(due.map((a) => [refKey(a.repo, a.number), a])), issueReviews,
     texts: new Map(), prs: new Map(), comments: new Map(), act: new Map(),
   };
   await endWave();

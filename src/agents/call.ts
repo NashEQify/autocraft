@@ -51,7 +51,7 @@ const PROMPT_STEP: Record<string, { step: string; stage: number }> = {
   "lint.reference.jev": { step: "opus-review", stage: 5 }, "lint.reference.haiku": { step: "opus-review", stage: 5 },
   "security.model": { step: "security-scan", stage: 9 }, "security.area": { step: "security-scan", stage: 9 }, "security.verify": { step: "security-scan", stage: 9 },
   "security.scantest": { step: "security-scan", stage: 9 }, "security.fix": { step: "security-fix", stage: 9 }, "security.fixcheck": { step: "security-fix", stage: 9 },
-  "implement.session": { step: "implement", stage: 7 },
+  "implement.session": { step: "implement", stage: 7 }, "review.issue": { step: "issue-review", stage: 5 },
 };
 
 /** The step a call of `promptId` made now is stored under (stepOf), for room and taker questions; undefined when neither is known. */

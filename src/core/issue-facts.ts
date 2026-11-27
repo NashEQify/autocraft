@@ -11,6 +11,7 @@ import { plainLogin } from "../github/identity.ts";
 import { PIPELINE_LOGIN_KEY, pipelineWrites } from "./rules.ts";
 import { assignmentIn, ownPrSet, queuerIn, refreshTimes, standingIn, workflowFactOf, type FactsOf } from "./facts.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
+import { issueReviewDelayMs } from "./backoff.ts";
 import { needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
 import { embedderId, modelName } from "../embed/model.ts";
@@ -169,6 +170,8 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
     const standing = standingIn(work, d.workflow.actors, r.repo, acts);
     const live = d.implement.liveByRepo.get(r.repo);
     if (a?.startRetry) refresh.soon(ref, a.startRetry.dueAt);
+    const ir = r.kind === "issue" ? d.issueReviews.get(ref) : undefined;
+    if (ir?.state === "queued" && ir.tries > 0 && ir.triedAt) refresh.soon(ref, Date.parse(ir.triedAt) + issueReviewDelayMs(ir.tries));
     const refreshAt = refresh.at(ref);
     return {
       repo: r.repo, number: r.number, kind: r.kind as ItemFacts["kind"], open: true, assignment: assignmentIn(pipelineLogin, d.assignments.get(ref), r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}),
@@ -189,6 +192,7 @@ function factsOf(db: Db, d: ItemPassData, rows: ReturnType<typeof rowsOf>): Item
       pairsToCheck: t.pairsToCheck, inCompareSet: t.compare ?? false,
       labels: { quietFix: d.quiet.has(ref), existing: json<unknown[]>(r.labels, []).map(String), labeledNote: d.stages.get(ref)?.labeledNote ?? null },
       close: closeOf(d, ref),
+      issueReview: ir ?? null,
       openPr: r.kind === "issue" ? openPrOf(r.repo, r.number) : null,
       implement: {
         ...queuer, featureOn: cfg.repo(r.repo).buildFeature("implement"),

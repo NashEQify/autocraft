@@ -1066,6 +1066,25 @@ export const STEPS: StepDef[] = [
     },
   },
   {
+    name: "issue-review",
+    title: "Review issues",
+    description: "Reviews the issues maintainers started with review: Opus reads each issue, its discussion and the repository at the default branch, posts one review comment with a recommendation (implement, close, needs info, backlog), and the maintainer answers it. Also posts a review's question to the reporter after a maintainer's yes. Every model call runs on the Task Runner of the person who asked for the review",
+    stage: runStage("issue-review"),
+    requires: "operator",
+    models: ["opus"],
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, help: "only this issue; empty: every issue of the repo whose review is due" },
+    ],
+    run: async (ctx) => {
+      const { runIssueReviews } = await import("../issuereview/run.ts");
+      const r = await runIssueReviews(ctx.db, { repo: String(ctx.params.repo), ...(typeof ctx.params.number === "number" ? { number: ctx.params.number } : {}), by: byOfJob(ctx.job.requestedBy), jobId: ctx.job.id, onHandled: ctx.handled }, ctx.log);
+      ctx.acted(r.reviewed + r.asked);
+      ctx.usageRun(r.runId);
+      return `${r.reviewed} issues reviewed, ${r.asked} questions posted to reporters, ${r.failed} failed, ${r.waiting} waiting`;
+    },
+  },
+  {
     name: "eval",
     title: "Self-evaluation",
     description: "Looks for stalls, loops, repeated failures and cost outliers in AutoCraft's own records, groups them by cause, and has Opus investigate each new or grown cause in the eval repo's code. Each real defect becomes one issue on the eval repo (setting eval_repo), new evidence a comment on it at most once a day. Runs once an hour while the setting is set; implements nothing.",

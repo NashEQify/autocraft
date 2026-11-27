@@ -44,7 +44,7 @@ export type ActionKind =
   | "fixup" | "conflict" | "cifix" | "lint" | "postmerge" | "followups"
   // item steps (issues and PRs)
   | "classify" | "referee" | "prioritize" | "embed" | "dupes" | "dupes-compare" | "label"
-  | "act" | "implement"
+  | "act" | "implement" | "issue-review"
   // the pipeline's account leaves an item that is off the path to merge (src/core/assignment.ts)
   | "unassign";
 
@@ -470,6 +470,12 @@ export type ItemFacts = {
 
   /** The open PR of an issue: one that closes or addresses it (`closes`), which holds it, else a person's PR that mentions it by number; null when there is none. */
   openPr: { number: number; closes: boolean } | null;
+
+  /**
+   * The newest review row of an issue whose workflow is live (src/data/issuereview): its state, whose Task Runner runs it, the calls that gave
+   * no valid review since it was due and the last one's time, and whether the issue's author commented after its question was posted.
+   */
+  issueReview?: { id: number; state: "queued" | "done" | "failed" | "ask" | "reporter"; requestedBy: string; tries: number; triedAt: string | null; reporterAnswered: boolean } | null;
 
   /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */
   implement: {

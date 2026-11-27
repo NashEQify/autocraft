@@ -15,6 +15,7 @@
 import { withConfig } from "../data/control/index.ts";
 import { loadLatestFixPushes, loadPatchFacts, type PatchFacts } from "../data/changes/index.ts";
 import { loadImplementFacts, type ImplementFacts } from "../data/implement/index.ts";
+import { loadIssueReviews, type IssueReviewRow } from "../data/issuereview/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review/index.ts";
 import { adoptLegs, listWorkflows, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
@@ -45,6 +46,7 @@ import { premergeParts } from "./premerge.ts";
 import { afterPush, atBlocker, onConflict, planOf, type ReviewView } from "./recommend.ts";
 import { blockerThresholds } from "./settings.ts";
 import { askedBy, isOpenQuestion, openQuestionOf, viewOf } from "./question.ts";
+import { issueRecommendation, recommendsImplement } from "./issue-review.ts";
 import { listText, ROUND_STEP, stepsFor, type StepName } from "./status.ts";
 import { RULE_STARTER, type Blocker, type ItemWorkflow, type PlanPart, type Recommendation } from "./types.ts";
 import { candidatePr, workOf } from "./work.ts";
@@ -106,6 +108,8 @@ type Pass = {
   thresholds: BlockerFacts["thresholds"];
   /** The ended jobs of the approved lane per PR, oldest first. */
   laneRuns: Map<string, LaneRun[]>;
+  /** The newest review row of each issue review workflow, by workflow id. */
+  issueReviews: Map<number, IssueReviewRow>;
 };
 /** The writes the pass collects, written once at its end; `was`: the row as the pass read it. `stored`: the workflows whose stop at a blocker is written already (blockWorkflow). */
 type Writes = {
@@ -287,8 +291,9 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     for (const w of live) if (!due.includes(w)) wake(failed.get(w.id)!.until);
     const errors = new Map<number, unknown>();
     const issues = live.filter((w) => w.kind === "issue").map((w) => ({ repo: w.repo, number: w.number }));
-    const [implement, goOn, thresholds] = await db.together(() => Promise.all([
+    const [implement, goOn, thresholds, issueReviews] = await db.together(() => Promise.all([
       loadImplementFacts(db, issues, { withPlans: true }), loadGoOnAt(db, live), blockerThresholds(db),
+      loadIssueReviews(db, live.filter((w) => w.kind === "issue" && w.entry === "review").map((w) => w.id)),
     ]));
     const prRefs = [...new Map(live.flatMap((w) => {
       const number = w.kind === "pr" ? w.number : candidatePr(implement.byIssue.get(key(w.repo, w.number)), w);
@@ -312,7 +317,7 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const laneRuns = new Map<string, LaneRun[]>();
     for (const r of await loadLaneRuns(db, prRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
     const pass: Pass = {
-      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, premerge, issues: issueFacts, thresholds: { outsideMin: thresholds.outsidePurposeMin }, laneRuns,
+      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, premerge, issues: issueFacts, thresholds: { outsideMin: thresholds.outsidePurposeMin }, laneRuns, issueReviews,
     };
     const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [] };
     const moved: Moved[] = [];
@@ -404,7 +409,7 @@ const stepIn = (w: ItemWorkflow, ...names: StepName[]): StepName => {
 async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow): Promise<ItemWorkflow["state"] | null> {
   const at = new Date().toISOString();
   // The PR the workflow works on: its own item, or an implement workflow's implementation PR; null while an issue has none.
-  const attempts = w0.kind === "issue" ? pass.implement.byIssue.get(key(w0.repo, w0.number)) : undefined;
+  const attempts = w0.kind === "issue" && w0.entry === "implement" ? pass.implement.byIssue.get(key(w0.repo, w0.number)) : undefined;
   const candidate = candidatePr(attempts, w0);
   const work = workOf(attempts, w0, candidate === null ? null : pass.items.get(key(w0.repo, candidate)));
   const attempt = work.attempt;
@@ -485,9 +490,28 @@ async function advanceOne(db: Db, pass: Pass, writes: Writes, w0: ItemWorkflow):
     const asked: WorkflowPatch = { ...patch, rec: head !== null ? ask(q.rec, head) : q.rec, recAt, recHead: head };
     return w.approvedBy !== null ? await block({ ...asked, blocker: q.blocker, blockerParams: q.params }, patch) : write({ ...asked, state: "recommending", blocker: null, blockerParams: null });
   };
+  /**
+   * An issue's review: it runs while its newest row is queued, waits while the row's question to the reporter is to be posted or
+   * answered, and comes back with the review's recommendation; `review and implement` goes on to implement without a question when
+   * the review recommends that. While the recommendation waits for its answer nothing moves.
+   */
+  const issueReviewed = (row: IssueReviewRow | null): ItemWorkflow["state"] | null => {
+    step = "review";
+    if (!row || (w.state !== "running" && w.state !== "waiting")) return settle(base);
+    if (row.state === "done" || row.state === "failed") {
+      if (row.thenImplement && recommendsImplement(row)) {
+        step = "implement";
+        return write({ ...base, entry: "implement", state: "running", plan: [], rec: null, recAt: null, recHead: null });
+      }
+      return write({ ...base, state: "recommending", rec: issueRecommendation(row), recAt: pass.at, recHead: null });
+    }
+    const to = row.state === "ask" || row.state === "reporter" ? "waiting" : "running";
+    return settle({ ...base, ...(w.state !== to ? { state: to } : {}) });
+  };
   if (target === null) {
     // An issue with no PR yet: it ends when the issue closes, comes back with its implementation's question, and shows a ready plan's parts.
     if (self && self.state !== "OPEN") return write({ state: "closed", rec: null, blocker: null, blockerParams: null });
+    if (w.entry === "review") return issueReviewed(pass.issueReviews.get(w.id) ?? null);
     step = stepIn(w, "implement");
     const issueFacts = pass.issues.get(key(w.repo, w.number));
     if (w.state === "blocked" || w.state === "recommending") {

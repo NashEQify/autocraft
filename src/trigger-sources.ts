@@ -17,6 +17,7 @@ import "./data/build/triggers.ts";
 import "./data/conversations/triggers.ts";
 import "./data/chat/triggers.ts";
 import "./data/implement/triggers.ts";
+import "./data/issuereview/triggers.ts";
 import "./data/discord/triggers.ts";
 import "./data/security/triggers.ts";
 import "./data/runners/triggers.ts";

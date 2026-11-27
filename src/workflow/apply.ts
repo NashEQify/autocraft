@@ -10,6 +10,7 @@ import * as access from "../data/access/index.ts";
 import { loadAccess } from "../data/access/index.ts";
 import { loadTrackedRepos } from "../data/control/index.ts";
 import { loadImplementFacts, recordAnswers } from "../data/implement/index.ts";
+import { loadLatestIssueReview, queueIssueReviews } from "../data/issuereview/index.ts";
 import { loadItems, loadRepos } from "../data/mirror/index.ts";
 import { retryPremergeAt } from "../data/review/index.ts";
 import { setCallLevels } from "../data/runners/index.ts";
@@ -360,7 +361,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
 /** A run that gives a Task Runner work: anything but an end, an autorepin, a weight alone and a resume of what nobody started. */
 const needsRunner = (r: Run): boolean =>
   r.end === null && r.autorepin === null && r.resume !== "unstarted"
-  && (r.start !== null || r.again !== null || r.approve || r.retryMerge || r.answers || r.resume !== null || r.goesOn || r.pick !== null || r.fix.length > 0);
+  && (r.start !== null || r.again !== null || r.approve || r.retryMerge || r.answers || r.resume !== null || r.goesOn || r.pick !== null || r.fix.length > 0 || r.implements);
 
 /** The Task Runner line for work `login` started or approved on `repo` (runnerLine); null when there is nothing to say or the runners could not be read. */
 async function runnerNotice(db: Db, repo: string, login: string, clock: Clock = utcClock): Promise<string | null> {
@@ -393,7 +394,7 @@ function eventKind(r: Run): WorkflowEventKind {
   if (r.end === "close") return "closed";
   if (r.end === "backlog") return "backlog";
   if (r.autorepin !== null) return "set";
-  if (r.start) return "started";
+  if (r.start || (r.implements && !r.answers)) return "started";
   // An answer to the open recommendation is an answer also when it approves the merge: it accepts what the recommendation showed.
   if (r.answers) return "answered";
   if (r.approve || r.retryMerge) return "approved";
@@ -499,7 +500,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
       if (mirrorBehind(pushes.get(`${pr.repo}#${pr.number}`) ?? [], pr.head, repos.get(pr.repo)?.synced_at ?? null)) throw new fx.EffectError(CHANGED());
     }
     const weight = r.weight ?? ends?.weight ?? WEIGHT_NORMAL;
-    const { write, ...conflict } = await fx.start({ ...c, ...shown, item: pr, ...(ends ? { workflowId: ends.id } : {}) }, entry, r.approve, r.instruction);
+    const { write, ...conflict } = await fx.start({ ...c, ...shown, item: pr, ...(ends ? { workflowId: ends.id } : {}) }, entry, r.approve, r.instruction, { thenImplement: r.thenImplement });
     // What was dropped stays dropped in a review the new work may owe.
     const dropped = (ends?.plan ?? []).flatMap((p) => (p.state === "dropped" ? [p] : r.drop.includes(p.n) ? [{ ...p, state: "dropped" as const, droppedBy: by, ...(pr.head ? { droppedAt: pr.head } : {}) }] : []));
     return {
@@ -567,6 +568,12 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
   if (live.entry === "merge" && r.again === "review") patch.reviewAskedAt = (r.answers ? live.recAt : null) ?? at;
   else if (live.entry === "merge" && r.answers && r.merges && live.blocker === "author-commits" && live.blockerParams?.round !== "out-of-scope") patch.reviewAskedAt = null;
   if (runs) patch.state = r.again !== null || r.merges || r.pick || r.goesOn ? "running" : r.answers ? "done" : live.state;
+  // An issue's review: implementing it makes the workflow an implement one; a question to the reporter waits for their answer.
+  if (r.implements) Object.assign(patch, { entry: "implement", state: "running", step: null, plan: [] });
+  if (r.asks !== null) patch.state = "waiting";
+  const issueReview = live.kind === "issue" && live.entry === "review" && (r.again === "review" || r.asks !== null)
+    ? { thenImplement: r.asks !== null ? (await loadLatestIssueReview(db, live.repo, live.number))?.thenImplement ?? false : r.thenImplement, ...(r.asks !== null && { state: "ask" as const, question: r.asks }) }
+    : null;
   // The recorded step is the advance pass's; until its next pass, readers work the step out from the new state.
   if (patch.state !== undefined && patch.state !== live.state) patch.step = null;
   return {
@@ -578,6 +585,7 @@ async function carryOut(c: fx.Ctx, r: Run, wf: ItemWorkflow | null, actor: Actor
       if (r.pick) await answerQuestion(c, r.pick.question, r.pick.option);
       if (r.merges && o.waiting.length) await retryActions(db, { ids: o.waiting.map((a) => a.id) });
       await saveWorkflows(db, [{ id: live.id, patch, at }]);
+      if (issueReview) await queueIssueReviews(db, [{ workflowId: live.id, repo: live.repo, number: live.number, by, at, ...issueReview }]);
       if (r.approve) await fx.takeOver(c, on.item);
       if (r.retryPremerge && live.recHead !== null) await retryPremergeAt(db, [{ repo: on.item.repo, number: on.item.number, head: live.recHead }]);
       if (weighed.length) await setCallLevels(db, [...await claimLevels(db, weighed)].map(([ref, level]) => ({ ref, level })));

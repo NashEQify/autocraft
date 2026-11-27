@@ -14,6 +14,7 @@ import { lintOpusReply, parseOpusReply, publicTexts as opusTexts, rawReason, typ
 import { lintPremerge, parsePremerge, premergeTexts, type PremergeReview } from "../premerge/parse.ts";
 import { lintReply, parseFindings, publicTexts as postmergeTexts, type Finding, type PostmergePr } from "../postmerge/parse.ts";
 import { lintEvalReply, parseEvalReply, type EvalFinding, type EvalInput } from "../eval/prompt.ts";
+import { lintIssueReview, parseIssueReview, type IssueReview, type IssueReviewInput } from "../issuereview/prompt.ts";
 import { commentTexts, parseReply, type Parsed as ConversationReply } from "../conversations/cards.ts";
 import type { ConversationInput } from "../conversations/types.ts";
 import { parseCompareReply, parsePlanReply, parseScreenshotReply, type CompareParsed, type Parsed as PlanReply, type ScreenshotParsed } from "../verify/plan.ts";
@@ -231,6 +232,14 @@ export const EVAL_INVESTIGATE: ClaudeStep<EvalInput, EvalFinding> = {
   toPrompt: (x) => [x], size: () => 1,
   lint: { fields: ["evidence"], make: () => (text) => lintEvalReply(text) },
   parse: async (text) => { const r = parseEvalReply(text); return r === null ? null : { value: r }; },
+};
+
+/** The review of one issue a maintainer started: a claim without path:line goes back as one fix turn. */
+export const ISSUE_REVIEW: ClaudeStep<IssueReviewInput, IssueReview> = {
+  provider: "claude", id: "review.issue",
+  toPrompt: (x) => [x], size: () => 1,
+  lint: { fields: ["claims"], make: () => (text) => lintIssueReview(text) },
+  parse: async (text) => { const r = parseIssueReview(text); return r === null ? null : { value: r }; },
 };
 
 /** Comment cards are public text: a reference mention or quote goes back to the model as one fix turn. A reply without text is not linted and keeps the whole-call retry. */

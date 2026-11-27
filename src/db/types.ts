@@ -1123,6 +1123,28 @@ export interface Implementations {
   updated_at: string;
 }
 
+export interface IssueReviews {
+  id: Generated<number>;
+  workflow_id: number;
+  repo: string;
+  number: number;
+  requested_by: string;
+  requested_at: string;
+  then_implement: Generated<number>;
+  state: string;
+  tries: Generated<number>;
+  tried_at: string | null;
+  error: string | null;
+  commit_sha: string | null;
+  model: string | null;
+  review: string | null;
+  reviewed_at: string | null;
+  comment_url: string | null;
+  question: string | null;
+  asked_at: string | null;
+  job_id: number | null;
+}
+
 export interface ItemActivity {
   repo: string;
   number: number;
@@ -2811,6 +2833,7 @@ export interface DB {
   held_followups: HeldFollowups;
   implementation_rounds: ImplementationRounds;
   implementations: Implementations;
+  issue_reviews: IssueReviews;
   item_activity: ItemActivity;
   item_areas: ItemAreas;
   item_changes: ItemChanges;
@@ -3031,6 +3054,7 @@ export interface DB {
   "main.held_followups": HeldFollowups;
   "main.implementation_rounds": ImplementationRounds;
   "main.implementations": Implementations;
+  "main.issue_reviews": IssueReviews;
   "main.item_activity": ItemActivity;
   "main.item_areas": ItemAreas;
   "main.item_changes": ItemChanges;
@@ -3255,6 +3279,7 @@ export const COLUMNS = {
   held_followups: ["id", "card_id", "choice_id", "decision_id", "answer_seq", "preapproval_id", "repo", "number", "issue_repo", "title", "body", "by", "at", "state", "issue_number", "url", "reason", "attempts", "updated_at", "workflow_id", "approved_at"],
   implementation_rounds: ["id", "implementation_id", "kind", "call_id", "result", "at"],
   implementations: ["id", "repo", "number", "queued_by", "state", "attempt", "text_hash", "base_sha", "workspace_id", "plan_json", "plan_md", "plan_call_id", "session_call_id", "report_json", "diff_hash", "diff_stat", "branch", "pr_number", "pr_url", "decision_id", "reason", "created_at", "updated_at"],
+  issue_reviews: ["id", "workflow_id", "repo", "number", "requested_by", "requested_at", "then_implement", "state", "tries", "tried_at", "error", "commit_sha", "model", "review", "reviewed_at", "comment_url", "question", "asked_at", "job_id"],
   item_activity: ["repo", "number", "id", "kind", "at", "actor", "label", "before_oid", "after_oid"],
   item_areas: ["repo", "number", "area", "source", "confidence", "list_version", "at"],
   item_changes: ["seq", "repo", "number"],

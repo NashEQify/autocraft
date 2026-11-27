@@ -54,6 +54,12 @@ export type Run = {
   pick: QuestionAnswer | null;
   /** What the fix-up is to do beyond the parts: the person's words after fix, or the finding of a review that lists no fix (`review`). */
   instruction: { text: string; review?: true } | null;
+  /** An issue's review (a start or a review again) that goes on to implement when it recommends that, without a question. */
+  thenImplement: boolean;
+  /** The issue's live review goes on to implement: the workflow's entry becomes implement. */
+  implements: boolean;
+  /** The question its review has for the issue's reporter: it is posted, and the issue is reviewed again after their answer. */
+  asks: string | null;
 };
 
 export type Ambiguity =
@@ -78,6 +84,8 @@ export type Refusal =
   | { why: "implement-not-issue" }
   | { why: "not-issue-step"; word: "review" | "fix-up" }
   | { why: "issue-merge-queue" }
+  /** `merge` on an issue's review: the merge is approved with the implementation. */
+  | { why: "issue-review-merge" }
   | { why: "autorepin-not-pr" }
   | { why: "already-held"; by: string; at: string }
   | { why: "not-held" }
@@ -102,7 +110,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, retryPremerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, instruction: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, retryPremerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, instruction: null, thenImplement: false, implements: false, asks: null, ...r },
 });
 
 /** The item stopped at defects of the pre-merge review: their plan parts (none where nobody asked for their fixes yet); null otherwise. */
@@ -164,8 +172,10 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
   const repin = parts.find((p): p is Extract<CommandPart, { args?: string }> => p.word === "autorepin");
   const named = parts.filter((p): p is Extract<CommandPart, { part: unknown }> => "part" in p);
 
+  // An issue's review that goes on to implement when it recommends that, as a pull request's review goes on to merge.
+  const chain = state.kind === "issue" && entries.length === 2 && entries.includes("review") && entries.includes("implement");
   // Words that end the work or stand apart run alone; two entry points can't both start.
-  if (((end.length || repin) && parts.length > 1) || (has("resume") && parts.some((p) => p.word !== "resume" && p.word !== "weight")) || entries.length > 1) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
+  if (((end.length || repin) && parts.length > 1) || (has("resume") && parts.some((p) => p.word !== "resume" && p.word !== "weight")) || (entries.length > 1 && !chain)) return ambiguous({ why: "conflict", words: parts.map((p) => p.word) });
 
   if (end.length) {
     const e = end[0]!;
@@ -179,9 +189,10 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     return run({ autorepin: repin.args ?? "", how: "set" });
   }
 
-  const entry = entries[0] ?? null;
+  const entry = chain ? "review" : entries[0] ?? null;
   if (entry === "implement" && state.kind !== "issue") return refused({ why: "implement-not-issue" });
-  if (entry && entry !== "implement" && state.kind === "issue") return refused({ why: "not-issue-step", word: entry });
+  if (entry === "fix-up" && state.kind === "issue") return refused({ why: "not-issue-step", word: entry });
+  if (entry === "review" && state.kind === "issue" && merge) return refused({ why: "issue-review-merge" });
 
   if (!live) {
     // The yes would go on with what was held, the start would drop it.
@@ -190,7 +201,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     const said = named.length === 1 && named[0]!.word === "fix" && typeof named[0]!.part === "string" && "text" in named[0]! && named[0].text && !entry ? named[0].text : null;
     if (said !== null && state.kind === "pr") return run({ start: "fixup", instruction: { text: said }, approve: merge, merges: merge, weight, how: merge ? "approved" : "started" });
     if (named.length) return ambiguous({ why: "no-plan" });
-    if (entry) return run({ start: ENTRY_OF[entry], approve: merge, merges: merge, weight, how: merge ? "approved" : "started" });
+    if (entry) return run({ start: ENTRY_OF[entry], approve: merge, merges: merge, weight, thenImplement: chain, how: merge ? "approved" : "started" });
     if (merge) {
       if (state.kind === "issue") return refused({ why: "issue-merge-queue" });
       return run({ start: "merge", approve: true, merges: true, weight, how: "approved" });
@@ -198,6 +209,14 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     return ambiguous({ why: "weight-unstarted", weight: weight! });
   }
 
+  // An issue's review: implement goes on to implement it, review reviews it again; it has no plan and nothing of it merges.
+  if (wf.kind === "issue" && wf.entry === "review") {
+    const answers = !!wf.rec;
+    if (entry === "implement") return run({ implements: true, approve: merge, merges: merge, weight, answers, how: merge ? "approved" : answers ? "answered" : "started" });
+    if (merge) return refused({ why: "issue-review-merge" });
+    if (named.length) return ambiguous({ why: "no-plan" });
+    if (entry === "review") return run({ again: "review", thenImplement: chain, weight, answers, how: answers ? "answered" : null });
+  }
   if (entry === "implement") return refused({ why: "already-started", entry: wf.entry, by: wf.startedBy, at: wf.startedAt });
 
   // Parts named by number or by words, each matching exactly one part of the plan.
@@ -327,7 +346,7 @@ const goOn = (held: ItemWorkflow, weight: number | null): Resolved => {
 };
 
 /** A recommendation that fixes, runs, answers, closes and merges nothing: a yes to it would do nothing. */
-const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.merges && !r.goes;
+const runsNothing = (r: NonNullable<ItemWorkflow["rec"]>): boolean => !r.parts.fix.length && !r.again && !r.answer && !r.close && !r.merges && !r.goes && !r.issue;
 
 /** Starts the PR whose review failed for good at the merge queue, unless an earlier review of that head asks for what no one dropped. */
 function withoutReview(wf: ItemWorkflow, drop: number[], weight: number | null, ambiguous: (a: Ambiguity) => Resolved): Resolved {
@@ -343,7 +362,14 @@ function withoutReview(wf: ItemWorkflow, drop: number[], weight: number | null, 
  */
 function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number | null, merge = false): Resolved {
   const rec = wf.rec!;
-  if (rec.close && !fix.length && !merge) return run({ end: "close", how: "answered", answers: true, weight });
+  if (rec.close && !fix.length && !merge) return run({ end: "close", ...(rec.closeAs && { close: rec.closeAs }), how: "answered", answers: true, weight });
+  if (rec.issue && !fix.length && !merge) {
+    switch (rec.issue.action) {
+      case "implement": return run({ implements: true, how: "answered", answers: true, weight });
+      case "backlog": return run({ end: "backlog", how: "answered", answers: true, weight });
+      case "ask": return run({ asks: rec.issue.question ?? "", how: "answered", answers: true, weight });
+    }
+  }
   const merges = rec.merges || merge;
   const approve = merges && !wf.approvedBy;
   if (rec.answer && !fix.length) return run({ pick: rec.answer, drop, approve, merges, weight, answers: true, how: approve ? "approved" : "answered" });

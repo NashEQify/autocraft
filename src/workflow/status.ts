@@ -159,6 +159,9 @@ const AFTER_CHECKS = (): string => t("after the pre-merge check and green CI");
 function yesWhat(rec: Recommendation): string | null {
   const fix = rec.parts.fix;
   if (rec.close && !fix.length) return t("close it");
+  if (rec.issue?.action === "implement") return t("implement it");
+  if (rec.issue?.action === "backlog") return t("put it in the backlog");
+  if (rec.issue?.action === "ask") return t("ask the reporter");
   if (rec.answer && !fix.length) return rec.answer.label ? t("go with “{option}”", { option: rec.answer.label }) : t("go on with the implementation");
   if (rec.waits && !rec.again) return t("approve the merge and wait");
   if (rec.goes === "look") return t("look again");
@@ -173,6 +176,8 @@ function yesWhat(rec: Recommendation): string | null {
 export function yesClause(rec: Recommendation): string | null {
   const fix = rec.parts.fix;
   if (rec.close && !fix.length) return t("Reply yes to close it.");
+  if (rec.issue?.action === "backlog") return t("Reply yes to put it in the backlog.");
+  if (rec.issue?.action === "ask") return t("Reply yes to ask the reporter; the issue is reviewed again after their answer.");
   if (rec.answer && !fix.length) {
     const what = yesWhat(rec)!;
     return rec.merges ? t("Reply yes to {what}, then merge ({checks}).", { what, checks: AFTER_CHECKS() }) : t("Reply yes to {what}; it comes back to you after.", { what });
@@ -188,7 +193,7 @@ export function yesClause(rec: Recommendation): string | null {
 /** What a yes to the recommendation runs, as the item header's next step ("fix 1, then merge"); null when it runs nothing. */
 export function yesNext(rec: Recommendation): string | null {
   const what = yesWhat(rec);
-  if ((rec.close && !rec.parts.fix.length) || (rec.waits && !rec.again)) return what;
+  if ((rec.close && !rec.parts.fix.length) || (rec.waits && !rec.again) || rec.issue) return what;
   return what ? (rec.merges ? t("{what}, then merge", { what }) : what) : rec.merges ? t("merge") : null;
 }
 
@@ -262,6 +267,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
     return r.close.as === "completed" ? t("Closing as completed {by}.", { by: who }) : t("Closing as not planned {by}.", { by: who });
   }
   if (r.end === "backlog") return t("In the backlog: open, no work planned {by}. Any command starts it again.", { by: who });
+  if (r.asks !== null) return t("Asking the reporter: “{question}” The issue is reviewed again after their answer {by}. Reply hold to halt.", { question: clipText(r.asks, INSTRUCTION_SHOWN), by: who });
   if (r.autorepin !== null) {
     return r.autorepin.toLowerCase() === "off"
       ? t("No Cargo repin after this merges {by}.", { by: who })
@@ -272,7 +278,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
   if (r.start === "review") did.push(t("reviewing"));
   else if (r.start === "fixup" && r.instruction && !waits) did.push(t("fixing “{instruction}”", { instruction: clipText(r.instruction.text, INSTRUCTION_SHOWN) }), t("reviewing the fix"));
   else if (r.start === "fixup") did.push(waits ? t("reviewing") : t("reviewing, fixing what the review finds, reviewing again"));
-  else if (r.start === "implement") did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
+  else if (r.start === "implement" || r.implements) did.push(t("implementing, reviewing, fixing what the review finds, reviewing again"));
   else if (r.again === "review") did.push(t("reviewing again"));
   else if (r.again === "fixup" && !waits) did.push(fixingText(r));
   if (r.resume) did.push(t("going on where it was held"));
@@ -290,6 +296,7 @@ export function confirmLine(r: Run, by: string, at: string, clock: Clock = utcCl
       ? r.replaces ? t("updating from main, then merging without the review when CI is green") : t("updating from main, then merging in the next batch when CI is green")
     : r.merges
       ? did.length || r.answers || r.retryMerge ? t("merging when CI is green") : t("merging when the steps are done and CI is green")
+      : r.thenImplement ? t("implementing when the review recommends it, else coming back with a recommendation")
       : t("coming back with a recommendation");
   const what = cap(did.length ? t("{done}, then {end}", { done: did.join(", "), end }) : end);
   return t("{what}{weight} {by}. Reply hold to halt.", { what, weight: weight ? `, ${weight}` : "", by: who });
@@ -391,8 +398,9 @@ function ambiguityText(understood: string, a: Ambiguity, mention?: string, propo
 function refusalText(r: Refusal, clock: Clock): string {
   switch (r.why) {
     case "implement-not-issue": return t("implement is for issues.");
-    case "not-issue-step": return t("{word} is for pull requests. Use implement for an issue.", { word: r.word });
+    case "not-issue-step": return t("{word} is for pull requests. Use review or implement for an issue.", { word: r.word });
     case "issue-merge-queue": return t("An issue can't go in the merge queue. Use implement and merge.");
+    case "issue-review-merge": return t("An issue's review merges nothing. Approve the merge with implement: implement and merge.");
     case "autorepin-not-pr": return t("autorepin is for pull requests.");
     case "already-held": return t("Already held by {login}, {time}. Reply resume to go on.", { login: r.by, time: clock(r.at) });
     case "not-held": return t("This item is not held.");

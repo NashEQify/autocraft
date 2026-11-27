@@ -157,6 +157,7 @@ const BY_OTHERS: Partial<Record<WaitCode, string>> = {
   breaker: tk("Waiting for someone to resume the next step, which stopped itself here"),
   draft: tk("Waiting for the pull request to be marked ready for review"),
   "implement-question": tk("Waiting for the author's answer"),
+  "issue-reporter": tk("Waiting for the reporter's answer"),
 };
 
 /** The state line of an item whose merge waits for a step of AutoCraft's own that the plan names by its wait code. */

@@ -8,6 +8,7 @@ import { resumeStage, setPipelineFlags } from "../data/control/index.ts";
 import { cancelUnopened } from "../data/implement/index.ts";
 import { releaseHeld } from "../data/intake/index.ts";
 import { loadChecks, loadItems, loadRepoCiSignals, loadRepos } from "../data/mirror/index.ts";
+import { queueIssueReviews } from "../data/issuereview/index.ts";
 import { withdrawItemCalls, withdrawUnownedItemCalls } from "../data/runners/index.ts";
 import { adoptLegs, endFixupRequests, listWorkflowLegs, listWorkflows, loadActions, loadFixupRequests, loadLegs, saveActions, type CloseAs, type Preapproval } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
@@ -126,14 +127,16 @@ function conflictSaid(item: Target, path: ConflictPath | null): ConflictSaid {
 
 /**
  * Starts the item at `entry`. Review and Fix-up mark the PR for a review of its current head (the fix-up follows from what the
- * review finds); the merge queue pre-approves the merge; an implement start is the workflow row itself. An approved PR gets its
+ * review finds); the merge queue pre-approves the merge; an implement start is the workflow row itself, an issue's review a request row. An approved PR gets its
  * merge leg at once, and what is said of a conflict with its base branch names who settles it.
  */
-export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean, instruction: Instruction | null = null): Promise<{ write: Write } & ConflictSaid> {
+export async function start(c: Ctx, entry: ItemWorkflow["entry"], approved: boolean, instruction: Instruction | null = null, o: { thenImplement?: boolean } = {}): Promise<{ write: Write } & ConflictSaid> {
   const { db, by, item } = c;
   const merges = approved || entry === "merge";
   if (merges) await checkMerges(c);
   if (entry === "implement") return { write: nothing };
+  // An issue's review is a request row the issue review step takes (src/issuereview).
+  if (item.kind === "issue") return { write: (id) => queueIssueReviews(db, [{ workflowId: id, repo: item.repo, number: item.number, by, at: c.at, thenImplement: !!o.thenImplement }]) };
   // A fix-up start with the person's words makes that fix first; its push is reviewed as any push of ours is, and carries the merge leg.
   if (instruction && item.kind === "pr") {
     const had = merges ? await activeLeg(db, item) : null;

@@ -345,6 +345,17 @@ function flows(): { title: string; note?: string; rows: FlowRow[] }[] {
   ];
   return [
     { title: t(ENTRY_LABEL.review), rows: [{ text: "review", kind: "you" }, { text: t("Model review of the pull request") }, ends(t("Fix the findings, review again, merge"))] },
+    {
+      title: t("Review (issues)"),
+      note: t("The review reads the issue and the code, posts one comment, and recommends one next step."),
+      rows: [
+        { text: "review", kind: "you" }, { text: t("Model review of the issue against the code") },
+        [
+          { when: t("Recommends implement"), text: t("Implement: at once after review and implement, after your yes after review") },
+          { when: t("Otherwise"), text: t("one recommendation: close, ask the reporter, or backlog"), kind: "asks" },
+        ],
+      ],
+    },
     { title: t(ENTRY_LABEL.fixup), rows: [{ text: "fix-up", kind: "you" }, { text: t("Review") }, { text: t("Fix what the review found") }, { text: t("Review again") }, ends(t("Merge"))] },
     {
       title: t(ENTRY_LABEL.implement),

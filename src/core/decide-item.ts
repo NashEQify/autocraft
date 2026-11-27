@@ -3,7 +3,7 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
-import { IMPLEMENT_START_RETRIES } from "./backoff.ts";
+import { IMPLEMENT_START_RETRIES, issueReviewDelayMs } from "./backoff.ts";
 import { permitted } from "./authority.ts";
 import type { WaitCode } from "./codes.ts";
 import { BOX_IDENTITY_WAIT, decidePr, implementOffWait, notStarted, refusedWait, standingWait, TELLS, waitFields, type Wait } from "./decide.ts";
@@ -57,6 +57,23 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   // too, are planned on the PR (decidePr).
   // Ending the attempt is bookkeeping: it needs neither the Implement feature nor a person's command (gatePermission).
   return row!.prOpen ? null : { bucket: "revise" };
+}
+
+/**
+ * The issue review step of an issue whose live workflow is a review, or the wait that holds it; null when nothing of it is due. A queued
+ * review is due, after a backoff when its last call gave no valid review; a question for the reporter is due to be posted; once posted, the
+ * review runs again after the issue's author commented.
+ */
+export function issueReviewStep(f: ItemFacts): { due: true } | { wait: Wait } | null {
+  const r = f.issueReview;
+  if (f.kind !== "issue" || !f.open || !f.inScope || f.held || !r || f.workflow?.entry !== "review") return null;
+  if (r.state === "queued") {
+    const due = r.tries > 0 && r.triedAt ? Date.parse(r.triedAt) + issueReviewDelayMs(r.tries) : 0;
+    return f.now < due ? { wait: system("issue-review-retry", `the next issue review at ${new Date(due).toISOString().slice(11, 16)} UTC (call ${r.tries + 1})`) } : { due: true };
+  }
+  if (r.state === "ask") return { due: true };
+  if (r.state === "reporter") return r.reporterAnswered ? { due: true } : { wait: { code: "issue-reporter", who: "contributor", text: "the reporter's answer" } };
+  return null;
 }
 
 /**
@@ -132,12 +149,15 @@ export function decideItem(f: ItemFacts): ItemPlan {
   // implement: a queued issue's next step (implementStep); the breaker is applied by gates().
   const step = implementStep(f);
   if (step && "bucket" in step) actions.push(act("implement", null, { bucket: step.bucket }));
+  // issue-review: the review a maintainer asked for, or its question to the reporter (issueReviewStep).
+  const review = issueReviewStep(f);
+  if (review && "due" in review) actions.push(act("issue-review", null));
 
   // unassign (issues; a PR's is decided with its review-to-merge plan): kept while an implementation is due or runs, or its PR is open;
   // released when the issue waits on a person (a question, a stuck attempt, a switch), was given up or left the scope.
   if (f.kind === "issue") {
     const row = f.implement.row;
-    const running = (!!step && "bucket" in step) || (row?.state === "pr-opened" && f.openPr !== null);
+    const running = (!!step && "bucket" in step) || (row?.state === "pr-opened" && f.openPr !== null) || (!!review && "due" in review);
     actions.push(...unassignActions(f.assignment, f.open, !f.inScope || !!f.held || !running));
   }
 
@@ -148,6 +168,7 @@ export function decideItem(f: ItemFacts): ItemPlan {
   let wait: Wait | null = !idle ? null : !f.inScope ? system("scope", "not in scope") : state === "classified" && pluginPr(f) ? system("open-request", PLUGIN_WAIT) : WAITS[state] ?? null;
   // A queued issue waits on what holds its implementation.
   if (step && "wait" in step && f.open && idle) wait = step.wait;
+  if (review && "wait" in review && f.open && idle) wait = review.wait;
   // An issue with nothing else due waits on the PR that closes it.
   if (wait === null && f.kind === "issue" && f.open && f.inScope && !f.held && idle) {
     if (f.openPr?.closes) wait = system("open-pr", openPrWait(f.openPr.number));
@@ -166,6 +187,7 @@ export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): stri
   }
   if (item.state === "classified" && pluginPr(f)) return "Stays open as a plugin candidate";
   if (f.kind === "issue") {
+    if (f.workflow?.entry === "review") return f.issueReview?.state === "reporter" ? "Review: waiting for the reporter" : "Review";
     const im = f.implement, s = im.row?.state;
     if (im.queuedBy !== null && im.standing !== "no") {
       switch (s) {

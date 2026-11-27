@@ -3158,3 +3158,30 @@ CREATE TABLE IF NOT EXISTS eval_causes (
   attempts INTEGER NOT NULL DEFAULT 0, -- creates of the issue tried
   note TEXT
 ) WITHOUT ROWID;
+
+-- The issue reviews a maintainer asked for (`review` on an issue, src/issuereview): one row per review of an issue's workflow.
+-- state: queued (due), done (the review is stored and posted), failed (no valid review after ISSUE_REVIEW_TRIES calls), ask (the
+-- reporter's question waits to be posted), reporter (the question is posted; the review runs again on this row once the reporter answers).
+CREATE TABLE IF NOT EXISTS issue_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_id INTEGER NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  requested_by TEXT NOT NULL,         -- whose Task Runner runs the review: who started it or answered the question that asked for it
+  requested_at TEXT NOT NULL,
+  then_implement INTEGER NOT NULL DEFAULT 0, -- `review and implement`: an implement recommendation starts the implementation without a question
+  state TEXT NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,   -- review calls without a valid review since the row was last due
+  tried_at TEXT,
+  error TEXT,
+  commit_sha TEXT,                    -- the default branch commit the review read
+  model TEXT,
+  review TEXT,                        -- JSON IssueReview (src/issuereview/prompt.ts)
+  reviewed_at TEXT,
+  comment_url TEXT,
+  question TEXT,                      -- state ask or reporter: the question for the reporter
+  asked_at TEXT,                      -- when that question was posted
+  job_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS issue_reviews_item ON issue_reviews(repo, number, id);
+CREATE INDEX IF NOT EXISTS issue_reviews_workflow ON issue_reviews(workflow_id, id);

@@ -116,6 +116,7 @@ export function planInputsWith(o: { permReadTtlMs: number }): PlanInput[] {
     { table: "item_priority", class: "item", why: "One item's priority row." },
     { table: "item_rank", class: "item", why: "One item's rank score." },
     { table: "item_stage", class: "item", why: "One item's stage row." },
+    { table: "issue_reviews", class: "item", why: "The reviews of one issue a maintainer asked for: a queued review, or a question for the reporter, is due." },
     {
       table: "screenshot_runs", class: "item", why: "The screenshots at one PR head: a clear regression keeps it from merging until a person answers.", columns: ["head_sha", "held", "comparison", "finished_at"],
       noTopic: "Written by the collect job (job-ends).",

@@ -46,6 +46,7 @@ import { SAMPLE_SIGNAL, SIGNAL_JEV_YES, SIGNAL_QUESTION, SIGNAL_TEXT_CHARS, sign
 import { PLAN_ACCEPTANCE_MAX, PLAN_BODY_CHARS, PLAN_COMMENT_CHARS, PLAN_COMMENTS_MAX, PLAN_GUIDANCE_CHARS, PLAN_GUIDANCE_MAX, PLAN_ITEM_CHARS, PLAN_ITEMS_MAX, PLAN_MAX_TURNS, PLAN_OPTIONS_MAX, PLAN_PART_FILES_MAX, PLAN_PART_TITLE_CHARS, PLAN_PARTS_MAX, PLAN_QUESTION_CHARS, PLAN_QUESTIONS_MAX, PLAN_RECOMMENDATION_CHARS, PLAN_SUMMARY_CHARS, PLAN_TEXT_CHARS, PLAN_TIMEOUT_SEC, SAMPLE_PLAN, type PlanInput } from "../implement/plan-types.ts";
 import { REASON_WORDS as MAINFIX_REASON_WORDS, SAMPLE_MAIN_FIX, type MainFixInput } from "../mainfix/types.ts";
 import { EVAL_FIELDS, EVAL_OUTPUT, EVAL_TEMPLATE, EVAL_VALIDATION, SAMPLE_EVAL, type EvalInput } from "../eval/prompt.ts";
+import { ISSUE_REVIEW_FIELDS, ISSUE_REVIEW_OUTPUT, ISSUE_REVIEW_TEMPLATE, ISSUE_REVIEW_VALIDATION, SAMPLE_ISSUE_REVIEW, type IssueReviewInput } from "../issuereview/prompt.ts";
 import { MAX_COMPARE_WORDS, MAX_CRATES, MAX_FILTERS, MAX_SHOT_REASON_WORDS, MAX_SHOT_STEPS, MAX_SHOTS, MAX_SUMMARY_WORDS, MAX_TEST_LINES, PLAN_BODY_LIMIT, SAMPLE_SCREENSHOT_COMPARE, SAMPLE_SCREENSHOT_PLAN, SAMPLE_VERIFY_PLAN, SAMPLE_VERIFY_SUMMARY, SUMMARY_LOG_BYTES, type ScreenshotCompareInput, type ScreenshotPlanInput, type VerifyPlanInput, type VerifySummaryInput } from "../verify/types.ts";
 
 /** Jev calls at once unless the `jev_parallel` setting says otherwise (Jev has no accounts, so no slots limit it). */
@@ -1436,6 +1437,26 @@ const EVAL_INVESTIGATE: ClaudePrompt = {
   limits: { perCall: 1, attempts: 2, timeoutSeconds: 1200 },
 };
 
+const ISSUE_REVIEW: ClaudePrompt = {
+  id: "review.issue",
+  stage: "Review (issues)",
+  runner: "claude",
+  purpose: "Reviews one issue a maintainer started with review, reading the repository at the default branch: what the issue asks, whether it still holds (each claim with path:line), related items, size and the files a fix touches, approach and risks, and one recommendation (implement, close, needs info, backlog). Posted as one comment on the issue; the maintainer answers the recommendation.",
+  models: ["opus"],
+  effort: "high",
+  taskBudget: OPUS_REVIEW_TASK_BUDGET,
+  placeholders: {
+    issue: `The issue as a JSON object indented by one space: ${ISSUE_REVIEW_FIELDS}.`,
+    repo_access: REPO_ACCESS_DOC,
+  },
+  sandbox: { docs: true, tools: ["Read", "Grep", "Glob"], maxTurns: 40, taskBudget: OPUS_REVIEW_TOOL_TASK_BUDGET },
+  lint: true,
+  template: ISSUE_REVIEW_TEMPLATE,
+  output: ISSUE_REVIEW_OUTPUT,
+  validation: `${CLAUDE_RESULT} ${ISSUE_REVIEW_VALIDATION} ${FIX_TURN}`,
+  limits: { perCall: 1, attempts: 2, timeoutSeconds: 1200 },
+};
+
 const SECURITY_FIXCHECK: ClaudePrompt = {
   id: "security.fixcheck",
   stage: "Security",
@@ -1615,7 +1636,7 @@ A ready reply has 1 to ${PLAN_ACCEPTANCE_MAX} acceptance criteria and no questio
   extra: [{ label: "Where", value: "A workspace pod of the repository at the default branch head, run on the Task Runner of the person who queued the issue in one of its normal slots; the fixed text is the system prompt and the task, issue and guidance are on stdin. After the reply AutoCraft resets the tree (git checkout and git clean in /work/src); the build directory is kept" }],
 };
 
-export const CLAUDE_PROMPTS = { "classify.haiku": HAIKU, "referee.sonnet": REFEREE, "fixup.patch": FIXUP, "verify.plan": VERIFY_PLAN, "verify.screenshot": VERIFY_SCREENSHOT, "verify.compare": VERIFY_COMPARE, "verify.summary": VERIFY_SUMMARY, "priority.haiku": PRIORITY_HAIKU, "dupes.haiku": DUPES_HAIKU, "fixup.check": FIXUP_CHECK, "review.opus": OPUS_REVIEW, "premerge.opus": PREMERGE, "postmerge.opus": POSTMERGE, "dupes.compare-prs.opus": DUPES_COMPARE_PRS, "dupes.compare-issues.sonnet": DUPES_COMPARE_ISSUES, "conversation.turn": CONVERSATION, "areas.haiku": AREAS_HAIKU, "areas.propose": AREAS_PROPOSE, "areas.suggest": AREAS_SUGGEST, "discord.issue-questions": DISCORD_ISSUE_QUESTIONS, "discord.issue-draft": DISCORD_ISSUE_DRAFT, "discord.signal.haiku": DISCORD_SIGNAL_HAIKU, "discord.junk.haiku": DISCORD_JUNK_HAIKU, "discord.result.haiku": DISCORD_RESULT_HAIKU, "command.read": COMMAND_READ, "interactive.command-read": COMMAND_READ_INTERACTIVE, "fixup.conflict": FIXUP_CONFLICT, "lint.reference.haiku": REFERENCE_HAIKU, "cifix.patch": CIFIX, "mainfix.classify": MAINFIX_CLASSIFY, "security.model": SECURITY_MODEL, "security.area": SECURITY_AREA, "security.verify": SECURITY_VERIFY, "security.fix": SECURITY_FIX, "security.scantest": SECURITY_SCANTEST, "security.fixcheck": SECURITY_FIXCHECK, "implement.plan": IMPLEMENT_PLAN, "implement.session": IMPLEMENT_SESSION, "eval.investigate": EVAL_INVESTIGATE } as const;
+export const CLAUDE_PROMPTS = { "classify.haiku": HAIKU, "referee.sonnet": REFEREE, "fixup.patch": FIXUP, "verify.plan": VERIFY_PLAN, "verify.screenshot": VERIFY_SCREENSHOT, "verify.compare": VERIFY_COMPARE, "verify.summary": VERIFY_SUMMARY, "priority.haiku": PRIORITY_HAIKU, "dupes.haiku": DUPES_HAIKU, "fixup.check": FIXUP_CHECK, "review.opus": OPUS_REVIEW, "premerge.opus": PREMERGE, "postmerge.opus": POSTMERGE, "dupes.compare-prs.opus": DUPES_COMPARE_PRS, "dupes.compare-issues.sonnet": DUPES_COMPARE_ISSUES, "conversation.turn": CONVERSATION, "areas.haiku": AREAS_HAIKU, "areas.propose": AREAS_PROPOSE, "areas.suggest": AREAS_SUGGEST, "discord.issue-questions": DISCORD_ISSUE_QUESTIONS, "discord.issue-draft": DISCORD_ISSUE_DRAFT, "discord.signal.haiku": DISCORD_SIGNAL_HAIKU, "discord.junk.haiku": DISCORD_JUNK_HAIKU, "discord.result.haiku": DISCORD_RESULT_HAIKU, "command.read": COMMAND_READ, "interactive.command-read": COMMAND_READ_INTERACTIVE, "fixup.conflict": FIXUP_CONFLICT, "lint.reference.haiku": REFERENCE_HAIKU, "cifix.patch": CIFIX, "mainfix.classify": MAINFIX_CLASSIFY, "security.model": SECURITY_MODEL, "security.area": SECURITY_AREA, "security.verify": SECURITY_VERIFY, "security.fix": SECURITY_FIX, "security.scantest": SECURITY_SCANTEST, "security.fixcheck": SECURITY_FIXCHECK, "implement.plan": IMPLEMENT_PLAN, "implement.session": IMPLEMENT_SESSION, "eval.investigate": EVAL_INVESTIGATE, "review.issue": ISSUE_REVIEW } as const;
 /** TypeSafe's published price per input token for jev-1.13.0, jev-1.14.0 and jev-latest ($0.042 per million); output tokens are free. */
 /** Models of the operator sessions that write text AutoCraft posts on their behalf (not a registered prompt's model): the security scan's questions. */
 export const OPERATOR_MODELS = { security: "claude-opus-5-5" } as const;
@@ -1625,10 +1646,10 @@ export const JEV_USD_PER_INPUT_TOKEN = 0.042 / 1e6;
 export const JEV_PROMPTS = { "classify.jev": JEV, "priority.jev": PRIORITY_JEV, "dupes.jev": DUPES_JEV, "areas.jev": AREAS_JEV, "lint.reference.jev": REFERENCE_JEV, "discord.signal.jev": DISCORD_SIGNAL_JEV, "discord.junk.jev": DISCORD_JUNK_JEV, "command.read.jev": COMMAND_READ_JEV } as const;
 export type ClaudePromptId = keyof typeof CLAUDE_PROMPTS;
 export type JevPromptId = keyof typeof JEV_PROMPTS;
-export const PROMPTS: (ClaudePrompt | JevPrompt)[] = [JEV, HAIKU, REFEREE, FIXUP, VERIFY_PLAN, VERIFY_SCREENSHOT, VERIFY_COMPARE, VERIFY_SUMMARY, PRIORITY_JEV, PRIORITY_HAIKU, DUPES_JEV, DUPES_HAIKU, FIXUP_CHECK, OPUS_REVIEW, PREMERGE, POSTMERGE, DUPES_COMPARE_PRS, DUPES_COMPARE_ISSUES, CONVERSATION, AREAS_JEV, AREAS_HAIKU, AREAS_PROPOSE, AREAS_SUGGEST, DISCORD_ISSUE_QUESTIONS, DISCORD_ISSUE_DRAFT, DISCORD_SIGNAL_JEV, DISCORD_SIGNAL_HAIKU, DISCORD_JUNK_JEV, DISCORD_JUNK_HAIKU, DISCORD_RESULT_HAIKU, COMMAND_READ, COMMAND_READ_INTERACTIVE, COMMAND_READ_JEV, FIXUP_CONFLICT, REFERENCE_JEV, REFERENCE_HAIKU, CIFIX, MAINFIX_CLASSIFY, SECURITY_MODEL, SECURITY_AREA, SECURITY_VERIFY, SECURITY_FIX, SECURITY_FIXCHECK, IMPLEMENT_PLAN, IMPLEMENT_SESSION, EVAL_INVESTIGATE];
+export const PROMPTS: (ClaudePrompt | JevPrompt)[] = [JEV, HAIKU, REFEREE, FIXUP, VERIFY_PLAN, VERIFY_SCREENSHOT, VERIFY_COMPARE, VERIFY_SUMMARY, PRIORITY_JEV, PRIORITY_HAIKU, DUPES_JEV, DUPES_HAIKU, FIXUP_CHECK, OPUS_REVIEW, PREMERGE, POSTMERGE, DUPES_COMPARE_PRS, DUPES_COMPARE_ISSUES, CONVERSATION, AREAS_JEV, AREAS_HAIKU, AREAS_PROPOSE, AREAS_SUGGEST, DISCORD_ISSUE_QUESTIONS, DISCORD_ISSUE_DRAFT, DISCORD_SIGNAL_JEV, DISCORD_SIGNAL_HAIKU, DISCORD_JUNK_JEV, DISCORD_JUNK_HAIKU, DISCORD_RESULT_HAIKU, COMMAND_READ, COMMAND_READ_INTERACTIVE, COMMAND_READ_JEV, FIXUP_CONFLICT, REFERENCE_JEV, REFERENCE_HAIKU, CIFIX, MAINFIX_CLASSIFY, SECURITY_MODEL, SECURITY_AREA, SECURITY_VERIFY, SECURITY_FIX, SECURITY_FIXCHECK, IMPLEMENT_PLAN, IMPLEMENT_SESSION, EVAL_INVESTIGATE, ISSUE_REVIEW];
 
 /** What each Claude prompt is rendered from. */
-export type ClaudeInput = { "classify.haiku": Item[]; "referee.sonnet": Item[]; "fixup.patch": FixupPr[]; "verify.plan": VerifyPlanInput[]; "verify.screenshot": ScreenshotPlanInput[]; "verify.compare": ScreenshotCompareInput[]; "verify.summary": VerifySummaryInput[]; "priority.haiku": Item[]; "dupes.haiku": DupePair[]; "fixup.check": FixupCheckInput[]; "review.opus": OpusPr[]; "premerge.opus": OpusPr[]; "postmerge.opus": PostmergePr[]; "dupes.compare-prs.opus": ComparePrs[]; "dupes.compare-issues.sonnet": CompareIssues[]; "conversation.turn": ConversationInput[]; "areas.haiku": AreaAsk[]; "areas.propose": AreaProposeInput[]; "areas.suggest": AreaSuggestInput[]; "discord.issue-questions": IssueQuestionsInput[]; "discord.issue-draft": IssueDraftInput[]; "discord.signal.haiku": SignalAsk[]; "discord.junk.haiku": JunkAsk[]; "discord.result.haiku": ResultAsk[]; "command.read": ReadAsk[]; "interactive.command-read": ReadAsk[]; "fixup.conflict": ConflictPr[]; "lint.reference.haiku": ReferenceLintInput[]; "cifix.patch": CifixPr[]; "mainfix.classify": MainFixInput[]; "security.model": SecurityModelInput[]; "security.area": SecurityAreaInput[]; "security.verify": SecurityVerifyInput[]; "security.fix": SecurityFixInput[]; "security.scantest": SecurityScanTestInput[]; "security.fixcheck": SecurityFixCheckInput[]; "implement.plan": PlanInput[]; "implement.session": SessionInput[]; "eval.investigate": EvalInput[] };
+export type ClaudeInput = { "classify.haiku": Item[]; "referee.sonnet": Item[]; "fixup.patch": FixupPr[]; "verify.plan": VerifyPlanInput[]; "verify.screenshot": ScreenshotPlanInput[]; "verify.compare": ScreenshotCompareInput[]; "verify.summary": VerifySummaryInput[]; "priority.haiku": Item[]; "dupes.haiku": DupePair[]; "fixup.check": FixupCheckInput[]; "review.opus": OpusPr[]; "premerge.opus": OpusPr[]; "postmerge.opus": PostmergePr[]; "dupes.compare-prs.opus": ComparePrs[]; "dupes.compare-issues.sonnet": CompareIssues[]; "conversation.turn": ConversationInput[]; "areas.haiku": AreaAsk[]; "areas.propose": AreaProposeInput[]; "areas.suggest": AreaSuggestInput[]; "discord.issue-questions": IssueQuestionsInput[]; "discord.issue-draft": IssueDraftInput[]; "discord.signal.haiku": SignalAsk[]; "discord.junk.haiku": JunkAsk[]; "discord.result.haiku": ResultAsk[]; "command.read": ReadAsk[]; "interactive.command-read": ReadAsk[]; "fixup.conflict": ConflictPr[]; "lint.reference.haiku": ReferenceLintInput[]; "cifix.patch": CifixPr[]; "mainfix.classify": MainFixInput[]; "security.model": SecurityModelInput[]; "security.area": SecurityAreaInput[]; "security.verify": SecurityVerifyInput[]; "security.fix": SecurityFixInput[]; "security.scantest": SecurityScanTestInput[]; "security.fixcheck": SecurityFixCheckInput[]; "implement.plan": PlanInput[]; "implement.session": SessionInput[]; "eval.investigate": EvalInput[]; "review.issue": IssueReviewInput[] };
 
 /** Pretty JSON for text a stranger wrote, safe inside a tagged frame: JSON leaves "<" alone, so "</pr>" in a body would close the tag. */
 export const untrustedJson = (v: unknown): string => JSON.stringify(v, null, 1).replace(/</g, "\\u003c");
@@ -1842,6 +1863,10 @@ const VALUES: { [K in ClaudePromptId]: (input: ClaudeInput[K]) => Record<string,
     const { repo_dir, repo_docs: _d, ...rest } = c!;
     return { cause: untrustedJson(rest), repo_access: repoAccess(repo_dir, "the AutoCraft source at the default branch head", "Judge from the records; say in cause that the code could not be read.") };
   },
+  "review.issue": ([c]) => {
+    const { repo_dir, ...rest } = c!;
+    return { issue: untrustedJson(rest), repo_access: repoAccess(repo_dir, "the default branch head, to check the issue's claims and find what a fix touches", "You cannot read the repository: every claim is unclear, and where names the file the issue points to with line 1.") };
+  },
 };
 
 const withRepo = <T extends object>(xs: T[]): T[] => xs.map((x) => ({ ...x, repo_dir: REPO_PATH }));
@@ -1887,6 +1912,7 @@ export const EXAMPLES: { [K in ClaudePromptId]: { input: ClaudeInput[K]; refs: s
   "implement.plan": { input: SAMPLE_PLAN, refs: SAMPLE_PLAN.map((p) => p.ref) },
   "implement.session": { input: SAMPLE_SESSION, refs: SAMPLE_SESSION.map((t) => t.ref) },
   "eval.investigate": { input: withRepo(SAMPLE_EVAL), refs: [] },
+  "review.issue": { input: withRepo(SAMPLE_ISSUE_REVIEW), refs: SAMPLE_ISSUE_REVIEW.map((i) => i.ref) },
 };
 
 /** One pass over the template, so text inside item data is never read as a placeholder. */
