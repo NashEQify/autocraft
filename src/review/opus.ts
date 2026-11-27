@@ -39,7 +39,7 @@ import { mergeApprovedOf, ROUND_DELTA_LARGE, ROUND_UNSEPARATED, roundHeadOf } fr
 import { loadGoOnAt, loadPrWorkflows } from "../data/workflow/index.ts";
 import { settledBy } from "../core/settled.ts";
 import type { ItemWorkflow, PlanPart } from "../workflow/types.ts";
-import { droppedTitles } from "../workflow/work.ts";
+import { droppedReviewTitles } from "../workflow/work.ts";
 import { fixesToMake } from "../core/review-blocking.ts";
 import { loadBlockerReads, openFrom } from "./blockers.ts";
 
@@ -138,7 +138,7 @@ export async function unappliedFixes(db: Db, c: { repo: string; number: number; 
   const facts = (await loadPatchFacts(db, [{ repo: c.repo, number: c.number }])).get(refOf(c));
   if (facts?.fixups.some((f) => f.fromHead === e.head && (f.state === "pushed" || f.state === "asked"))) return [];
   const asked = e.fixes.filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string");
-  return fixesToMake(asked, droppedTitles(plan), approved).map((f) => ({ head: e.head, file: f.file, change: f.change }));
+  return fixesToMake(asked, droppedReviewTitles(plan), approved).map((f) => ({ head: e.head, file: f.file, change: f.change }));
 }
 
 /** The base branch the review's diff was computed against; the mirrored base when the cached diff does not say. */

@@ -141,8 +141,8 @@ export async function claimMark(db: Db, name: string, nowMs: number, minGapMs: n
 
 /**
  * The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs`, that ended after `since`, oldest first.
- * A job the runner stopped and one whose write the pacing held back are left out, as the failure streaks leave them out; so are a job stopped
- * at its step's deadline and one whose model call no Task Runner took in time: they say a Task Runner was away, not that the step fails.
+ * A job the runner stopped and one whose write the pacing held back are left out, as the failure streaks leave them out; so is one whose model
+ * call no Task Runner took in time: it says a Task Runner was away, not that the step fails. A job stopped at its deadline ran, and counts.
  */
 export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number: number }[], since: string, steps: readonly string[]): Promise<LaneRun[]> {
   if (!refs.length || !steps.length) return [];
@@ -153,7 +153,7 @@ export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number
     .where((eb) => {
       const error = eb.fn.coalesce("error", eb.val(""));
       return eb.and([approvedOf(db, eb), eb(error, "<>", RUNNER_STOPPED), eb(error, "<>", CALL_WAIT_LIMIT),
-        ...["write paced:%", "stopped: ran past %", "stopped: no progress for %"].map((p) => eb.not(kx.like(db, error, eb.val(p))))]);
+        eb.not(kx.like(db, error, eb.val("write paced:%")))]);
     })
     .orderBy("id"));
   const wanted = new Set(refs.map((r) => `${r.repo}#${r.number}`));

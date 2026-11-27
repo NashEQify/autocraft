@@ -56,6 +56,16 @@ export const partTitle = (f: { file: string; change: string; title?: string }): 
 /** The lower-case titles of the parts a person dropped. */
 export const droppedTitles = (plan: readonly PlanPart[]): string[] => plan.filter((p) => p.state === "dropped").map((p) => p.title.toLowerCase());
 
+/** The lower-case titles of the parts a person dropped, but the pre-merge review's findings, whose drop holds only at some heads (`overruledAt`). */
+export const droppedReviewTitles = (plan: readonly PlanPart[]): string[] => plan.filter((p) => p.state === "dropped" && !p.premerge).map((p) => p.title.toLowerCase());
+
+/**
+ * The lower-case titles of the pre-merge findings a person dropped from the plan of a workflow approved for merge that overrule the review at a head:
+ * dropped at a head of `chain` (the head and the heads our own pushes lead to it from, src/data/changes pushChainOf). Pure.
+ */
+export const overruledAt = (plan: readonly PlanPart[], approved: boolean, chain: readonly string[]): string[] =>
+  approved ? plan.filter((p) => p.state === "dropped" && p.premerge && p.droppedAt !== undefined && chain.includes(p.droppedAt)).map((p) => p.title.toLowerCase()) : [];
+
 /** The findings a person has not dropped from the workflow's plan (`dropped`: titles, lower case): the ones the pipeline fixes. */
 export const keptFixes = <F extends { file: string; change: string; title?: string }>(fixes: readonly F[], dropped: readonly string[] | undefined): F[] =>
   fixes.filter((f) => !dropped?.includes(partTitle(f).toLowerCase()));

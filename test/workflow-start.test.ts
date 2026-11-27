@@ -311,6 +311,30 @@ test("drop of a blocking pre-merge finding overrules it: the merge goes on with 
   assert.equal((await w.rows("SELECT tries FROM premerge_reviews WHERE number = 1")).length, 1);
 });
 
+test("a dropped pre-merge finding the review repeats after an accepted author push is a new part, and dropping it again merges on green CI", async () => {
+  const w = await unstarted(false);
+  await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
+  await run(w, "merge");
+  await w.premerge(1, "defect", false);
+  await w.premergeRoundsSpent(1);
+  await settle(w);
+  assert.equal((await send(w, "drop 1")).outcome, "run");
+  await settle(w);
+  // The author pushes; the round's review accepts the head, and its pre-merge review finds the same defect.
+  await w.synced(1, "sha2");
+  await review(w, "sha2");
+  await w.verified(1);
+  await w.premerge(1, "defect", false);
+  await settle(w);
+  const stopped = (await liveWorkflow(w.db, "app", 1))!;
+  const again = stopped.plan.filter((p) => p.premerge && p.state === "planned").map((p) => p.n);
+  assert.deepEqual([stopped.state, again.length, stopped.rec!.parts.fix], ["blocked", 1, again], stopped.rec?.text ?? "");
+  assert.equal((await send(w, `drop ${again[0]}`)).outcome, "run");
+  await settle(w);
+  assert.equal((await liveWorkflow(w.db, "app", 1))!.plan.find((p) => p.n === again[0])?.droppedAt, "sha2");
+  await mergesAsPerson(w, "sha2");
+});
+
 test("merge at a stop on defects the pre-merge review gave no fix for is refused and asks to fix them first; the yes has them fixed", async () => {
   const w = await unstarted(false);
   await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
