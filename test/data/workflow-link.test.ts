@@ -10,9 +10,11 @@ import { loadImplementFacts } from "../../src/data/implement/index.ts";
 import { startedWorkAllows } from "../../src/data/runners/cross.ts";
 import { loadRunnerSnapshot } from "../../src/data/runners/index.ts";
 import { startedOf } from "../../src/remote/started.ts";
+import { parseStatus, storeStatus } from "../../src/remote/helpers.ts";
+import { createToken } from "../../src/dash/mcp/tokens.ts";
 import { liveWorkflowExpr, worksOnPr } from "../../src/data/workflow/fragments.ts";
 import {
-  linkWorkflows, listWorkflows, loadEndedWorkflows, loadInScope, loadLinks, loadPrWorkflows, loadStartedRefs, loadStartedWork, loadWorkflowFacts, loadWorkScores, moveWorkflows, saveWorkflows, startWorkflows,
+  linkWorkflows, listWorkflows, loadEndedWorkflows, releaseItemRunner, takeItemRunner, loadInScope, loadLinks, loadPrWorkflows, loadStartedRefs, loadStartedWork, loadWorkflowFacts, loadWorkScores, moveWorkflows, saveWorkflows, startWorkflows,
   type WorkflowState,
 } from "../../src/data/workflow/index.ts";
 import { workOf } from "../../src/workflow/work.ts";
@@ -468,4 +470,45 @@ both("the post-merge review step's calls on a PR whose workflow ended done throu
   assert.deepEqual(await says(201, "bob", "postmerge", soon), [false, false], "a workflow that ended without a merge");
   assert.deepEqual(await says(202, "ann", "postmerge", soon), [false, false], "a workflow that did not end through the merge");
   assert.deepEqual(await says(200, "bob", "postmerge", later), [false, false], "days after the workflow ended");
+});
+
+both("a Task Runner taken onto a live workflow's work counts in the snapshot and the lease alike while no runner of its starter is ready with room, and not after a release, the workflow's end or a new start", async ({ db }) => {
+  const r = rows(db);
+  const q = queryDb(db), k = q.k as any;
+  const review = (number: number, m: number) => ({ ...start(number, m), kind: "pr" as const, entry: "review" as const });
+  await r.pr(300);
+  const first = (await startWorkflows(db, [review(300, 1)])).get(`${REPO}#300`)!;
+  // The lease's condition on a call whose item is the PR: the call's id is the PR's number.
+  await q.run(k.insertInto("main.remote_call_items").values({ call_id: 300, repo: REPO, number: 300, pos: 0 }));
+  const says = async (login: string): Promise<[boolean, boolean]> => {
+    const now = Date.now();
+    const lease = (await q.all(k.selectFrom("main.items as c").select("c.number").where("c.number", "=", 300).where((eb: any) => startedWorkAllows(db, eb, login, "c.number", { now })))).length === 1;
+    const snapshot = await loadRunnerSnapshot(db, now, { started: loadStartedWork, denials: async () => new Map() });
+    return [startedOf({ now, snapshot, accepted: { top: [], mid: [], small: [] } }).owners([{ repo: REPO, number: 300 }]).has(login), lease];
+  };
+  const grant = (workflowId: number) => takeItemRunner(db, { workflowId, repo: REPO, number: 300, login: "Cid", at: at(2) });
+  assert.equal(await grant(first), true);
+  assert.equal(await grant(first), false, "one live grant per person");
+  assert.deepEqual(await says("cid"), [true, true], "the starter has no Task Runner");
+  assert.deepEqual(await says("dot"), [false, false], "nobody else");
+
+  // The starter's runner, ready with room, comes first; held for its usage, or full, it does not.
+  await q.run(k.insertInto("main.access").values({ login: "ann", role: "maintainer" }));
+  const token = (await createToken(db, "ann", "runner", { kind: "runner" })).row.id;
+  const status = (readiness: string) => storeStatus(db, token, "ann", parseStatus({ slots: 3, busy: 0, readiness, harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  await status("ready");
+  assert.deepEqual(await says("cid"), [false, false], "the starter's runner is ready with room");
+  await status("quota-held");
+  assert.deepEqual(await says("cid"), [true, true], "the starter's runner is held by its usage limit");
+  await status("ready");
+  for (const id of [901, 902]) await q.run(k.insertInto("main.remote_calls").values({ id, step: "opus-review", stage: 0, prompt_id: "review.opus", prompt_version: "1", tier: "top", effort: "medium", asked_model: "opus", bundle: "{}", state: "leased", since: 0, seen_at: 0, max_attempts: 2, timeout_ms: 60_000, token_id: token, user_login: "ann", leased_at: Date.now(), heartbeat_at: Date.now() }));
+  assert.deepEqual(await says("cid"), [true, true], "the starter's runner has no free slot");
+
+  assert.equal(await releaseItemRunner(db, { workflowId: first, login: "cid", at: at(3) }), true);
+  assert.deepEqual(await says("cid"), [false, false], "released");
+  await grant(first);
+  await end(db, first, 4);
+  assert.deepEqual(await says("cid"), [false, false], "the workflow ended");
+  await startWorkflows(db, [review(300, 5)]);
+  assert.deepEqual(await says("cid"), [false, false], "a new start does not inherit the grant");
 });

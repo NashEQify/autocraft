@@ -24,6 +24,7 @@ import { setManualOnly } from "../src/remote/manual-only.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { takerTest } from "../src/remote/takers.ts";
 import { insertWorkflow, updateWorkflow } from "../src/workflow/store.ts";
+import { releaseItemRunner, takeItemRunner } from "../src/data/workflow/index.ts";
 import { STARTED_HOLD_MS } from "../src/remote/started.ts";
 import { allocation, poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
@@ -434,6 +435,37 @@ describe("picks and Manual only", async () => {
     await setUserMaxCalls(db, "bob", null);
     await updateWorkflow(db, wf, { state: "done" });
     await ready("alice");
+    await clear();
+  });
+
+  test("a maintainer who took a started item's work: their Manual only runner takes its calls while the starter's runner cannot, no other item's, and the starter's runner comes first once it can", async () => {
+    await db.run(db.k.updateTable("tracked_repos").set({ workflow: "new" }).where("name", "=", "photocraft"));
+    const wf = await insertWorkflow(db, { repo: "photocraft", number: 40, kind: "issue", entry: "implement", state: "running", startedBy: "alice", startedAt: new Date().toISOString(), startedVia: "github" });
+    await takeItemRunner(db, { workflowId: wf, repo: "photocraft", number: 40, login: "bob", at: new Date().toISOString() });
+    await setManualOnly(db, "bob", true);
+    await unfresh("olga");
+    await storeStatus(db, callers.alice!.tokenId, "alice", parseStatus({ slots: 3, busy: 0, readiness: "quota-held", harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));
+    dropQueueCache(db);
+    const item = [{ repo: "photocraft", number: 40 }];
+    await q({ items: [{ repo: "photocraft", number: 41 }], ageMs: 60_000 });
+    const first = await q({ items: item });
+    assert.equal(await leased("bob"), first, "alice's runner is held by its usage limit: bob's takes the item's call");
+    assert.equal(await leased("bob"), null, "and no other item on the repo");
+    await ready("alice");
+    const second = await q({ items: item });
+    assert.equal(await leased("bob"), null, "alice's runner is ready with room: bob's passes the call over");
+    assert.equal(await leased("alice"), second);
+    await setUserMaxCalls(db, "alice", 1);
+    const third = await q({ items: item });
+    assert.equal(await leased("bob"), third, "alice runs her Max calls at once: bob's takes the next one");
+    await releaseItemRunner(db, { workflowId: wf, login: "bob", at: new Date().toISOString() });
+    dropQueueCache(db);
+    const fourth = await q({ items: item });
+    assert.equal(await leased("bob"), null, "released: bob's runner takes none of it");
+    await setUserMaxCalls(db, "alice", null);
+    await setManualOnly(db, "bob", false);
+    await updateWorkflow(db, wf, { state: "done" });
+    await ready("olga");
     await clear();
   });
 
