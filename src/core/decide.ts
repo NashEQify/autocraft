@@ -2,7 +2,7 @@
 import {
   BATCHABLE, MAIN_RED_HELD, OFF_DEFAULT_REASON, autoEligible, PREMERGE_DEFECT_REASON, PREMERGE_UNSURE_REASON, PREMERGE_FAILED_REASON, PREMERGE_MAX_TRIES, RETRY_AFTER_MS,
   RULE_LABELS, RULE_SIZES, RULE_TIERS, UNSURE_REASON, VERIFY_UNAVAILABLE, ciAllows, conflictNote, verifyAllows, verifyOk,
-  FIXUP_MAX_ATTEMPTS, PUSHES_PER_APPROVAL, CONFLICT_CAPPED_DAYS, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL,
+  FIXUP_MAX_ATTEMPTS, PUSHES_PER_APPROVAL, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL,
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
 import { inFlightNow, isWork, unassignActions } from "./assignment.ts";
@@ -448,10 +448,6 @@ export function pushHeld(f: PrFacts): HeldPush | null {
   return cf === "work" || cf === "collect" ? "cifix" : null;
 }
 
-/** A PR approved for merge reached its daily cap of conflict merges today, and on CONFLICT_CAPPED_DAYS days in all since its person last went on with it: they are asked before another day of merges. */
-export const conflictDaysUsed = (f: PrFacts): boolean =>
-  approvedForMerge(f) && f.mergeable === "CONFLICTING" && f.conflict?.bucket === "capped" && (f.conflict.cappedDays ?? 0) >= CONFLICT_CAPPED_DAYS;
-
 /** The CI fix may have the failed jobs rerun: the repo approves CI reruns, and a review read the head (none at a head the contributor pushed). */
 export const cifixMayRerun = (f: PrFacts): boolean => f.repoFacts.ciApproved && !f.gateRed;
 
@@ -531,10 +527,10 @@ export const unapprovedStop = (f: PrFacts): "conflict" | "ci" | null =>
   !workflowOf(f) || fixAllowed(f) ? null : f.mergeable === "CONFLICTING" ? "conflict" : f.ci === "failure" && (!f.repoFacts.mainRed || f.mainFix) ? "ci" : null;
 
 /**
- * Who settles a PR's conflict with its base branch once its merge is approved: the conflict step merges the base in (`tomorrow`: today's
- * merges are used up), and the fixes follow; or the contributor or another person has to resolve it, and nothing is fixed or merged before.
+ * Who settles a PR's conflict with its base branch once its merge is approved: the conflict step merges the base in, and the fixes follow;
+ * or the contributor or another person has to resolve it, and nothing is fixed or merged before.
  */
-export type ConflictPath = "merge" | "tomorrow" | "contributor" | "person";
+export type ConflictPath = "merge" | "contributor" | "person";
 /** The conflict path of a started PR; null when it does not conflict, or when nothing at its head says it is wanted (no take or take-fix review, and no merge entry). */
 export function conflictPath(f: PrFacts | null): ConflictPath | null {
   if (f?.mergeable !== "CONFLICTING") return null;
@@ -551,7 +547,8 @@ export function settlesConflict({ conflict: c, pushable }: Pick<PrFacts, "confli
     // The approval of the merge is the approval of this push as well; `done`: pushed, and the mirror does not show it yet.
     case "merge": case "unapproved": case "done": return "merge";
     case "linting": return pushable ? "merge" : "person";
-    case "capped": return "tomorrow";
+    // The daily cap holds only PRs whose merge nobody approved; an approved merge lifts it.
+    case "capped": return "merge";
     case "ask": case "ask-retry": case "asked": return "contributor";
     default: return "person";
   }

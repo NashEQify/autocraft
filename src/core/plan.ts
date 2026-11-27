@@ -294,8 +294,7 @@ export type PrFacts = {
   /** Heads the PR was pushed from by AutoCraft, newest first, starting with the reviewed head. */
   pushChain: string[];
   /** For a conflicting open PR: what fix-up does and the base branch. */
-  conflict: { bucket: string; base: string; /** The base branch name is one fix-up may merge. */ baseOk: boolean; /** When a capped bucket ends, or an ask-retry bucket's comment is due again (ms). */ until?: number;
-    /** A capped bucket of a PR approved for merge: the UTC days since its person last went on with it on which the conflict merges reached the daily cap, today among them. */ cappedDays?: number } | null;
+  conflict: { bucket: string; base: string; /** The base branch name is one fix-up may merge. */ baseOk: boolean; /** When a capped bucket ends, or an ask-retry bucket's comment is due again (ms). */ until?: number; } | null;
   /** On a PR approved for merge: our pushes that changed its own diff since its person approved it or last went on with it (core/evidence.ts diffPushesSince). */
   ownPushes?: number;
   /** Member of a merge batch that is checking or open, at any head. */

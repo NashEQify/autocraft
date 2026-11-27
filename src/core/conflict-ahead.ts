@@ -22,6 +22,6 @@ export async function conflictAhead(db: Db, item: { repo: string; number: number
   const [longLived, writes] = await db.together(() => Promise.all([longLivedOf(db, repo), authorWrites(db, repo, number)]));
   // An author whose permission has not been read yet counts as able to write, as in the plan.
   const can = pushable(it.head_repo, repo, ch?.head_oid === f.head ? ch?.maintainer_can_modify : it.maintainer_can_modify, it.head_ref, longLived, false, writes !== "no");
-  const bucket = await conflictBucket(db, { repo, number, head: f.head, pushable: can }, { push: true, comment: f.repoFacts.commentApproved && !f.quiet });
+  const bucket = await conflictBucket(db, { repo, number, head: f.head, pushable: can, uncapped: true }, { push: true, comment: f.repoFacts.commentApproved && !f.quiet });
   return settlesConflict({ conflict: { bucket, base: it.base_ref ?? "", baseOk: BASE_NAME.test(it.base_ref ?? "") }, pushable: can });
 }

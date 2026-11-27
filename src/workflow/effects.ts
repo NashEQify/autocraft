@@ -120,7 +120,6 @@ type ConflictSaid = { note?: string; waits?: "contributor" | "person" };
 function conflictSaid(item: Target, path: ConflictPath | null): ConflictSaid {
   if (byHand(path)) return { waits: path, note: t("New commits come back to you.") };
   if (path === "merge") return { note: t("{ref} conflicts with its base branch: AutoCraft merges that branch into it first.", { ref: ref(item) }) };
-  if (path === "tomorrow") return { note: t("{ref} conflicts with its base branch, and today's merges of that branch into it are used up: AutoCraft merges it in first, tomorrow.", { ref: ref(item) }) };
   return {};
 }
 
@@ -194,9 +193,8 @@ export async function again(c: Ctx, o: { again: "review" | "fixup" | null; plan:
   const f = o.merges ? await loadPrFact(db, item.repo, item.number) : null;
   const path = conflictPath(f);
   if (byHand(path) && o.again !== "review") return { write: await mergeLeg(c, had), waits: path, note: t("New commits come back to you.") };
-  const first = path === "merge" ? t("{ref} conflicts with its base branch: that merge comes first, then the review's fixes.", { ref: ref(item) })
-    : path === "tomorrow" ? t("{ref} conflicts with its base branch, and today's merges of that branch into it are used up: that merge comes first, tomorrow.", { ref: ref(item) }) : null;
-  const note = first !== null && (o.again === "fixup" || path === "tomorrow") ? { note: first } : {};
+  const first = path === "merge" ? t("{ref} conflicts with its base branch: that merge comes first, then the review's fixes.", { ref: ref(item) }) : null;
+  const note = first !== null && o.again === "fixup" ? { note: first } : {};
   const said = o.says ? conflictSaid(item, await conflictAhead(db, item, f)) : {};
   // A major finding the person said to fix would come back as a question at the next head; their request is the answer to it.
   const major = o.plan.some((p) => p.major && o.fix.includes(p.n));

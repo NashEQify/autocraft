@@ -145,16 +145,13 @@ test("a yes on a conflict only the contributor can resolve approves the merge an
   }
 });
 
-test("on a conflicting PR whose base merges of today are used up, a yes goes on tomorrow: the leg waits as the plan does", async () => {
+test("on a conflicting PR whose base merges of today are used up, a yes approves the merge, which lifts the daily cap: the base is merged in at once", async () => {
   const now = new Date().toISOString();
   const w = await conflicting({ verdict: "take-fix", before: async (w) => { for (const from of ["old1", "old2"]) await conflictRow(w, from, "merged", { to_head: `${from}b`, at: now }); } });
-  assert.match((await liveWorkflow(w.db, "app", 1))!.rec!.text, /goes on tomorrow\. Fix 1, then merge/);
-  assert.match((await send(w, "yes")).line, /that merge comes first, tomorrow/);
+  assert.doesNotMatch((await liveWorkflow(w.db, "app", 1))!.rec!.text, /tomorrow/);
+  assert.doesNotMatch((await send(w, "yes")).line, /tomorrow/);
   await settle(w);
   assert.equal((await liveWorkflow(w.db, "app", 1))!.state, "running");
-  assert.deepEqual((await w.rows("SELECT state FROM preapprovals")).map((l) => l.state), ["review"]);
-  assert.deepEqual([(await w.prPlan(1)).waitKind, await acts(w, 1)], ["system", []]);
-  await w.db.run(w.db.k.updateTable("main.conflict_merges").set({ created_at: T0 }));
   assert.ok((await acts(w, 1)).includes("conflict:merge"));
 });
 
