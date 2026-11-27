@@ -392,9 +392,12 @@ describe("runner", () => {
 
       // A stopping job lets a write in flight finish and be recorded, and refuses writes asked for after the stop.
       let send = (): void => {};
-      const slow = async () => { await new Promise<void>((r) => { send = r; }); return { code: 0, stdout: "https://github.com/storytold/app/issues/3#issuecomment-9\n", stderr: "" }; };
+      let sending = (): void => {};
+      const sent = new Promise<void>((r) => { sending = r; });
+      const slow = async () => { const answer = new Promise<void>((r) => { send = r; }); sending(); await answer; return { code: 0, stdout: "https://github.com/storytold/app/issues/3#issuecomment-9\n", stderr: "" }; };
       const inFlight = ghComment({ db, login: "act" }, g, slow, "act-comment", { repo: "app", number: 3, pr: false }, { by: "fixed" } as never, "in flight");
-      await new Promise((r) => setTimeout(r, 50));
+      // The stop comes once the write is on its way to GitHub: a write still being recorded when the stop comes is not made, and never settles.
+      await sent;
       const stopping = stopWrites("the job is stopping", 5000);
       send();
       assert.equal(await stopping, 0, "nothing is left in flight");
