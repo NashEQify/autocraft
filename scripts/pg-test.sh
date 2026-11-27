@@ -7,7 +7,7 @@
 #   scripts/pg-test.sh run [--latency MS] [test files...]
 #       starts one, runs the test files (default: the Postgres tests) with AUTOCRAFT_TEST_PG_URL set, removes it.
 #       --latency routes the connections through scripts/latency-proxy.ts with MS each way (10 if no number follows).
-#   scripts/pg-test.sh suite [--concurrency N] [--slowest N] [test files...]
+#   scripts/pg-test.sh suite [--concurrency N] [--slowest N] [--file-timeout MIN] [test files...]
 #       starts one and runs the test files (default: the whole suite, see scripts/test.ts) on it, with every connectDb on a
 #       SQLite path opening a Postgres database (test/pg-suite.ts); removes the container.
 #

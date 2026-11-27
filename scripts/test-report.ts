@@ -36,8 +36,8 @@ function message(err: NonNullable<NonNullable<Ev["data"]["details"]>["error"]>):
 
 const secs = (ms: number): string => `${(ms / 1000).toFixed(1).padStart(6)} s`;
 
-/** A reporter that lists the `slowest` longest files and tests. */
-export const report = (slowest: number) => async function* (source: AsyncIterable<Ev>): AsyncGenerator<string> {
+/** A reporter that lists the `slowest` longest files and tests. `why` gives a file's failure as its runner saw it (killed). */
+export const report = (slowest: number, why?: (file: string) => string | undefined) => async function* (source: AsyncIterable<Ev>): AsyncGenerator<string> {
   const files = new Map<string, FileFails>();
   // A file whose process failed outside any test reports only "test failed"; its error is in the file's stderr.
   const stderrError = new Map<string, string>();
@@ -72,6 +72,7 @@ export const report = (slowest: number) => async function* (source: AsyncIterabl
     }
   }
   for (const [file, f] of files) if (f.first === undefined || f.first === "test failed") f.first = stderrError.get(file) ?? f.first;
+  for (const [file, f] of files) f.first = why?.(file) ?? f.first;
   const sorted = [...files].sort(([a], [b]) => a.localeCompare(b));
   const t = totals ?? { tests: 0, passed: 0, failed: 0, skipped: 0, todo: 0, cancelled: 0 };
   yield `tests ${t.tests}  pass ${t.passed}  fail ${t.failed}  skipped ${t.skipped}  cancelled ${t.cancelled}  in ${(wall / 1000).toFixed(0)} s\n`;
