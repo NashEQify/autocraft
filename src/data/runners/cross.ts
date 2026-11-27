@@ -80,7 +80,7 @@ export function startedWorkAllows(db: Db, eb: Eb, login: string, callIdRef: stri
 
 /**
  * A call bound to another person (`for_login`) for an item workflow's work (TAKEABLE_BOUND_PROMPTS) that `login` may lease: a follow-up
- * on the session `login`'s Task Runner holds (`sticky_login`), or a call whose items (at least one) each have a live workflow, or are the
+ * on the session `login`'s Task Runner holds (`sticky_login`), or a first call (no parent) whose items (at least one) each have a live workflow, or are the
  * PR one works on, whose work `login` took onto their Task Runner (`item_runners`, not released), while no Task Runner of `for_login`
  * could run the call now (readyWithRoomExpr, over `tierTokens`). The Task Runner snapshot's side is StartedCalls.boundTakers in
  * src/remote/started.ts.
@@ -99,6 +99,7 @@ export function boundTakeAllows(db: Db, eb: Eb, login: string, o: { now: number;
     w.or([
       w.and([w("remote_calls.parent_id", "is not", null), ciEq(db, "remote_calls.sticky_login", w.val(login))]),
       w.and([
+        w("remote_calls.parent_id", "is", null),
         w.exists(items().select(one)),
         w.not(w.exists(items().select(one).where((x: any) => x.not(took(x, "bi"))))),
         w.not(readyWithRoomExpr(db, w, "remote_calls", ["for_login"], o.now, o.tierTokens)),

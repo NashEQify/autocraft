@@ -131,12 +131,14 @@ export function loginWaitIn(v: RemoteView, c: TakerCall): { login: string; at: n
 
 /**
  * Whether a taker other than the runner token `exceptToken` (null: any) may take `c` on `c.tier` now: where a call that a
- * model's safety filter declined can run once more (calls.ts submitCall). A bound call counts only its user's runners.
+ * model's safety filter declined can run once more (calls.ts submitCall). A bound call counts only its user's runners and, for an
+ * item workflow's bound work, the runners of a person who took it while its user's cannot run it (started.ts boundTakers).
  */
 export function tierTaker(v: RemoteView, c: TakerCall & { tier: Tier }, exceptToken: number | null): boolean {
   const canWrite = canWriteOf(v.snapshot);
-  return takersIn(v).some((r) => r.tokenId !== exceptToken && r.tiers.has(c.tier) && (c.forLogin
-    ? r.login.toLowerCase() === c.forLogin.toLowerCase() && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x))
+  const logins = c.forLogin ? new Set([c.forLogin.toLowerCase(), ...(c.refs?.length ? startedOf(v).boundTakers({ prompt_id: c.prompt_id, refs: c.refs, forLogin: c.forLogin, tier: c.tier }) : [])]) : null;
+  return takersIn(v).some((r) => r.tokenId !== exceptToken && r.tiers.has(c.tier) && (logins
+    ? logins.has(r.login.toLowerCase()) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x))
     : runnerTakes(r, c, canWrite)));
 }
 
