@@ -270,7 +270,7 @@ export type PrFacts = {
   /** The pre-merge review row at the reviewed head. */
   premerge: { /** The head the row reviewed: the reviewed (queue) head. */ head?: string; at: string; tries: number; hasFindings: boolean; /** The review left a claim of the description unverified. */ unsure: boolean; /** The defects that stop the merge: on a PR approved for merge only the blocking ones. */ defects: number; /** On a PR approved for merge, its defects that do not stop it: filed as follow-ups. */ followUps: number; /** Every defect names a safe path (its fix's, or its own file), so a fix-up can apply them. */ fixesSafe: boolean; minor: number; error: string | null } | null;
   /** The follow-up issue of a PR approved for merge (premerge_followups, review_followups): the heads whose pre-merge (`heads`) and review (`reviewHeads`) follow-ups were filed or tried, and the newest issue they went to. */
-  followUps?: { heads: string[]; reviewHeads: string[]; issue: number | null };
+  followUps?: { heads: string[]; reviewHeads: string[]; issue: number | null; /** Heads whose filing sent nothing and waits for its retry (src/core/rules.ts unsentAsk), the earliest at `at` (ms). */ retry?: { heads: string[]; reviewHeads: string[]; at: number } };
   premergeFixUsed: boolean;
   /** That round's patch is being pushed, or was pushed and the mirror still shows the head it was made on. */
   premergeFixRunning?: boolean;

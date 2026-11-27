@@ -61,7 +61,7 @@ export type Check = {
   /** The repo a check is about; viewers who cannot see the repo do not see the check. */
   repo?: string;
   /** Checks of one kind that /healthz/checks reports as one entry with counts, so no repo or environment name leaves the server. */
-  group?: "workers" | "sync-repos" | "deadlines" | "steps";
+  group?: "workers" | "sync-repos" | "deadlines" | "steps" | "workflows";
   /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear it. */
   ackStep?: string;
   /** Set on a warning an operator clears by acknowledging it (other than deadline stops). */
@@ -234,6 +234,15 @@ async function deadlineChecks({ f }: CheckCtx): Promise<Check[]> {
     text: `${stepTitle(d.step)} was stopped (job ${d.jobId}: ${d.error})${d.count > 1 ? `, ${d.count} times in a row` : ""}`,
     brief: `${stepTitle(d.step)} was stopped for running too long`,
   }));
+}
+
+/** One warning per live workflow whose check, or the write of what it found, failed several passes in a row: the item stands still meanwhile. */
+async function workflowChecks({ f }: CheckCtx): Promise<Check[]> {
+  if (!f.workflowFailures.length) return [ok("workflows", "/pipeline", { group: "workflows" })];
+  return f.workflowFailures.map((w) => ({
+    id: `workflow:${w.ref}`, state: "warn", group: "workflows", repo: w.ref.slice(0, w.ref.lastIndexOf("#")), since: w.since, to: "/pipeline",
+    text: `The workflow of ${w.ref} cannot be checked: ${clip(w.error, 200)}`, brief: "An item's workflow cannot be checked",
+  }) satisfies Check);
 }
 
 /** Rows read per pass: the jobs table is large, so only the newest ids are looked at. */
@@ -462,7 +471,7 @@ async function interactiveNoTakerCheck({ db, nowMs, f }: CheckCtx): Promise<Chec
 }
 
 /** Every check, in the order the lists show them. */
-const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChecks, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, rateCheck, deadlineChecks, stepStalledChecks, livenessCheck, appIdentityChecks, userTokensCheck, foreignInstallCheck, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck, interactiveNoTakerCheck];
+const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChecks, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, rateCheck, deadlineChecks, workflowChecks, stepStalledChecks, livenessCheck, appIdentityChecks, userTokensCheck, foreignInstallCheck, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck, interactiveNoTakerCheck];
 
 /** What `loadHealthFacts` needs from the thresholds and the environment. */
 export const healthOptions = () => ({

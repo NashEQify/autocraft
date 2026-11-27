@@ -31,12 +31,24 @@ export async function loadFollowupRows(db: Db, keys: KeySource, source: Followup
 /** The pre-merge rows of each PR, oldest first. */
 export const loadPremergeFollowups = (db: Db, keys: KeySource): Promise<Map<RefKey, PremergeFollowupRow[]>> => loadFollowupRows(db, keys, "premerge");
 
-/** Writes a head's row in state `filing`; false when the head has one already (filed, failed, or being filed). */
+/**
+ * The times of a head's tries that sent nothing (no app token, write pacing, GitHub's rate limit): an `unsent` row keeps them in `note`
+ * as a JSON list, and keeps them while its retry is `filing`. Empty for any other row.
+ */
+export function unsentTries(r: Pick<PremergeFollowupRow, "state" | "note"> | undefined): string[] {
+  if (!r || (r.state !== "unsent" && r.state !== "filing") || !r.note?.startsWith("[")) return [];
+  try {
+    const v = JSON.parse(r.note) as unknown;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch { return []; }
+}
+
+/** Writes a head's row in state `filing`, or takes over its `unsent` row for the retry (keeping its tries); false when the head has another (filed, failed, or being filed). */
 export async function claimFollowup(db: Db, r: { repo: string; number: number; source: FollowupSource; head: string; at: string }): Promise<boolean> {
   const q = queryDb(db);
   const got = await q.all(q.k.insertInto(tableOf(r.source))
     .values({ repo: r.repo, number: r.number, head_oid: r.head, issue_number: null, url: null, state: "filing", at: r.at, note: null })
-    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doNothing())
+    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet({ state: "filing", at: r.at }).where(`${tableOf(r.source)}.state`, "=", "unsent"))
     .returning(["head_oid"]));
   return got.length > 0;
 }
@@ -49,8 +61,9 @@ export async function settleFollowup(db: Db, r: { repo: string; number: number; 
     .where("repo", "=", r.repo).where("number", "=", r.number).where("head_oid", "=", r.head));
 }
 
-/** Removes a head's `filing` row after a write that sent nothing, so a later run tries the head again. */
-export async function dropFollowup(db: Db, r: { repo: string; number: number; source: FollowupSource; head: string }): Promise<void> {
+/** Records a head's `filing` row as `unsent` after a write that sent nothing, with the times of all such tries (`tries`), so it is tried again after a backoff. */
+export async function deferFollowup(db: Db, r: { repo: string; number: number; source: FollowupSource; head: string; at: string; tries: readonly string[] }): Promise<void> {
   const q = queryDb(db);
-  await q.run(q.k.deleteFrom(tableOf(r.source)).where("repo", "=", r.repo).where("number", "=", r.number).where("head_oid", "=", r.head).where("state", "=", "filing"));
+  await q.run(q.k.updateTable(tableOf(r.source)).set({ state: "unsent", at: r.at, note: JSON.stringify(r.tries) })
+    .where("repo", "=", r.repo).where("number", "=", r.number).where("head_oid", "=", r.head).where("state", "=", "filing"));
 }

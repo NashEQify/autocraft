@@ -39,6 +39,38 @@ test("a defect that does not block is filed in one follow-up issue before the me
   w.close();
 });
 
+test("a filing whose write sends nothing holds the merge for two retries, at 10 and 60 minutes, then fails and the PR merges", async () => {
+  const w = await approvedWith(NOT_BLOCKING);
+  let tries = 0;
+  const exec = async () => { tries++; return { code: 1, stdout: "", stderr: "API rate limit exceeded for installation" }; };
+  const deps = { exec, now: () => new Date(), lane: appLane(w.gh.querier) };
+  const row = async () => (await w.db.all(w.db.k.selectFrom("main.premerge_followups").select(["state", "note"])))[0];
+  // The tries were made `ms` earlier.
+  const age = async (ms: number) => {
+    const r = (await row())!;
+    const shifted = (JSON.parse(r.note!) as string[]).map((t) => new Date(Date.parse(t) - ms).toISOString());
+    await w.db.run(w.db.k.updateTable("main.premerge_followups").set({ note: JSON.stringify(shifted), at: shifted.at(-1)! }));
+  };
+  for (const [wait, n] of [[10, 1], [60, 2]] as const) {
+    assert.deepEqual((await runPremergeFollowups(w.db, { repo: "app" }, () => {}, deps)).failed, []);
+    assert.equal((await row())!.state, "unsent");
+    await settle(w);
+    const plan = await w.prPlan(1);
+    assert.ok(!plan.actions.some((a) => a.kind === "followups" || a.kind === "merge"), `try ${n}: nothing runs during the backoff`);
+    assert.equal(plan.waitCode, "followups");
+    assert.match(plan.wait ?? "", /did not reach GitHub/);
+    await age((wait - 1) * 60_000);
+    assert.ok(!(await kinds(w)).includes("followups"), `try ${n}: not before ${wait} minutes`);
+    await age(2 * 60_000);
+    assert.ok((await kinds(w)).includes("followups"), `try ${n}: due after ${wait} minutes`);
+  }
+  assert.equal((await runPremergeFollowups(w.db, { repo: "app" }, () => {}, deps)).failed.length, 1);
+  assert.deepEqual([(await row())!.state, tries], ["failed", 3]);
+  await settle(w);
+  await mergesAsPerson(w);
+  w.close();
+});
+
 test("a blocking defect, or one stored before defects were classed, gets the automatic fix-up round and files nothing", async () => {
   for (const blocking of [{ class: "regression" as const, why: "Lists that load on the base branch panic." }, undefined]) {
     const w = await approvedWith(blocking);

@@ -7,7 +7,7 @@ import { loadHeldLeaseKeys } from "./leases.ts";
 import { RUNNER_STOPPED } from "./fragments.ts";
 import { loadLiveJobs } from "./queue.ts";
 import { approvedOf, nowIso, numberOf } from "./sql.ts";
-import type { EndedJob, FpRecord, JobState, LaneInputs, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow } from "./types.ts";
+import type { EndedJob, FpRecord, JobState, LaneInputs, LaneRun, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow, WorkflowFailure } from "./types.ts";
 
 const PIPELINE_USER = "pipeline";
 /** Pipeline jobs of the last this-many ids are looked at for failure streaks; older failures no longer delay anything. */
@@ -137,4 +137,45 @@ export async function claimMark(db: Db, name: string, nowMs: number, minGapMs: n
   const won = await q.all(q.k.insertInto("lane_state").values({ kind: "mark", step: name, repo: "", value: at, job_id: null, at })
     .onConflict((oc) => oc.columns(["kind", "step", "repo"]).doUpdateSet(kx.excluded(["value", "at"])).where("lane_state.value", "<=", threshold)).returning("step"));
   return won.length > 0;
+}
+
+/**
+ * The pipeline's ended jobs of the approved lane (one PR each) of `steps` for the PRs `refs`, that ended after `since`, oldest first.
+ * A job the runner stopped and one whose write the pacing held back are left out, as the failure streaks leave them out.
+ */
+export async function loadLaneRuns(db: Db, refs: readonly { repo: string; number: number }[], since: string, steps: readonly string[]): Promise<LaneRun[]> {
+  if (!refs.length || !steps.length) return [];
+  const q = queryDb(db);
+  const rows = await q.all(q.k.selectFrom("jobs").select((eb) => ["repo", "step", "id", "state", "ended_at", numberOf(db).as("number")])
+    .where("requested_by", "=", PIPELINE_USER).where("ended_at", ">", since).where("state", "in", ["done", "failed"])
+    .where((eb) => kx.inList(db, eb.ref("step"), steps)).where((eb) => kx.inList(db, eb.ref("repo"), [...new Set(refs.map((r) => r.repo))]))
+    .where((eb) => eb.and([approvedOf(db, eb), eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED), eb.not(kx.like(db, eb.fn.coalesce("error", eb.val("")), eb.val("write paced:%")))]))
+    .orderBy("id"));
+  const wanted = new Set(refs.map((r) => `${r.repo}#${r.number}`));
+  return rows.flatMap((r) => {
+    const number = r.number === null ? NaN : Number(r.number);
+    return r.repo !== null && r.ended_at !== null && wanted.has(`${r.repo}#${number}`) ? [{ repo: r.repo, number, step: r.step, id: Number(r.id), state: r.state as LaneRun["state"], endedAt: r.ended_at }] : [];
+  });
+}
+
+/** The lane_state mark of the live workflows whose check keeps failing (src/workflow/advance.ts), as the runner stored them last. */
+export const WORKFLOW_FAILURES_MARK = "workflow_failures";
+
+/** Parses the stored mark; an empty or unreadable one is none. */
+export function workflowFailuresOf(value: string | null | undefined): WorkflowFailure[] {
+  if (!value) return [];
+  try {
+    const v = JSON.parse(value) as unknown;
+    return Array.isArray(v) ? v.filter((x): x is WorkflowFailure => !!x && typeof x === "object" && typeof (x as WorkflowFailure).id === "number" && typeof (x as WorkflowFailure).ref === "string") : [];
+  } catch { return []; }
+}
+
+export async function saveWorkflowFailures(db: Db, list: readonly WorkflowFailure[]): Promise<void> {
+  await saveLaneState(db, [{ kind: "mark", step: WORKFLOW_FAILURES_MARK, value: list.length ? JSON.stringify(list) : "" }]);
+}
+
+export async function loadWorkflowFailures(db: Db): Promise<WorkflowFailure[]> {
+  const q = queryDb(db);
+  const r = await q.get(q.k.selectFrom("lane_state").select("value").where("kind", "=", "mark").where("step", "=", WORKFLOW_FAILURES_MARK).where("repo", "=", ""));
+  return workflowFailuresOf(r?.value);
 }

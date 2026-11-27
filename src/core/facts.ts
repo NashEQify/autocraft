@@ -4,7 +4,7 @@ import { listQuietPrs } from "../data/security/index.ts";
 import { HOLD_MAX, loadOwnLogins, permKey, standing, type ActFacts, type ActIdentity, type PermKey, type Standing } from "../data/access/index.ts";
 import { loadMainFixPrs, attemptsIn, conflictAskRetryAtOf, conflictBucketOf, cifixAt, fixupAtHead, lintOf, operatorTriesIn, premergeFixRunningIn, premergeFixUsedIn, premergeStalledIn, pushChainOf, type PushEdge } from "../data/changes/index.ts";
 import { withConfig, config } from "../data/control/index.ts";
-import { loadUnsureHeads } from "../data/review/index.ts";
+import { loadUnsureHeads, unsentTries } from "../data/review/index.ts";
 import { prPass } from "../data/planner/index.ts";
 import type { KeySource, Ref } from "../data/keys.ts";
 import { pushable, sameRepo } from "../fixup/pushable.ts";
@@ -24,7 +24,7 @@ import { staleFrom } from "../review/discussion.ts";
 import { holdsFrom, MIN_INTERVAL_KEY, minIntervalOf, nextUtcMidnight, type HoldCheck } from "../review/gate.ts";
 import { roundWaits } from "./author-round.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
-import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf } from "./rules.ts";
+import { BASE_NAME, FIXUP_MAX_ATTEMPTS, MAX_FAILURES, OFF_DEFAULT_REASON, PIPELINE_LOGIN_KEY, RULE_SIZES, pipelineWrites, sizeOf, unsentAsk } from "./rules.ts";
 import { workScore } from "./work-score.ts";
 import { tripsOfRepo } from "./push-outcome.ts";
 import { pushAllowed } from "./gates.ts";
@@ -482,7 +482,19 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   const pmFiled = d.review.premergeFollowups.get(ref) ?? [], rvFiled = d.review.reviewFollowups.get(ref) ?? [];
   if (pmFiled.length || rvFiled.length) {
     const issue = [...pmFiled, ...rvFiled].filter((x) => x.issue_number !== null).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).at(-1)?.issue_number ?? null;
-    base.followUps = { heads: pmFiled.map((x) => x.head_oid), reviewHeads: rvFiled.map((x) => x.head_oid), issue };
+    // A filing that sent nothing is tried again after its backoff; until then its head waits for the retry, and once due it is no try.
+    const untils: number[] = [];
+    const split = (rows: typeof pmFiled): { tried: string[]; waiting: string[] } => {
+      const out = { tried: [] as string[], waiting: [] as string[] };
+      for (const x of rows) {
+        const u = x.state === "unsent" ? unsentAsk(unsentTries(x), now) : "final";
+        if (u === "final") out.tried.push(x.head_oid);
+        else if (u) { out.waiting.push(x.head_oid); untils.push(u.until); refresh.soon(ref, u.until); }
+      }
+      return out;
+    };
+    const pmTries = split(pmFiled), rvTries = split(rvFiled);
+    base.followUps = { heads: pmTries.tried, reviewHeads: rvTries.tried, issue, ...(untils.length ? { retry: { heads: pmTries.waiting, reviewHeads: rvTries.waiting, at: Math.min(...untils) } } : {}) };
   }
   if (pmRow) {
     const all = findingsOf(pmRow), approved = !!wfFact?.approved;

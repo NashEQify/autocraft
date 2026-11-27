@@ -19,6 +19,7 @@ import { loadItems } from "../data/mirror/index.ts";
 import { loadReviewRows, type PremergeRow, type ReviewRow } from "../data/review/index.ts";
 import { adoptLegs, listWorkflows, loadActions, loadGoOnAt, loadLegs, moveWorkflows, recordEvents, retryActions, type GoneOn, type Preapproval, type WorkflowPatch, type WorkflowRead } from "../data/workflow/index.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
+import { loadLaneRuns, saveWorkflowFailures, type LaneRun, type WorkflowFailure } from "../data/jobs/index.ts";
 import { isFenced } from "../db/fence.ts";
 import type { Db } from "../db/index.ts";
 import { recheckDelayMs } from "../core/backoff.ts";
@@ -61,7 +62,28 @@ export type Moved = { id: number; repo: string; number: number; to: ItemWorkflow
  * A live workflow whose check, or the write of what it found, failed each time since the pass last got it through: how often, the
  * latest error, and the row's version then. It is tried again at `until`, or when a person's command changed the row.
  */
-export type FailedCheck = { ref: string; times: number; error: unknown; until: number; version: string };
+export type FailedCheck = { ref: string; times: number; error: unknown; until: number; version: string; /** The first failure of this run of them (ISO). */ since: string };
+
+/** Passes in a row a workflow's check failed before the item and the health checks show it. */
+export const FAILING_SHOWN = 3;
+
+/** The failures stored last per map of failed checks (one per runner), so the mark is written when what shows changes, and once by a new runner. */
+const storedFailures = new WeakMap<Map<number, FailedCheck>, string>();
+
+/** Stores the workflows that failed FAILING_SHOWN passes in a row, for the item's state line and the health checks; a failed write is tried at the next pass. */
+async function showFailures(db: Db, failed: Map<number, FailedCheck>, log: (line: string) => void): Promise<void> {
+  const list: WorkflowFailure[] = [...failed].filter(([, f]) => f.times >= FAILING_SHOWN).sort(([a], [b]) => a - b)
+    .map(([id, f]) => ({ id, ref: f.ref, since: f.since, error: String((f.error as Error)?.message ?? f.error).replace(/\s+/g, " ").slice(0, 300) }));
+  const value = JSON.stringify(list);
+  if (storedFailures.get(failed) === value) return;
+  try {
+    await saveWorkflowFailures(db, list);
+    storedFailures.set(failed, value);
+  } catch (e) {
+    if (isFenced(e)) throw e;
+    log(`workflows: the failing checks were not stored: ${(e as Error).message}`);
+  }
+}
 
 /** Lockfiles a fix-up may touch as a side effect of its change: never "beyond what was agreed". */
 const LOCKFILE = /(^|\/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Gemfile\.lock|poetry\.lock|go\.sum)$/;
@@ -85,6 +107,8 @@ type Pass = {
   /** Of the issues whose workflow has no PR. */
   issues: Map<string, ItemFacts>;
   thresholds: BlockerFacts["thresholds"];
+  /** The ended jobs of the approved lane per PR, oldest first. */
+  laneRuns: Map<string, LaneRun[]>;
 };
 /** The writes the pass collects, written once at its end; `was`: the row as the pass read it. `stored`: the workflows whose stop at a blocker is written already (blockWorkflow). */
 type Writes = {
@@ -112,20 +136,35 @@ function readAt(pass: Pass, ref: string, r: ReviewRow): string {
   return from && from.at < r.at ? readAt(pass, ref, from) : r.at;
 }
 
+/** The steps with an approved lane (src/runner/steps.ts hasApprovedLane), by the name a failing step has in the blocker. */
+const LANE_STEPS: Record<string, string> = { "opus-review": "review", premerge: "pre-merge review", fixup: "fix-up", cifix: "CI fix" };
+
+/** Failed jobs of the PR's approved lane of one step after `since`, since its last job that ran through. */
+function laneStreak(runs: readonly LaneRun[], step: string, since: string): number {
+  let n = 0;
+  for (const r of runs) if (r.step === step && r.endedAt > since) n = r.state === "failed" ? n + 1 : 0;
+  return n;
+}
+
 /**
- * Tries of a step on the PR that failed after `since`. A step whose work is the contributor's now counts none: they are asked first, once,
- * and the item waits for them; where they were asked after `since` at an earlier head of ours, the tries count.
+ * Tries of a step on the PR that failed after `since`: the fix-up and CI fix rows that record a failed try, and the jobs of the PR's
+ * approved lane that failed in a row, whatever their step, so a step that fails before it records a try counts too. A step whose
+ * work is the contributor's now counts none: they are asked first, once, and the item waits for them; where they were asked after
+ * `since` at an earlier head of ours, the tries count.
  */
 function failures(pass: Pass, ref: string, since: string, head: string, facts: PrFacts | undefined): { step: string; count: number }[] {
-  const p = pass.patches.get(ref), f = facts?.head === head ? facts : undefined;
+  const p = pass.patches.get(ref), f = facts?.head === head ? facts : undefined, runs = pass.laneRuns.get(ref) ?? [];
   // A CI fix row of older code that found no failure log to read was no try.
   const count = (rows: { state: string; createdAt: string; reason?: string | null }[]): number =>
     rows.filter((r) => FAILED_TRY.includes(r.state) && r.createdAt > since && !(r.state === "failed" && r.reason === CIFIX_NO_LOG_REASON)).length;
   const asked = (rows: { state: string; createdAt: string; at: string }[]): boolean => rows.some((r) => r.state === "asked" && r.createdAt > since && r.at !== head);
-  const of = (step: string, rows: { state: string; createdAt: string; at: string }[], theirs: boolean) => ({ step, count: theirs && !asked(rows) ? 0 : count(rows) });
+  const jobs = (lane: string): number => laneStreak(runs, lane, since);
+  const of = (step: string, lane: string, rows: { state: string; createdAt: string; at: string }[], theirs: boolean) =>
+    ({ step, count: theirs && !asked(rows) ? 0 : Math.max(count(rows), jobs(lane)) });
   return [
-    of("fix-up", (p?.fixups ?? []).map((r) => ({ ...r, at: r.fromHead })), !!f && fixPath(f) === "contributor"),
-    of("CI fix", (p?.cifixes ?? []).map((r) => ({ ...r, at: r.head })), !!f && redCiPath(f) === "contributor"),
+    of("fix-up", "fixup", (p?.fixups ?? []).map((r) => ({ ...r, at: r.fromHead })), !!f && fixPath(f) === "contributor"),
+    of("CI fix", "cifix", (p?.cifixes ?? []).map((r) => ({ ...r, at: r.head })), !!f && redCiPath(f) === "contributor"),
+    ...(["opus-review", "premerge"] as const).map((lane) => ({ step: LANE_STEPS[lane]!, count: jobs(lane) })),
   ];
 }
 
@@ -234,7 +273,7 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const live = await listWorkflows(db, { live: true });
     const ids = new Set(live.map((w) => w.id));
     for (const id of failed.keys()) if (!ids.has(id)) failed.delete(id);
-    if (!live.length) return [];
+    if (!live.length) { await showFailures(db, failed, log); return []; }
     const version = (w: ItemWorkflow): string => `${w.version} ${w.state} ${w.updatedAt}`;
     const now = Date.now();
     const due = live.filter((w) => { const f = failed.get(w.id); return !f || now >= f.until || f.version !== version(w); });
@@ -261,8 +300,12 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const issueFacts = byRef(alone.length ? await loadItemFacts(db, { refs: alone.map((w) => key(w.repo, w.number)) }) : []);
     const ruleHeads = live.flatMap((w) => { const f = unansweredRuleRow(w) ? facts.get(key(w.repo, w.number)) : undefined; return f && f.head === w.recHead ? [f] : []; });
     const premerge = ruleHeads.length ? await premergeOf(db, ruleHeads) : new Map<string, PremergeRow>();
+    // The approved lane's jobs since the earliest point any workflow counts its failures from.
+    const earliest = due.map((w) => goOn.get(w.id)?.since ?? w.startedAt).sort()[0] ?? at;
+    const laneRuns = new Map<string, LaneRun[]>();
+    for (const r of await loadLaneRuns(db, prRefs, earliest, Object.keys(LANE_STEPS))) (laneRuns.get(key(r.repo, r.number)) ?? laneRuns.set(key(r.repo, r.number), []).get(key(r.repo, r.number))!).push(r);
     const pass: Pass = {
-      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, premerge, issues: issueFacts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin },
+      at, items, implement, goOn, legs, reviews, patches, fixes, moves, facts, premerge, issues: issueFacts, thresholds: { largeFix: thresholds.largeFixLines, outsideMin: thresholds.outsidePurposeMin }, laneRuns,
     };
     const writes: Writes = { workflows: [], adopt: [], stored: new Set(), closed: [] };
     const moved: Moved[] = [];
@@ -278,11 +321,12 @@ export async function advanceWorkflows(db: Db, log: (line: string) => void = () 
     const written = writes.workflows.length || writes.adopt.length ? await storeWrites(db, writes, due, log, errors) : new Set<number>();
     for (const w of due) {
       if (!errors.has(w.id)) { failed.delete(w.id); continue; }
-      const error = errors.get(w.id), times = (failed.get(w.id)?.times ?? 0) + 1, until = Date.now() + recheckDelayMs(times);
-      failed.set(w.id, { ref: key(w.repo, w.number), times, error, until, version: version(w) });
+      const was = failed.get(w.id), error = errors.get(w.id), times = (was?.times ?? 0) + 1, until = Date.now() + recheckDelayMs(times);
+      failed.set(w.id, { ref: key(w.repo, w.number), times, error, until, version: version(w), since: was?.since ?? at });
       log(`workflow ${w.repo}#${w.number}: ${(error as Error).message}`);
       wake(until);
     }
+    await showFailures(db, failed, log);
     return moved.filter((m) => written.has(m.id) || writes.stored.has(m.id));
   });
 }

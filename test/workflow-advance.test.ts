@@ -10,7 +10,7 @@ import { Runner } from "../src/runner/runner.ts";
 import { SCRATCH } from "./scratch.ts";
 import { advancePreapprovals } from "../src/preapproval/index.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
-import { advanceWorkflows } from "../src/workflow/advance.ts";
+import { advanceWorkflows, type FailedCheck } from "../src/workflow/advance.ts";
 import { runCommand } from "../src/workflow/apply.ts";
 import { parse } from "../src/workflow/parse.ts";
 import { liveWorkflow, workflowHistory } from "../src/workflow/store.ts";
@@ -33,6 +33,10 @@ test("each blocker stops an approved item and keeps its approval", async () => {
     ["major-finding", (w) => review(w, { head: "sha1", verdict: "hold" })],
     ["author-commits", async (w) => { await w.synced(1, "sha9"); await w.outOfScope(1, "sha9"); }],
     ["failed-twice", async (w) => { await fixup(w, { state: "failed" }); await fixup(w, { state: "refused" }); }],
+    // A review job of the PR's approved lane that fails before it records anything, twice in a row.
+    ["failed-twice", async (w) => {
+      for (const id of [901, 902]) await w.db.run(w.db.k.insertInto("main.jobs").values({ id, step: "opus-review", params: JSON.stringify({ repo: "app", number: 1, lane: "approved", limit: 10 }), requested_by: "pipeline", requested_at: later(), state: "failed", started_at: later(), ended_at: later(), error: "reply could not be read", repo: "app" }));
+    }],
     ["large-fix", (w) => fixup(w, { state: "pushed", files: ["src/lib.rs"], patch: bigPatch })],
     ["beyond-agreed", async (w) => {
       await review(w, { head: "sha1", verdict: "take-fix", fixes: [{ file: "src/lib.rs", change: "check the bound", title: "bound check" }], at: "2026-01-01T00:00:00Z" });
@@ -483,7 +487,7 @@ test("one workflow's change that cannot be stored loses no other's, and the pass
   assert.equal(woken, 0);
 });
 
-test("a workflow whose change cannot be stored keeps its merge leg where it is, shows in the health check and is not tried on every tick; the others go on", async () => {
+test("a workflow whose change cannot be stored keeps its merge leg where it is, shows on its item and in the health check after three failures and is not tried on every tick; the others go on", async () => {
   const w = await approvedReview();
   const db = w.db;
   await w.pr(2, { label: "feature" });
@@ -492,7 +496,7 @@ test("a workflow whose change cannot be stored keeps its merge leg where it is, 
   const runner = new Runner({ db, logs: mkdtempSync(join(SCRATCH, "workflow-runner-")), log: (l) => lines.push(l), detect: async () => ({ proposals: [], logs: [] }) });
   const legs = async () => (await db.all(db.k.selectFrom("main.preapprovals").select(["number", "state"]).orderBy("number"))).map((l) => `${l.number} ${l.state}`);
   const row = async () => (await liveWorkflow(db, "app", 1))!.updatedAt;
-  const check = async () => (await computeChecks(db, Date.now() + 90_000)).find((c) => c.id === "runner")!;
+  const checks = async () => (await computeChecks(db)).filter((c) => c.group === "workflows");
   for (let i = 0; i < 2; i++) await runner.tick();
   assert.deepEqual(await legs(), ["1 review", "2 review"]);
   for (const number of [1, 2]) await db.run(db.k.insertInto("main.opus_reviews").values({ repo: "app", number, head_oid: `sha${number}`, run_id: "rv", at: later(), model: "m", mode: "full", verdict: "take", sure: 1, reason: "r",
@@ -507,9 +511,15 @@ test("a workflow whose change cannot be stored keeps its merge leg where it is, 
   const tries = () => lines.filter((l) => l === "workflow app#1: bad row").length;
   for (let i = 0; i < 3; i++) await runner.tick();
   assert.deepEqual(await legs(), ["1 review", "2 ci"], lines.join("\n"));
-  const bad = await check();
-  assert.equal(bad.state, "warn");
-  assert.match(bad.text, /app#1: bad row/);
+  assert.deepEqual((await checks()).map((c) => c.state), ["ok"], "two failures in a row do not show yet");
+  // The backoff has passed, and the pass runs again on new input: the third failure in a row shows.
+  for (const f of (runner as unknown as { failedWorkflows: Map<number, FailedCheck> }).failedWorkflows.values()) f.until = 0;
+  await review(w, { head: "sha-old", verdict: "take", at: "2026-01-01T00:00:00Z" });
+  await runner.tick();
+  const [bad, ...others] = await checks();
+  assert.deepEqual([bad!.state, bad!.repo, others.length], ["warn", "app", 0]);
+  assert.match(bad!.text, /app#1.*: bad row/);
+  assert.match((await legWait(db, (await liveWorkflow(db, "app", 1))!))!, /failed to check/);
   const before = tries();
   // The inputs of the pass change on every tick.
   for (let i = 0; i < 4; i++) { await review(w, { head: `sha-old${i}`, verdict: "take", at: "2026-01-01T00:00:00Z" }); await runner.tick(); }
@@ -520,7 +530,8 @@ test("a workflow whose change cannot be stored keeps its merge leg where it is, 
   await runCommand(db, actor, "dashboard", { parsed: parse("urgent"), items: [{ repo: "app", number: 1 }] });
   for (let i = 0; i < 3; i++) await runner.tick();
   assert.deepEqual(await legs(), ["1 ci", "2 ci"], lines.join("\n"));
-  assert.equal((await check()).state, "ok");
+  assert.deepEqual((await checks()).map((c) => c.state), ["ok"]);
+  assert.doesNotMatch((await legWait(db, (await liveWorkflow(db, "app", 1))!)) ?? "", /failed to check/);
   await runner.stop();
   await db.close();
 });

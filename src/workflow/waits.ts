@@ -5,10 +5,11 @@
 // claim now (src/remote/takers.ts waitingOn). For a closed workflow: what keeps the
 // close from being made. A merge refused for its approver's access is no wait but a question (ask.ts), which an answer closes, or the
 // approver's next sign-in (src/github/user-lane.ts retryWaiting). A contributor, or a person on GitHub, whom the item waits for without a question. The status comment, the item page and the agent show it as the state line.
-import { loadPremerge, loadPremergeFollowups, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
+import { loadFollowupRows, loadPremerge, loadPremergeFollowups, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
 import { loadShown } from "../data/mirror/index.ts";
 import { loadActions, loadLegs, loadLinks, type WorkflowAction } from "../data/workflow/index.ts";
 import { loadPlans } from "../data/planner/index.ts";
+import { loadWorkflowFailures } from "../data/jobs/index.ts";
 import type { RefusalCode, WaitCode } from "../core/codes.ts";
 import type { ActionKind } from "../core/plan.ts";
 import type { Db } from "../db/index.ts";
@@ -38,9 +39,18 @@ export const legWait = async (db: Db, wf: Waiter, nowMs: number = Date.now()): P
  * Per workflow id the state line of a workflow whose started work waits for the app identity, whose merge leg waits for its approver's
  * sign-in, or for a pre-merge check or the model step of its first due action that no Task Runner can take, or that only the own runners of the people whose work it is take while
  * none of them can claim (offline, held for its usage, cooling off), or for the contributor or a person on GitHub, or whose close is not made,
- * and the line of a done workflow whose PR merged with follow-ups filed; the others are absent.
+ * and the line of a done workflow whose PR merged with follow-ups filed or not posted; the others are absent. A live workflow whose check
+ * failed several passes in a row shows that instead.
  */
 export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = Date.now()): Promise<Map<number, string>> {
+  const out = await legLines(db, wfs, nowMs), failing = wfs.length ? await loadWorkflowFailures(db) : [];
+  // A workflow whose check keeps failing stands still whatever else it waits for (src/workflow/advance.ts FAILING_SHOWN); the error is in the health checks.
+  const ids = new Set(wfs.map((w) => w.id));
+  for (const f of failing) if (ids.has(f.id)) out.set(f.id, t("AutoCraft has failed to check this item since {time} UTC and keeps trying", { time: f.since.slice(11, 16) }));
+  return out;
+}
+
+async function legLines(db: Db, wfs: readonly Waiter[], nowMs: number): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   const closed = wfs.filter((w) => w.state === "closed"), moving = wfs.filter((w) => w.state === "running" || w.state === "waiting");
   const ofPrs = moving.filter((w) => w.kind === "pr").map((w) => ({ repo: w.repo, number: w.number }));
@@ -109,16 +119,20 @@ const STEP_WORD: Record<string, string> = {
   "opus-review": tk("review"), fixup: tk("fix-up"), cifix: tk("CI fix"), premerge: tk("pre-merge check"), verify: tk("verification"), implement: tk("implementation"),
 };
 
-/** Per workflow id, the line of a done workflow whose PR merged with follow-ups filed in its follow-up issue (src/premerge/followups.ts). */
+/** Per workflow id, the line of a done workflow whose PR merged with follow-ups filed in its follow-up issue, or with follow-ups whose filing failed (src/premerge/followups.ts). */
 async function followUpLines(db: Db, done: readonly Waiter[]): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   if (!done.length) return out;
   const linked = new Map((await loadLinks(db, { workflowIds: done.filter((w) => w.kind !== "pr").map((w) => w.id) })).map((l) => [l.workflowId, l.pr]));
   const prs = done.flatMap((w) => { const pr = w.kind === "pr" ? w.number : linked.get(w.id); return pr == null ? [] : [{ w, repo: w.repo, number: pr }]; });
-  const [filed, shown] = await db.together(() => Promise.all([loadPremergeFollowups(db, prs), loadShown(db, prs)]));
+  const [filed, reviewed, shown] = await db.together(() => Promise.all([loadPremergeFollowups(db, prs), loadFollowupRows(db, prs, "review"), loadShown(db, prs)]));
   for (const { w, repo, number } of prs) {
-    const issue = filed.get(`${repo}#${number}`)?.findLast((r) => r.issue_number !== null)?.issue_number;
-    if (issue != null && shown.get(`${repo}#${number}`)?.state === "merged") out.set(w.id, t("Merged; follow-ups filed in #{issue}", { issue }));
+    const ref = `${repo}#${number}`;
+    if (shown.get(ref)?.state !== "merged") continue;
+    const rows = [...filed.get(ref) ?? [], ...reviewed.get(ref) ?? []].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    const issue = rows.findLast((r) => r.issue_number !== null)?.issue_number;
+    if (rows.at(-1)?.state === "failed") out.set(w.id, t("Merged; follow-ups not posted on GitHub"));
+    else if (issue != null) out.set(w.id, t("Merged; follow-ups filed in #{issue}", { issue }));
   }
   return out;
 }

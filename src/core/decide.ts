@@ -93,19 +93,25 @@ const fixing = (f: PrFacts): boolean => ["fix", "running"].includes(premergeFix(
  * are filed in its follow-up issue, once per reviewed head. The review's head is the PR's head or leads to it through our own pushes (a
  * fix-up of its blocking fixes, a base merge), so the filing is planned at the PR's head; a stale review is read again first.
  */
-export const reviewFollowUpsDue = (f: PrFacts): boolean => {
+export const reviewFollowUpsDue = (f: PrFacts): boolean => reviewFollowUpsOwed(f) && !f.followUps?.reviewHeads.includes(f.review!.head) && !f.followUps?.retry?.reviewHeads.includes(f.review!.head);
+const reviewFollowUpsOwed = (f: PrFacts): boolean => {
   const r = f.review;
-  return !!workflowOf(f)?.approved && !!f.head && !!r && r.followUps > 0 && r.leadsToHead && !r.stale && !f.followUps?.reviewHeads.includes(r.head);
+  return !!workflowOf(f)?.approved && !!f.head && !!r && r.followUps > 0 && r.leadsToHead && !r.stale;
 };
 
 /**
  * The pre-merge review at the head of a PR approved for merge found defects that do not stop it, and none that do: the PR goes on to merge,
  * and those defects are filed in its follow-up issue (a later head's comment on it), once per head.
  */
-export const followUpsDue = (f: PrFacts): boolean => {
+export const followUpsDue = (f: PrFacts): boolean => followUpsOwed(f) && !f.followUps?.heads.includes(f.head!) && !f.followUps?.retry?.heads.includes(f.head!);
+const followUpsOwed = (f: PrFacts): boolean => {
   const pm = f.premerge;
-  return !!workflowOf(f)?.approved && !!f.head && pm?.head === f.head && pm.hasFindings && pm.followUps > 0 && pm.defects === 0 && !f.followUps?.heads.includes(f.head);
+  return !!workflowOf(f)?.approved && !!f.head && pm?.head === f.head && pm.hasFindings && pm.followUps > 0 && pm.defects === 0;
 };
+
+/** A filing of either source whose try sent nothing waits for its retry (src/core/rules.ts unsentAsk), and the merge waits with it until the last one. */
+const followUpsRetrying = (f: PrFacts): boolean =>
+  (followUpsOwed(f) && !!f.followUps?.retry?.heads.includes(f.head!)) || (reviewFollowUpsOwed(f) && !!f.followUps?.retry?.reviewHeads.includes(f.review!.head));
 
 /** The queue entry of a PR that has a take or take-fix review at its head (or merged at the reviewed head), or of a merge-entry PR (no review needed). */
 export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
@@ -796,12 +802,13 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (basic && reviewed && approved && !unsentHeld) actions.push(act("lint", f.head, { bucket: l.step, source: l.source }));
   }
 
-  let filingHeld = false;
+  let filingHeld: boolean | "retry" = false;
   if (e) {
     if (e.state === "waiting-premerge" && mergeAllowed(f) && premergeRetryDue(f)) actions.push(act("premerge", qHead));
     // The follow-ups of an approved PR are filed before it merges; a filing the pipeline's own job may not run (refused, or the pipeline off) holds nothing back.
-    const filingFirst = (followUpsDue(f) || reviewFollowUpsDue(f)) && mayRun({ facts: f, action: act("followups", f.head) }, "pipeline").ok;
-    if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting && filingFirst) filingHeld = true;
+    const retrying = followUpsRetrying(f);
+    const filingFirst = (followUpsDue(f) || reviewFollowUpsDue(f) || retrying) && mayRun({ facts: f, action: act("followups", f.head) }, "pipeline").ok;
+    if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting && filingFirst) filingHeld = retrying && !followUpsDue(f) && !reviewFollowUpsDue(f) ? "retry" : true;
     else if (eligible(f, e) && !refusedAsBefore(f, e) && !f.mergeWaiting) {
       const singleOnly = f.verification?.state === VERIFY_UNAVAILABLE || f.verifyOverride || f.mainFix;
       actions.push(act("merge", qHead, { singleOnly, batchable: !singleOnly }));
@@ -864,6 +871,8 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // A revision in progress is what the PR waits on, also while its continuation is planned.
   const wait: Wait | null = im?.state === "revising" && open ? implWait : main ? null : implWait ?? (e ? (f.draft ? system("mirror", "the mirror to show that it is closed") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);
   // A review hold names what the pre-approved merge itself waits for, so it comes before the generic pre-approval wait.
-  const finalWait: Wait | null = (filingHeld ? system("followups", "its follow-ups to be filed before the merge") : null) ?? wait ?? (main ? null : draftWait ?? holdWait ?? unreviewedWait(f)) ?? (main ? null : reviewWait ?? (f.operator?.hold ? LEG : null));
+  const filingWait = filingHeld === "retry" ? system("followups", `its follow-ups to be filed before the merge, again after ${new Date(f.followUps!.retry!.at).toISOString().slice(11, 16)}: the last try did not reach GitHub`)
+    : filingHeld ? system("followups", "its follow-ups to be filed before the merge") : null;
+  const finalWait: Wait | null = filingWait ?? wait ?? (main ? null : draftWait ?? holdWait ?? unreviewedWait(f)) ?? (main ? null : reviewWait ?? (f.operator?.hold ? LEG : null));
   return plan(state, { ...(e ? { path: e.path, reasons: e.reasons, note: e.note, conflictNote: e.conflictNote, eligible: eligible(f, e) } : {}), actions, wait: finalWait });
 }

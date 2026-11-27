@@ -472,9 +472,8 @@ export class Runner {
     try {
       await advanceWorkflows(this.db, this.o.log, wake, this.failedWorkflows);
       checked = true;
-      const [bad, ...more] = this.failedWorkflows.values();
-      if (bad) this.noteFailure("workflows", new Error(`${bad.ref}${more.length ? ` and ${more.length} more` : ""}: ${(bad.error as Error)?.message ?? String(bad.error)}`), "warn");
-      else this.passed("workflows");
+      // A workflow whose own check fails is shown on its item and as its own health check (advance.ts FAILING_SHOWN), not as the runner's.
+      this.passed("workflows");
     } catch (e) {
       this.fault("workflows", e);
       wake(t);
