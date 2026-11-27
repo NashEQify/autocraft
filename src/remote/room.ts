@@ -174,3 +174,91 @@ export function roomOf(st: RoomState, cls: number, repos?: readonly string[], st
   // Calls the filtered runners may take go to them first; what they cannot hold falls to the others.
   return Math.max(0, all - aheadAll - Math.max(0, aheadSome - some)) + Math.max(0, some - aheadSome);
 }
+
+/** A job's calls as the runner's start test reads them: the job's repo, step and, for a lane job, the item it works on. */
+export type JobCalls = { repos?: readonly string[]; step?: string; refs?: readonly { repo: string; number: number }[] };
+
+/**
+ * Room for the runner's job starts (src/runner/runner.ts startJobs), counted per Task Runner user over one reading. Each user of an
+ * active, fresh, ready runner has free slots: its runners' slots (the fast lane not counted, as in roomOf) less their leases, within
+ * the user's Max calls at once. The queued calls of class `cls` and above go each to one user who would take them, those with the
+ * fewest such users first, the people whose started work a call is first (started.ts), else the user with the most slots left; a
+ * call no user with a free slot takes reduces nobody's room. A job has room when the users who would take its calls (roomOf's
+ * takers, its started work's owners first) have a slot left; `take` holds one of them for a job started, or one still preparing its call.
+ */
+export type JobRoom = {
+  room(cls: number, c: JobCalls): number;
+  take(cls: number, c: JobCalls): void;
+};
+
+export function jobRoom(st: RoomState): JobRoom {
+  const nowMs = st.v.now, t = takersOf(st), sw = startedOf(st.v);
+  // Free slots by lowercase login before any queued call, over every fresh, ready, active runner (Manual only ones serve started work).
+  const base = new Map<string, number>();
+  for (const h of st.fresh) {
+    if (!isActive(h, nowMs)) continue;
+    const key = h.login.toLowerCase(), all = h.slots ?? 1;
+    base.set(key, (base.get(key) ?? 0) + Math.max(0, all - (all >= 2 ? 1 : 0) - h.leased));
+  }
+  for (const [login, n] of base) {
+    const max = settingsOf(st.v.snapshot, login).maxCalls;
+    base.set(login, max === null ? n : Math.min(n, Math.max(0, max - leasedIn(st.v.snapshot, login))));
+  }
+  /** The logins that would take calls `c`, and of them the owners of its started work. */
+  const takers = (c: JobCalls & { prompt_id?: string }): { all: string[]; owners: ReadonlySet<string> } => {
+    const task = c.step === undefined ? undefined : taskOfStep(c.step);
+    const on = c.repos ?? (c.refs ? [...new Set(c.refs.map((x) => x.repo))] : undefined);
+    const call = { prompt_id: c.prompt_id ?? "", repos: on ?? [], step: c.step, refs: c.refs };
+    const fit = t.list.filter(({ active, r }) => active && (on === undefined
+      ? !(task !== undefined && r.skip.has(task)) && (r.items === null || [...r.items.repos].some((x) => runnerTakes(r, { prompt_id: call.prompt_id, repos: [x], step: c.step }, t.canWrite)))
+      : runnerTakes(r, call, t.canWrite)));
+    const owners = new Set<string>();
+    if (on?.length) {
+      for (const o of sw.ownersFor({ repos: on, ...(c.refs && { refs: c.refs }), ...(c.step !== undefined && { step: c.step }) })) {
+        if (base.has(o) && sw.canTake(o, { prompt_id: call.prompt_id, repos: on })) owners.add(o);
+      }
+    }
+    return { all: [...new Set([...owners, ...fit.map(({ r }) => r.login.toLowerCase())])], owners };
+  };
+  const taken = new Map<string, number>();
+  const ledgers = new Map<number, Map<string, number>>();
+  const best = (left: ReadonlyMap<string, number>, who: { all: readonly string[]; owners: ReadonlySet<string> }): string | undefined => {
+    let pick: string | undefined, pickOwner = false, most = 0;
+    for (const l of who.all) {
+      const n = left.get(l) ?? 0, owner = who.owners.has(l);
+      if (n > 0 && ((owner && !pickOwner) || (owner === pickOwner && n > most))) [pick, pickOwner, most] = [l, owner, n];
+    }
+    return pick;
+  };
+  const ledger = (cls: number): Map<string, number> => {
+    let left = ledgers.get(cls);
+    if (left) return left;
+    left = new Map(base);
+    const ahead: { all: string[]; owners: ReadonlySet<string> }[] = [];
+    for (const r of st.queue.all) {
+      // A call in a conversation's own slot holds none of the user's slots (calls.ts claimOrder); one bound to a user goes to them alone.
+      if (r.seen_at < nowMs - CALLER_STALE_MS || claimClass(r, nowMs) < cls || r.boundSlot) continue;
+      if (r.forLogin) ahead.push({ all: [r.forLogin.toLowerCase()], owners: new Set() });
+      else ahead.push(takers({ prompt_id: r.prompt_id, repos: r.repos, step: r.step, refs: r.refs }));
+    }
+    for (const who of ahead.filter((w) => w.all.length).sort((a, b) => a.all.length - b.all.length)) {
+      const l = best(left, who);
+      if (l !== undefined) left.set(l, left.get(l)! - 1);
+    }
+    for (const [l, n] of taken) left.set(l, (left.get(l) ?? 0) - n);
+    ledgers.set(cls, left);
+    return left;
+  };
+  return {
+    room: (cls, c) => {
+      const left = ledger(cls);
+      return takers(c).all.reduce((n, l) => n + Math.max(0, left.get(l) ?? 0), 0);
+    },
+    take: (cls, c) => {
+      const l = best(ledger(cls), takers(c));
+      if (l === undefined) return;
+      taken.set(l, (taken.get(l) ?? 0) + 1);
+      for (const left of ledgers.values()) left.set(l, (left.get(l) ?? 0) - 1);
+    },
+  };
+}
