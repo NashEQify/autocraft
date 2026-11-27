@@ -1936,6 +1936,7 @@ export interface PrStatusComments {
   failures: Generated<number>;
   retry_at: string | null;
   updated_at: string;
+  pinged: string | null;
 }
 
 export interface Preapprovals {
@@ -3358,7 +3359,7 @@ export const COLUMNS = {
   pr_checks: ["repo", "number", "head_oid", "state", "is_draft", "overall", "checks", "mergeable", "maintainer_can_modify", "fetched_at"],
   pr_commits: ["repo", "number", "oid", "committed_at", "author", "first_seen_at", "co_authors", "message"],
   pr_files: ["repo", "number", "head", "path", "additions", "deletions", "change_type"],
-  pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
+  pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at", "pinged"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id", "workflow_id", "reason_code", "reason_params"],
   premerge_followups: ["repo", "number", "head_oid", "issue_number", "url", "state", "at", "note"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],

@@ -1581,6 +1581,7 @@ CREATE TABLE IF NOT EXISTS pr_status_comments (
   failures INTEGER NOT NULL DEFAULT 0, -- writes that failed in a row
   retry_at TEXT,                      -- after 3 failures in a row: not tried again before this time
   updated_at TEXT NOT NULL,
+  pinged TEXT,                        -- '<workflow id>:<rec_at>' of the last question its asked people were pinged about in a reply (src/prstatus/ping.ts)
   PRIMARY KEY (repo, number)
 );
 

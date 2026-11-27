@@ -378,6 +378,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   ["workflow_actions", "close_as", "TEXT"],
   // The chat conversation a turn belongs to: its item's main conversation (src/data/chat).
   ["conversation_turns", "conversation_id", "INTEGER"],
+  // The question of a status comment whose asked people were last pinged in a reply (src/prstatus/ping.ts).
+  ["pr_status_comments", "pinged", "TEXT"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.

@@ -1,15 +1,24 @@
 // GitHub in a repo on the maintainer workflow: answers need the app's mention, strangers with write access get one "link your
-// account" answer a week, and a quiet PR's status comment says nothing about findings or the recommendation.
+// account" answer a week, a quiet PR's status comment says nothing about findings or the recommendation, a status comment's new
+// question pings its asked people once, and an implementation's question is answered on its issue.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { safeEqual } from "../src/dash/server/crypto.ts";
 import { recordSteps, startAttempt } from "../src/data/implement/index.ts";
 import { drainCommands, type CommandDeps, type CommentNow } from "../src/github/commands.ts";
 import { handleDelivery, signatureOf } from "../src/github/webhooks.ts";
-import { statusDue } from "../src/prstatus/index.ts";
+import { runPrStatus, statusDue } from "../src/prstatus/index.ts";
+import type { Exec } from "../src/fixup/git.ts";
+import type { Querier } from "../src/mirror.ts";
+import { recordPlan } from "../src/implement/plan.ts";
+import type { PlanReply } from "../src/implement/types.ts";
+import { loadImplementFacts } from "../src/data/implement/index.ts";
+import { openQuestionOf, viewOf } from "../src/workflow/question.ts";
+import { textHash } from "../src/core/open-prs.ts";
+import { roundsOf, startImplementation } from "./implement-rows.ts";
 import type { AppPermission } from "../src/remote/permission.ts";
 import { insertWorkflow, liveWorkflow, updateWorkflow } from "../src/workflow/store.ts";
-import { OPERATOR, T0, world, type World } from "./world-db.ts";
+import { OPERATOR, T0, T1, world, type World } from "./world-db.ts";
 
 const SLUG = "autocraft-bot";
 const SECRET = "hook-secret";
@@ -30,11 +39,11 @@ async function newRepo(): Promise<World> {
 
 const bodies = new Map<number, string>();
 let nextComment = 7000;
-async function comment(w: World, body: string, o: { login?: string; id?: number; number?: number } = {}): Promise<number> {
+async function comment(w: World, body: string, o: { login?: string; id?: number; number?: number; issue?: true } = {}): Promise<number> {
   const id = nextComment++;
   bodies.set(id, body);
   const p = {
-    action: "created", repository: { full_name: "storytold/app", name: "app" }, issue: { number: o.number ?? 1, pull_request: { url: "x" } },
+    action: "created", repository: { full_name: "storytold/app", name: "app" }, issue: { number: o.number ?? 1, ...(o.issue ? {} : { pull_request: { url: "x" } }) },
     comment: { id, body, created_at: new Date().toISOString(), user: { login: o.login ?? OPERATOR, id: o.id ?? OP_ID, type: "User" } },
   };
   const raw = Buffer.from(JSON.stringify(p));
@@ -148,4 +157,81 @@ test("a stop comment on the pull request of an implementation halts the issue's 
   assert.match(stop!.result!, /app#7: On hold \(held by /);
   assert.equal(await liveWorkflow(w.db, "app", 7), null);
   assert.equal((await w.db.get(w.db.k.selectFrom("main.item_workflows").select("stopped_by").where("id", "=", id)))!.stopped_by, OPERATOR);
+});
+
+test("a question on a started issue's status comment pings its asked people once per question; once the implementation's PR exists, the PR's comment asks", async () => {
+  const w = await newRepo();
+  const db = w.db;
+  await w.issue(7);
+  await w.pr(8, { author: "craft-bot" });
+  for (const [n, kind] of [[7, "issues"], [8, "pull"]] as const) await db.run(db.k.updateTable("main.items").set({ url: `https://github.com/storytold/app/${kind}/${n}` }).where("number", "=", n));
+  const id = await insertWorkflow(db, { repo: "app", number: 7, kind: "issue", entry: "implement", state: "running", startedBy: OPERATOR, startedAt: T0, startedVia: "github" }, T0);
+  const ask = async (text: string, at: string) => await updateWorkflow(db, id, { state: "recommending", rec: { text, parts: { fix: [], drop: [] }, merges: false }, recAt: at }, at);
+
+  let next = 5000;
+  const writes: { args: string[]; body: string }[] = [];
+  const exec: Exec = async (_cmd, args, opts) => {
+    writes.push({ args, body: opts?.input ?? "" });
+    if (args[0] === "api") return { code: 0, stdout: JSON.stringify({ html_url: "x" }), stderr: "" };
+    return { code: 0, stdout: `https://github.com/storytold/app/issues/${args[2]}#issuecomment-${next++}\n`, stderr: "" };
+  };
+  const none = { comments: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [] } };
+  const querier: Querier = { spent: 0, remaining: 5000, query: async () => ({ repository: { issue: none, pullRequest: none } }) as never };
+  const run = async () => { const from = writes.length; const r = await runPrStatus(db, { repo: "app", by: "pipeline", runId: "t", limit: 10, exec, querier, base: null, mint: async () => "installation-token" }); return { r, made: writes.slice(from) }; };
+  const pings = (made: typeof writes) => made.filter((x) => x.args[0] === "issue" && !x.body.includes("autocraft:pr-status"));
+
+  await ask("Split it into two pull requests.", T0);
+  const first = await run();
+  assert.deepEqual([first.r.posted, first.r.pinged], [["app#7"], ["app#7"]]);
+  const [ping] = pings(first.made);
+  assert.match(ping!.body, new RegExp(`@${OPERATOR} Recommendation: Split it into two pull requests\\.`));
+  assert.match(ping!.body, /issues\/7#issuecomment-5000/, "it links the status comment");
+  assert.equal((await run()).made.length, 0, "the same question is not pinged again");
+
+  await ask("Keep it in one pull request.", T1);
+  const second = await run();
+  assert.deepEqual([second.r.edited, second.r.pinged], [["app#7"], ["app#7"]], "a new question edits the comment and pings once more");
+
+  await updateWorkflow(db, id, { state: "running", rec: null, recAt: null });
+  const answered = await run();
+  assert.deepEqual([answered.r.edited, answered.r.pinged], [["app#7"], []]);
+  assert.doesNotMatch(answered.made[0]!.body, /Recommendation/);
+
+  await db.run(db.k.updateTable("main.item_workflows").set({ pr_number: 8 }).where("id", "=", id));
+  await ask("Merge it as it is.", "2026-01-03T00:00:00Z");
+  const opened = await run();
+  assert.deepEqual([opened.r.edited, opened.r.posted, opened.r.pinged], [["app#7"], ["app#8"], ["app#8"]], "the PR's comment asks and pings; the issue's names the PR");
+  const issueBody = opened.made.find((x) => x.args[0] === "api")!.body;
+  assert.match(issueBody, /Implementation: #8/);
+  assert.doesNotMatch(issueBody, /Recommendation/);
+});
+
+test("an implementation's question is answered by a comment on its issue, by option number or by yes", async () => {
+  const w = await newRepo();
+  const db = w.db;
+  await w.acting(OPERATOR);
+  const reply = (recommended: string | null): PlanReply => ({
+    ready: false, kind: "feature", summary: "Export layers as separate files.", plan: "The export writes one file today.", acceptance: [], verification: { tests: [], app: null }, size: "L", risks: [],
+    questions: [{ audience: "maintainer", text: "One file per layer, or one archive?", options: [{ label: "One file per layer", hint: "" }, { label: "One archive", hint: "" }], recommended }],
+  });
+  const asked = async (n: number) => {
+    await w.issue(n);
+    const it = (await db.get(db.k.selectFrom("main.items").select(["title", "body"]).where("repo", "=", "app").where("number", "=", n)))!;
+    const impl = await startImplementation(db, { repo: "app", number: n, queuedBy: OPERATOR, textHash: textHash(it.title ?? "", it.body ?? "") });
+    await recordPlan(db, impl, { callId: n, reply: reply("One file per layer") }, { commentsApproved: false, postComment: async () => null, log: () => {} });
+    const id = await insertWorkflow(db, { repo: "app", number: n, kind: "issue", entry: "implement", state: "running", startedBy: OPERATOR, startedAt: T0, startedVia: "github" }, T0);
+    const a = (await loadImplementFacts(db, [{ repo: "app", number: n }])).byIssue.get(`app#${n}`)!;
+    const v = viewOf(a, openQuestionOf(a)!, [], false);
+    await updateWorkflow(db, id, { state: "recommending", rec: v.rec, recAt: T0, plan: v.plan });
+    return impl.id;
+  };
+  const answer = async (impl: number) => (await roundsOf(db, impl)).filter((r) => r.kind === "answer").map((r) => (r.result as { option: string }).option);
+
+  const byNumber = await asked(7), byYes = await asked(9);
+  await comment(w, `@${SLUG} 2`, { number: 7, issue: true });
+  await comment(w, `@${SLUG} yes`, { number: 9, issue: true });
+  await drain(w);
+  assert.deepEqual((await commands(w)).map((c) => c.state), ["done", "done"], JSON.stringify(await commands(w)));
+  assert.deepEqual(await answer(byNumber), ["o2"], "the named option answers");
+  assert.deepEqual(await answer(byYes), ["o1"], "a yes answers with the recommended option");
 });

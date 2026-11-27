@@ -34,6 +34,7 @@ import { attributionLines, currentStep, listText, queueLine, recommendationLine,
 import { openQuestion } from "../workflow/asked.ts";
 import { heldWork, type ItemWorkflow, type PlanPart } from "../workflow/types.ts";
 import { legWaits } from "../workflow/waits.ts";
+import { answerHow, pingable, pingBody, pingDue, type Ping } from "./ping.ts";
 
 export const ACTOR = "pr-status";
 /** Ends every status comment, so the comment is found again on GitHub when the stored row is missing. */
@@ -52,7 +53,10 @@ const WORDS: Record<PublicStep, string> = {
 const NO_FIRST_POST = new Set<PublicStep>(["New", "Triaged", "Merged", "Closed"]);
 
 /** An item a person started in a repo on the maintainer workflow: its latest workflow, the latest answer, and whether it is a quiet PR. */
-export type WorkflowFacts = { wf: ItemWorkflow; answered: { by: string; at: string } | null; quiet: boolean; /** waits.ts legWaits. */ wait?: string | null };
+export type WorkflowFacts = {
+  wf: ItemWorkflow; answered: { by: string; at: string } | null; quiet: boolean; /** waits.ts legWaits. */ wait?: string | null;
+  /** The issue of an implementation whose PR exists: that PR, whose comment shows the work and its questions from then on. */ implementation?: number;
+};
 export type StatusFacts = {
   status: PublicStatus;
   /** The PR number of the PR's open merge batch, or of the batch it merged with. */ batch?: { pr: number };
@@ -101,7 +105,8 @@ export function workflowHead(f: StatusFacts & { workflow: WorkflowFacts }, o: { 
  * no blocker reason: an item waiting for an answer there only says it waits for a maintainer.
  */
 export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): string[] {
-  const { wf, answered, quiet } = f.workflow, s = f.status;
+  const { wf, answered, quiet, implementation } = f.workflow, s = f.status;
+  if (implementation !== undefined) return [`**${t("Implementation: #{pr}", { pr: implementation })}**`, attributionLines(wf, answered).join("\n")];
   const steps = workflowSteps(wf, progressOf(f, wf));
   const ended = s.step === "Merged" || s.step === "Closed";
   const out = [`**${workflowHead(f)}**`, attributionLines(wf, answered).join("\n"), ...(wf.state === "stopped" && heldWork(wf).unstarted ? [] : [stepLines(steps).join("\n")])];
@@ -119,7 +124,7 @@ export function workflowLines(f: StatusFacts & { workflow: WorkflowFacts }): str
 /** The comment body of a started item: its paragraphs, how to answer when a recommendation is open, and the links. */
 export function workflowBody(repo: string, number: number, paragraphs: string[], answerable: boolean, slug: string | null, base: string | null): string {
   const parts = [...paragraphs];
-  if (answerable && slug) parts.push(t("Answer in a comment that starts with `@{slug}`.", { slug }));
+  if (answerable && slug) parts.push(answerHow(slug));
   if (base) parts.push(t("Details for maintainers: {link}", { link: `[${t("this item")}](${base}${itemPath(repo, number)})` }));
   return `${parts.join("\n\n")}\n\n${MARKER}`;
 }
@@ -148,8 +153,12 @@ export function commentBody(repo: string, number: number, line: string, history:
 
 
 type Stored = StatusRow;
-/** `released`: the comment of a held item that nobody had started, and that nobody holds any more. `commandedBy`: the person who started or approved the item's workflow, whose start is the comment's approval (under the app identity). */
-export type Due = { number: number; facts: StatusFacts; line: string; prev: Stored | null; released?: true; commandedBy?: string };
+/**
+ * `released`: the comment of a held item that nobody had started, and that nobody holds any more. `commandedBy`: the person who started or
+ * approved the item's workflow, whose start is the comment's approval (under the app identity). `edit`: the comment's text is due (false: only
+ * `ping` is). `ping`: the open question whose asked people get a reply that pings them (ping.ts).
+ */
+export type Due = { number: number; facts: StatusFacts; line: string; prev: Stored | null; edit: boolean; released?: true; commandedBy?: string; ping?: Ping };
 
 /** A started or held item's line: its whole comment text, in paragraphs. */
 const isWorkflowText = (line: string | null | undefined): boolean => !!line?.includes("\n\n");
@@ -203,6 +212,11 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
   for (const [repo, { stored, inScope, started }] of inputs) {
     const on = !approved || approved.has(repo);
     for (const r of stored) prevOf.set(`${repo}#${r.number}`, r);
+    // An implementation's PR without work of its own shows its issue's workflow: its questions are asked there.
+    for (const w of [...started.values()]) {
+      const pr = w.wf.kind === "issue" && w.wf.entry === "implement" ? w.wf.prNumber : null;
+      if (pr !== null && !started.has(pr)) started.set(pr, w);
+    }
     for (const n of new Set([...inScope, ...[...started].filter(([, w]) => w.open).map(([n]) => n), ...stored.map((r) => r.number)])) {
       if (!on && commander(started.get(n)) === null) continue;
       const at = prevOf.get(`${repo}#${n}`)?.retry_at;
@@ -223,7 +237,7 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
     const ended = status.step === "Merged" || status.step === "Closed";
     const w = started.get(n);
     if (!inScope.has(n) && !w?.open && !ended) {
-      if (w === undefined && prev && isWorkflowText(prev.line)) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts: { status }, line: t("Not held any more. AutoCraft has no work on it."), prev, released: true });
+      if (w === undefined && prev && isWorkflowText(prev.line)) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts: { status }, line: t("Not held any more. AutoCraft has no work on it."), prev, edit: true, released: true });
       continue;
     }
     const open = status.queue ? batches.get(`open:${key}`) : undefined;
@@ -231,14 +245,23 @@ export async function statusDueIn(db: Db, repos: readonly string[], now: number 
     const merged = status.step === "Merged" ? batches.get(`merged:${key}`) : undefined;
     const pr = (open ?? merged)?.pr;
     const a = w ? answered.get(w.wf.id) : undefined;
-    const workflow: WorkflowFacts | undefined = w ? { wf: w.wf, answered: a ? { by: a.login, at: a.at } : null, quiet: quiet.has(key), wait: waits.get(w.wf.id) ?? null } : undefined;
+    const implementation = w && status.kind === "issue" && w.wf.number === n && w.wf.entry === "implement" && w.wf.prNumber !== null ? w.wf.prNumber : undefined;
+    const workflow: WorkflowFacts | undefined = w ? {
+      wf: w.wf, answered: a ? { by: a.login, at: a.at } : null, quiet: quiet.has(key), wait: waits.get(w.wf.id) ?? null, ...(implementation !== undefined ? { implementation } : {}),
+    } : undefined;
     const facts: StatusFacts = { status, ...(pr ? { batch: { pr } } : {}), ...(workflow ? { workflow } : {}) };
     // A started item's line is its whole comment text, so any change edits it; once it ended, the final line is the same as any PR's.
     const line = facts.workflow && !ended ? workflowLines({ ...facts, workflow: facts.workflow }).join("\n\n") : statusLine(facts);
     const first = facts.workflow ? !ended : !NO_FIRST_POST.has(status.step);
     const by = commander(w);
-    if (prev?.line != null && prev.line !== line && onlyWaitFlip(prev.line, line) && Date.parse(prev.updated_at) > now - WAIT_FLIP_MS) continue;
-    if (prev?.line != null ? prev.line !== line : first) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts, line, prev, ...(by ? { commandedBy: by } : {}) });
+    const flip = prev?.line != null && prev.line !== line && onlyWaitFlip(prev.line, line) && Date.parse(prev.updated_at) > now - WAIT_FLIP_MS;
+    const edit = !flip && (prev?.line != null ? prev.line !== line : first);
+    // A question shown in the comment pings its asked people once; on an implementation's PR, not again after its issue (ping.ts).
+    const wf = facts.workflow && !ended && !facts.workflow.quiet && facts.workflow.implementation === undefined ? facts.workflow.wf : null;
+    const ping = wf ? pingDue(wf, [prev?.pinged, wf.number !== n ? prevOf.get(`${repo}#${wf.number}`)?.pinged : null]) : null;
+    // The ping links the status comment: one posted now, or there already.
+    const pings = ping && (edit || prev?.comment_id) ? ping : null;
+    if (edit || pings) (out.get(repo) ?? out.set(repo, []).get(repo)!).push({ number: n, facts, line, prev, edit, ...(by ? { commandedBy: by } : {}), ...(pings ? { ping: pings } : {}) });
   }
   return out;
 }
@@ -295,7 +318,7 @@ const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
 const notFound = (r: { stderr: string; stdout: string }): boolean => /404|not found/i.test(`${r.stderr} ${r.stdout}`);
 
 export type PrStatusParams = { repo: string; by: By; runId: string; limit: number; log?: (line: string) => void; querier?: Querier; exec?: Exec; now?: () => Date; base?: string | null; /** Replaces the installation-token minter (tests). */ mint?: Writer["mint"] };
-export type PrStatusResult = { posted: string[]; edited: string[]; gone: string[]; failed: string[]; due: number; paced: boolean };
+export type PrStatusResult = { posted: string[]; edited: string[]; pinged: string[]; gone: string[]; failed: string[]; due: number; paced: boolean };
 
 /**
  * Posts or edits the due status comments of one repo, at most `limit`, under a per-repo lease so two jobs never post on
@@ -303,7 +326,7 @@ export type PrStatusResult = { posted: string[]; edited: string[]; gone: string[
  */
 export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusResult> {
   const log = p.log ?? (() => {});
-  const out: PrStatusResult = { posted: [], edited: [], gone: [], failed: [], due: 0, paced: false };
+  const out: PrStatusResult = { posted: [], edited: [], pinged: [], gone: [], failed: [], due: 0, paced: false };
   const now = p.now ?? (() => new Date());
   // Without the repo's switch only the comments of items a person started or approved are due: their starts are the approval (members).
   const repoGrant = await guardRepo(db, p.repo, "status", p.by);
@@ -332,37 +355,56 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
       const wf = d.facts.workflow;
       const ended = d.facts.status.step === "Merged" || d.facts.status.step === "Closed";
       const body = wf
-        ? workflowBody(p.repo, d.number, workflowLines({ ...d.facts, workflow: wf }), !ended && !wf.quiet && openQuestion(wf.wf) !== null, slug, base)
+        ? workflowBody(p.repo, d.number, workflowLines({ ...d.facts, workflow: wf }), !ended && !wf.quiet && wf.implementation === undefined && openQuestion(wf.wf) !== null, slug, base)
         : d.released ? workflowBody(p.repo, d.number, [`**${d.line}**`], false, slug, base)
         : commentBody(p.repo, d.number, d.line, history, d.facts.status.step === "In the merge queue", base);
       const shown = d.line.split("\n")[0];
-      const row = { line: d.line, steps: JSON.stringify(history), final: d.facts.status.step === "Merged" ? 1 : 0, failures: 0, retry_at: null, updated_at: at };
+      // The stored row as it stands: the edit and the ping each write it on.
+      let cur: RowValues = d.prev
+        ? { comment_id: d.prev.comment_id, author: d.prev.author, line: d.prev.line, steps: d.prev.steps, final: d.prev.final, failures: d.prev.failures, retry_at: d.prev.retry_at, updated_at: d.prev.updated_at, pinged: d.prev.pinged }
+        : { comment_id: null, author: null, line: null, steps: "[]", final: 0, failures: 0, retry_at: null, updated_at: at, pinged: null };
       try {
-        let found: Found | null = d.prev?.comment_id ? { id: d.prev.comment_id, author: d.prev.author } : await searchComments(q, p.repo, d.number, (c) => c.body.includes(MARKER) && ours(c.author?.login ?? null), issue);
-        // A comment written as another identity (the box account before a switch to the app) cannot be edited: a new one replaces it.
-        if (found && me && found.author && found.author !== me) found = null;
-        const r = found
-          ? await ghEditComment(w, g, run, "pr-status-comment-edit", { repo: p.repo, number: d.number, commentId: found.id }, { by: "fixed" }, body, { run: p.runId, line: shown })
-          : await ghComment(w, g, run, "pr-status-comment", { repo: p.repo, number: d.number, pr: !issue }, { by: "fixed" }, body, { run: p.runId, line: shown });
-        if (r.code !== 0 && found && notFound(r)) {
-          // Deleted on GitHub (the PR reads and the comment is not on it): never posted again on this PR.
-          const id = found.id;
-          if (await searchComments(q, p.repo, d.number, (c) => String(c.databaseId) === id, issue) === null) {
-            await store(db, p.repo, d.number, { ...row, comment_id: id, author: found.author, line: d.prev?.line ?? null, steps: d.prev?.steps ?? "[]", final: 1 });
-            out.gone.push(ref);
-            await jobItem(db, p.repo, d.number, "status comment deleted on GitHub; not posted again", log);
-            continue;
+        if (d.edit) {
+          const row = { ...cur, line: d.line, steps: JSON.stringify(history), final: d.facts.status.step === "Merged" ? 1 : 0, failures: 0, retry_at: null, updated_at: at };
+          let found: Found | null = d.prev?.comment_id ? { id: d.prev.comment_id, author: d.prev.author } : await searchComments(q, p.repo, d.number, (c) => c.body.includes(MARKER) && ours(c.author?.login ?? null), issue);
+          // A comment written as another identity (the box account before a switch to the app) cannot be edited: a new one replaces it.
+          if (found && me && found.author && found.author !== me) found = null;
+          const r = found
+            ? await ghEditComment(w, g, run, "pr-status-comment-edit", { repo: p.repo, number: d.number, commentId: found.id }, { by: "fixed" }, body, { run: p.runId, line: shown })
+            : await ghComment(w, g, run, "pr-status-comment", { repo: p.repo, number: d.number, pr: !issue }, { by: "fixed" }, body, { run: p.runId, line: shown });
+          if (r.code !== 0 && found && notFound(r)) {
+            // Deleted on GitHub (the PR reads and the comment is not on it): never posted again on this PR.
+            const id = found.id;
+            if (await searchComments(q, p.repo, d.number, (c) => String(c.databaseId) === id, issue) === null) {
+              await store(db, p.repo, d.number, { ...cur, comment_id: id, author: found.author, final: 1, failures: 0, retry_at: null, updated_at: at });
+              out.gone.push(ref);
+              await jobItem(db, p.repo, d.number, "status comment deleted on GitHub; not posted again", log);
+              continue;
+            }
           }
+          if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
+          cur = { ...row, comment_id: found?.id ?? commentIdOf(r.stdout), author: found ? found.author : me };
+          await store(db, p.repo, d.number, cur);
+          (found ? out.edited : out.posted).push(ref);
+          await jobItem(db, p.repo, d.number, `status comment ${found ? "edited" : "posted"}: ${shown}`, log);
         }
-        if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
-        await store(db, p.repo, d.number, { ...row, comment_id: found?.id ?? commentIdOf(r.stdout), author: found ? found.author : me });
-        (found ? out.edited : out.posted).push(ref);
-        await jobItem(db, p.repo, d.number, `status comment ${found ? "edited" : "posted"}: ${shown}`, log);
+        if (d.ping && cur.comment_id) {
+          const to = await pingable(db, d.ping.to);
+          if (to.length) {
+            const text = pingBody(to, d.ping.rec, slug, `${d.facts.status.url}#issuecomment-${cur.comment_id}`);
+            const r = await ghComment(w, g, run, "pr-status-ping", { repo: p.repo, number: d.number, pr: !issue }, { by: "fixed" }, text, { run: p.runId, line: text.split("\n")[0] });
+            if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
+            out.pinged.push(ref);
+            await jobItem(db, p.repo, d.number, `asked people pinged: ${to.join(", ")}`, log);
+          }
+          cur = { ...cur, pinged: d.ping.key };
+          await store(db, p.repo, d.number, cur);
+        }
       } catch (e) {
         if (e instanceof WritePacedError) { out.paced = true; log(`${p.repo}: ${e.message}`); break; }
         out.failed.push(ref);
         const failures = (d.prev?.failures ?? 0) + 1;
-        await store(db, p.repo, d.number, { comment_id: d.prev?.comment_id ?? null, author: d.prev?.author ?? null, line: d.prev?.line ?? null, steps: d.prev?.steps ?? "[]", final: 0, failures, retry_at: retryAt(failures, now().getTime()), updated_at: at });
+        await store(db, p.repo, d.number, { ...cur, final: 0, failures, retry_at: retryAt(failures, now().getTime()), updated_at: at });
         await jobItem(db, p.repo, d.number, `status comment failed: ${oneLine(String((e as Error).message ?? e))}`, log);
       }
     }

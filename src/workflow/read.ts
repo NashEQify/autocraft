@@ -13,7 +13,7 @@ import { loadTrackedRepos } from "../data/control/index.ts";
 import { removeRunTexts } from "../data/inference/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadQuiet } from "../data/security/index.ts";
-import { loadWorkflowHistory, recordEvents } from "../data/workflow/index.ts";
+import { listWorkflows, loadLinks, loadWorkflowHistory, recordEvents } from "../data/workflow/index.ts";
 import type { Db } from "../db/index.ts";
 import { actRefusal } from "../github/identity.ts";
 import { t } from "../i18n/index.ts";
@@ -22,7 +22,7 @@ import { JEV_PROMPTS } from "../prompts/index.ts";
 import { runCommand, type Actor, type CommandInput, type CommandResult } from "./apply.ts";
 import { CONDITION, GUARD, parse, type ParseOptions } from "./parse.ts";
 import { addedWords, jevExact, parseTranslation, READ_ITEMS_MAX, READ_TEXT_CHARS, scoreState, type ReadAsk, type ReadItem, type ScoreAsk } from "./read-ask.ts";
-import { isLive } from "./resolve.ts";
+import { isLive, optionNamed } from "./resolve.ts";
 import { MEANING_WORDS, recommendationText } from "./status.ts";
 import { openRecommendation, shownWorkflow, type ItemRef, type Parsed, type Surface } from "./types.ts";
 
@@ -235,6 +235,16 @@ function noted(res: CommandResult, note: string): CommandResult {
   return { items, lines: items.length === 1 ? [items[0]!.line] : [...res.lines, note] };
 }
 
+/** The text names an option of the open implementation question of the one item, or of the issue whose implementation the PR is, on its own. */
+export async function namesOption(db: Db, items: readonly ItemRef[], parsed: Parsed): Promise<boolean> {
+  if (parsed.kind !== "ambiguous" || parsed.understood || items.length !== 1) return false;
+  const ref = { repo: items[0]!.repo.split("/").pop()!, number: items[0]!.number };
+  const [own] = await listWorkflows(db, { live: true, refs: [ref] });
+  const issue = own ? null : (await loadLinks(db, { prs: [ref] }))[0];
+  const wf = own ?? (issue ? (await listWorkflows(db, { live: true, refs: [{ repo: issue.repo, number: issue.issue }] }))[0] : undefined);
+  return !!wf && optionNamed(wf, parsed.rest) !== null;
+}
+
 /**
  * Runs text the way every surface does: through runCommand. Text the parser could not read, from a sender who may send commands
  * on `read.own`, is read by a model first (see the file comment). `read` null: no reading on this path.
@@ -243,6 +253,8 @@ export async function runText(db: Db, actor: Actor, via: Surface, given: Command
   // An ambiguous parse carries no items: on a surface with none of its own, the parser's reply goes on the items the text names.
   const input = given.parsed.kind === "ambiguous" && !given.items.length && read?.named ? { ...given, items: [...read.own] } : given;
   if (input.parsed.kind !== "ambiguous" || !read || !actor.login || !await mayRead(db, actor, read.own)) return await runCommand(db, actor, via, input);
+  // An option of the open question named on its own ("2", "go with one archive") answers it as the parser reads it: no model reading.
+  if (await namesOption(db, input.items.length ? input.items : read.own, input.parsed)) return await runCommand(db, actor, via, input.items.length ? input : { ...input, items: [...read.own] });
   const reading = await within(read.waitMs ?? READ_WAIT_MS, readCommand(db, actor.login, read));
   if (!reading) return await runCommand(db, actor, via, input);
   const runs = readingRuns(reading, read);

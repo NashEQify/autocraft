@@ -39,7 +39,7 @@ export async function saveStatusComments(db: Db, rows: StatusRow[]): Promise<voi
   const q = queryDb(db);
   await db.write(async () => {
     for (const part of kx.batches(unique)) {
-      await q.run(q.k.insertInto(T).values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"]))));
+      await q.run(q.k.insertInto(T).values(part).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at", "pinged"]))));
     }
   });
 }

@@ -958,9 +958,9 @@ export const STEPS: StepDef[] = [
       const { runPrStatus } = await import("../prstatus/index.ts");
       const repo = String(ctx.params.repo);
       const r = await runPrStatus(ctx.db, { repo, by: byOfJob(ctx.job.requestedBy), runId: `pr-status-${ctx.job.id}`, limit: Number(ctx.params.limit), log: ctx.log });
-      ctx.acted(r.posted.length + r.edited.length);
+      ctx.acted(r.posted.length + r.edited.length + r.pinged.length);
       if (r.due && r.failed.length === r.due) throw new Error(`${repo}: no status comment could be written (${r.failed.join(", ")})`);
-      return `${repo}: ${r.posted.length} posted, ${r.edited.length} edited${r.failed.length ? `, ${r.failed.length} failed` : ""}${r.gone.length ? `, ${r.gone.length} deleted on GitHub` : ""}${r.paced ? "; the rest wait for the write budget" : ""}`;
+      return `${repo}: ${r.posted.length} posted, ${r.edited.length} edited${r.pinged.length ? `, ${r.pinged.length} pinged` : ""}${r.failed.length ? `, ${r.failed.length} failed` : ""}${r.gone.length ? `, ${r.gone.length} deleted on GitHub` : ""}${r.paced ? "; the rest wait for the write budget" : ""}`;
     },
   },
   {

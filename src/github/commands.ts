@@ -32,7 +32,7 @@ import { ghComment, WritePacedError, type Writer } from "./write.ts";
 import { envVar } from "../env.ts";
 import { t } from "../i18n/index.ts";
 import { runCommand, type Actor } from "../workflow/apply.ts";
-import { READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "../workflow/read.ts";
+import { namesOption, READ_BACKGROUND_WAIT_MS, runText, type ReadDeps } from "../workflow/read.ts";
 import { commentLines } from "./comment-lines.ts";
 import { commentCondition, parseComment } from "../workflow/parse.ts";
 import { linkingComment, recordSaid } from "../workflow/said.ts";
@@ -327,7 +327,8 @@ async function carryOutAnswer(db: Db, d: Drain, r: Row, deps: CommandDeps, now: 
     await settle(db, d, r, "refused", t("{ref} changed after the command was written. Send it again.", { ref: `${slugOf(r.repo)}#${r.number}` }), now, { reply, allowed });
     return "settled";
   }
-  if (again.kind === "ambiguous" && allowed && deps.read !== null) {
+  // An option of the open question named on its own runs as typed, pinned to the head like any typed command: no model reading.
+  if (again.kind === "ambiguous" && allowed && deps.read !== null && !await namesOption(db, [{ repo: r.repo, number: r.number }], again)) {
     const body = c.kind === "ok" ? c.body : "";
     readInBackground(db, d, r, deps, { actor, again, names, text: addressedText(body, names), condition: commentCondition(body, names) !== null, mention: mentionName, reply, allowed });
     return "reading";

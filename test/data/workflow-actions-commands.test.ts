@@ -175,7 +175,7 @@ both("autorepin: due when the dependency is no longer open, or its lockfile task
 both("status comments: a Closed line on a closed item is final; the latest workflow of each item with its open state", async (db) => {
   await items(db, 3);
   await queryDb(db).run(k(db).updateTable("items").set({ state: "CLOSED" }).where("number", "=", 2));
-  const row = (number: number, line: string, o: object = {}) => ({ repo: "app", number, comment_id: `c${number}`, author: "bot", line, steps: "[]", final: 0, failures: 0, retry_at: null, updated_at: T0, ...o });
+  const row = (number: number, line: string, o: object = {}) => ({ repo: "app", number, comment_id: `c${number}`, author: "bot", line, steps: "[]", final: 0, failures: 0, retry_at: null, updated_at: T0, pinged: null, ...o });
   await saveStatusComments(db, [row(1, "In review"), row(2, "Closed"), row(3, "Closed"), row(4, "Merged", { final: 1 })]);
   await saveStatusComments(db, [row(1, "Waiting for CI", { retry_at: "2026-06-01T00:00:00.000Z" })]);
   const rows = await loadStatusComments(db, ["app"]);

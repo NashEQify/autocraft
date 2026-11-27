@@ -24,6 +24,7 @@ export const GITHUB_ACTIONS: Record<string, string> = {
   "conflict-comment-edit": "Edited comment",
   "pr-status-comment": "Commented",
   "pr-status-comment-edit": "Edited comment",
+  "pr-status-ping": "Commented",
   "fixissue-claim": "Commented",
   "fixissue-unclaim": "Deleted comment",
   "batch-push": "Pushed",

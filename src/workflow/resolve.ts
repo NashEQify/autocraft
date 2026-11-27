@@ -325,7 +325,7 @@ const HEDGE = new Set(["no", "not", "never", "don", "dont", "wait", "hold", "sto
  * The option of the open question a reply names on its own ("2", "option 2", "go with per document"): by its number, or by words that
  * are all words of exactly one option's title. Null when there is no open question, or the reply says anything else.
  */
-function optionNamed(wf: ItemWorkflow, reply: string): PlanPart | null {
+export function optionNamed(wf: ItemWorkflow, reply: string): PlanPart | null {
   const options = optionsOf(wf);
   const text = reply.toLowerCase().replace(/[.!]+$/, "").replace(/^(?:(?:go with|take|use|option|part|number|answer)\s+)+/, "").trim();
   const number = /^#?(\d+)$/.exec(text);
