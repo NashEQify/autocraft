@@ -40,13 +40,14 @@ export const reviewFollowUps = <F extends Fix>(r: ReviewForFollowUps<F>, dropped
 type ClaimLike = { impact?: string; fix?: { file: string; change: string } };
 
 /**
- * The code-incomplete claims (the PR does part of what it says) that the review of a PR approved for merge files as follow-ups: the ones
- * it did not turn into one of its fixes, on a take or take-fix, or on a hold that goes on. A claim turned into a fix is filed or made as
- * that fix, so it is not listed twice. `r` is the review whose text a carried review comes from (src/review/post-source.ts): a carry
- * after our fix-up keeps that review's claims, since no fix-up targets a claim that named no fix.
+ * The code-incomplete claims (the PR does part of what it says) that the review of a PR approved for merge files as follow-ups, while the
+ * pipeline goes on with the review as a take or take-fix (`goesOn`: also a hold that does not block, or one a person answered and the leg
+ * went past): the ones it did not turn into one of its fixes. A claim turned into a fix is filed or made as that fix, so it is not listed
+ * twice. `r` is the review whose text a carried review comes from (src/review/post-source.ts): a carry after our fix-up keeps that
+ * review's claims, since no fix-up targets a claim that named no fix.
  */
-export const followUpClaims = <C extends ClaimLike>(r: { verdict: string; fixes: readonly Fix[]; claims: readonly C[]; hold?: Blocking | null; blockedBy?: readonly string[] }): C[] => {
-  if (r.verdict !== "take" && r.verdict !== "take-fix" && !holdGoesOn(r.verdict, r.hold, true, r.blockedBy)) return [];
+export const followUpClaims = <C extends ClaimLike>(r: { verdict: string; fixes: readonly Fix[]; claims: readonly C[] }, goesOn: boolean): C[] => {
+  if (!goesOn) return [];
   const listed = (c: C) => !!c.fix && r.verdict === "take-fix" && r.fixes.some((f) => f.file === c.fix!.file && f.change === c.fix!.change);
   return r.claims.filter((c) => c.impact === "code-incomplete" && !listed(c));
 };

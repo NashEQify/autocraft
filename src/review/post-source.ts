@@ -23,6 +23,8 @@ export type PostSource = {
   reviewedAt: string;
   /** The head a carried review sits at (the fix-up's head); null when the review is not carried. */
   fixedIn: string | null;
+  /** The heads from the asked head back through the carried reviews to the one the text comes from, both included. */
+  chain: string[];
   /** The `at` of the review at the head. */
   at: string;
   /** The fixes and hold class of the review the text comes from: on a PR approved for merge the post tells what blocks it from what is filed. */
@@ -77,10 +79,12 @@ async function sourceFrom(get: (head: string) => Promise<Row | undefined>, head:
   const o = await get(head);
   if (!o) return null;
   let src = o;
+  const chain = [o.head];
   for (let i = 0; i < MAX_STEPS && isCarried(src) && src.base_head; i++) {
     const next = await get(src.base_head);
     if (!next) break;
     src = next;
+    chain.push(src.head);
   }
   const carried = src !== o && !isCarried(src);
   // A walk that ends on a carried row (chain over the cap, or a missing base row) has no model to name.
@@ -89,7 +93,7 @@ async function sourceFrom(get: (head: string) => Promise<Row | undefined>, head:
     verdict: o.verdict, sure: o.sure, sourceVerdict: src.verdict,
     public: hasPublic ? parsePublic(safeJson(src.public_review!)) : { summary: "", points: [] },
     hasPublic, claims: storedClaims(safeJson(src.claims ?? "[]")),
-    model: isCarried(src) ? null : src.model, reviewedAt: carried ? src.head : o.head, fixedIn: carried ? o.head : null, at: o.at,
+    model: isCarried(src) ? null : src.model, reviewedAt: carried ? src.head : o.head, fixedIn: carried ? o.head : null, chain, at: o.at,
     fixes: src.verdict === "take-fix" ? src.fixes : [], hold: src.workflow?.hold ?? null, blockedBy: src.blocked_by,
   };
 }

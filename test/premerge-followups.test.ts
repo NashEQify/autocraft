@@ -165,19 +165,48 @@ test("on an approved PR, a blocking fix runs the fix-up, and the fix beside it i
   w.close();
 });
 
-test("the fix that does not block beside a blocking one is filed when the carry wrote the fix-up's head before the filing ran", async () => {
-  const w = await approvedReview({ verdict: "take-fix", fixes: [BLOCKING_FIX, NOT_BLOCKING_FIX] });
-  await w.db.run(w.db.k.insertInto("main.patch_checks").values({ kind: "fixup", repo: "app", number: 1, subject: "sha1", patch_hash: "x", round: 1, verdict: "approve", reasons: "", problems: "[]", model: "m", created_at: new Date().toISOString() }));
-  await ourPush(w, "sha1", "sha2");
+/** Our checked fix-up of the review's fixes, sha1 to sha2, started at `at`, and the carry it allows, dated after the review. */
+async function carriedFixup(w: World, at = new Date().toISOString()): Promise<void> {
+  await w.db.run(w.db.k.insertInto("main.patch_checks").values({ kind: "fixup", repo: "app", number: 1, subject: "sha1", patch_hash: "x", round: 1, verdict: "approve", reasons: "", problems: "[]", model: "m", created_at: at }));
+  await w.db.run(w.db.k.insertInto("main.fixups").values({ repo: "app", number: 1, from_head: "sha1", to_head: "sha2", state: "pushed", attempt: 1, created_at: at, source: "review" }));
+  await w.synced(1, "sha2");
+  await settle(w);
   assert.equal(await runCarry(w.db, "app", () => {}), 1);
-  // The review was dated after the start, a moment ahead; the carry comes after it.
   await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ at: new Date(Date.now() + 2000).toISOString() }).where("head_oid", "=", "sha2"));
   await settle(w);
+}
+
+test("the fix that does not block beside a blocking one is filed when the carry wrote the fix-up's head before the filing ran, unless the fix-up started before the approval", async () => {
+  const w = await approvedReview({ verdict: "take-fix", fixes: [BLOCKING_FIX, NOT_BLOCKING_FIX] });
+  await carriedFixup(w);
   assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "followups" && a.params?.reviewHead === "sha2"), (await kinds(w)).join(", "));
   const { s, posted } = await file(w);
   assert.deepEqual(s.filed, ["app#1"]);
   assert.match(posted, /Clearer name/);
   assert.doesNotMatch(posted, /Bound check/);
+  await settle(w);
+  assert.equal((await kinds(w)).includes("followups"), false);
+  w.close();
+
+  // A fix-up started before the approval made every fix: nothing is left to file.
+  const early = await approvedReview({ verdict: "take-fix", fixes: [BLOCKING_FIX, NOT_BLOCKING_FIX] });
+  await carriedFixup(early, "2026-01-01T00:00:00.000Z");
+  assert.equal((await kinds(early)).includes("followups"), false);
+  early.close();
+});
+
+test("a filing that sent nothing before the carry is tried again at the reviewed head after its backoff, and the carried head owes none after it", async () => {
+  const w = await approvedReview({ verdict: "take-fix", fixes: [BLOCKING_FIX, NOT_BLOCKING_FIX] });
+  const unsent = async () => ({ code: 1, stdout: "", stderr: "API rate limit exceeded for installation" });
+  await runPremergeFollowups(w.db, { repo: "app" }, () => {}, { exec: unsent, now: () => new Date(), lane: appLane(w.gh.querier) });
+  await carriedFixup(w);
+  assert.equal((await kinds(w)).includes("followups"), false, "not before the backoff");
+  const old = new Date(Date.now() - 11 * 60_000).toISOString();
+  await w.db.run(w.db.k.updateTable("main.review_followups").set({ note: JSON.stringify([old]), at: old }));
+  assert.ok((await w.prPlan(1)).actions.some((a) => a.kind === "followups" && a.params?.reviewHead === "sha1"), (await kinds(w)).join(", "));
+  const { s, posted } = await file(w);
+  assert.deepEqual(s.filed, ["app#1"]);
+  assert.match(posted, /Clearer name/);
   await settle(w);
   assert.equal((await kinds(w)).includes("followups"), false);
   w.close();

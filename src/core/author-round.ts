@@ -49,6 +49,12 @@ export async function mergeApprovedIn(db: Db, refs: { repo: string; number: numb
   return new Set([...wfs].filter(([, wf]) => wf.approvedBy !== null).map(([ref]) => ref));
 }
 
+/** When each PR's merge approval was given (`repo#number` → time; the start's time when the start approved it), for the PRs approved for merge. */
+export async function mergeApprovalsIn(db: Db, refs: { repo: string; number: number }[]): Promise<Map<string, string>> {
+  const wfs = await loadPrWorkflows(db, refs);
+  return new Map([...wfs].filter(([, wf]) => wf.approvedBy !== null).map(([ref, wf]) => [ref, wf.approvedAt ?? wf.startedAt]));
+}
+
 /** Why a round's review was not made (the review's reason; src/workflow/advance.ts stops for the approver with it): the new commits could not be told apart from a PR too large to review whole. */
 export const ROUND_UNSEPARATED = "the author's new commits could not be separated from the rest of this large pull request";
 /** As `ROUND_UNSEPARATED`: what the new commits changed is itself over the review's size cap. */
