@@ -190,3 +190,63 @@ export function authorRound(w: { approved: boolean; baseHead: string | null } | 
 
 /** Whether `head` is one of `heads` or our own pushes on top of one. */
 export const isAccepted = (heads: readonly string[], pushes: readonly OwnPush[], head: string): boolean => heads.some((h) => chainsOwn(pushes, h, head));
+
+// ---- the files a fix-up of ours was asked to change
+
+/** Lockfiles a fix-up may touch as a side effect of its change: never beyond what was agreed. */
+export const LOCKFILE = /(^|\/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Gemfile\.lock|poetry\.lock|go\.sum)$/;
+
+/** The files a fix-up changed that no planned file names; lockfiles never count. */
+export const beyondPlanned = (files: readonly string[], planned: readonly string[]): string[] => files.filter((f) => !LOCKFILE.test(f) && !planned.includes(f));
+
+/** The first line of a fix-up request that names parts of the plan and nothing else (src/workflow/effects.ts fixInstructions). */
+export const PARTS_ONLY = "Fix these findings of the review, and nothing else:";
+/** A part's line in a fix-up request. */
+export const partLine = (p: { n: number; title: string; file?: string | null }): string => `${p.n}. ${p.title}${p.file ? ` (${p.file})` : ""}`;
+
+/**
+ * The parts a fix-up request names, when it names parts of the plan and nothing else: their titles and files. Null for a request with a
+ * person's own words or a review's finding in it, which may ask for anything.
+ */
+export function askedParts(instructions: string): { title: string; file: string | null }[] | null {
+  const [first, ...lines] = instructions.split("\n");
+  if (first !== PARTS_ONLY || !lines.length) return null;
+  const out: { title: string; file: string | null }[] = [];
+  for (const l of lines) {
+    const m = /^\d+\. (.+?)(?: \(([^()]+)\))?$/.exec(l);
+    if (!m) return null;
+    out.push({ title: m[1]!, file: m[2] ?? null });
+  }
+  return out;
+}
+
+// ---- the pre-merge review of a PR approved for merge
+
+/**
+ * A head's review as the pre-merge rule reads it. `counts`: the review read code that makes a new pre-merge review due (premergeSource):
+ * a delta review, or a full one made after a review of an earlier head, unless all that lies between is pushes of ours that owe none.
+ */
+export type ChainReview = { mode: "full" | "delta" | "carried"; base: string | null; counts: boolean };
+
+/**
+ * Where the pre-merge review of `head`, on a PR a person approved for merge, comes from. Null: a model reads the head. Otherwise the head
+ * owes none, and its row is carried from `from`, the nearest earlier head with a pre-merge review; `from` null: nothing since the full
+ * review owes one, and the row is clean.
+ *
+ * The approval's full review is the one full reading. A head owes a pre-merge review only when, since that review or the last pre-merge
+ * review on its chain, some head got a review that `counts` (the author's commits, a base merge that changed the PR's own diff, an
+ * operator's fix-up of files beyond its parts). A chain of carried heads, or of delta reviews that do not count (a CI fix of ours), owes
+ * none. A head with no review the chain can be followed through owes one.
+ */
+export function premergeSource(head: string, reviews: ReadonlyMap<string, ChainReview>, premerged: ReadonlySet<string>): { from: string | null } | null {
+  let h = head;
+  for (let i = 0; i < 50; i++) {
+    if (h !== head && premerged.has(h)) return { from: h };
+    const r = reviews.get(h);
+    if (!r || (r.mode !== "carried" && r.counts)) return null;
+    if (r.mode === "full") return { from: null };
+    if (r.base === null) return null;
+    h = r.base;
+  }
+  return null;
+}

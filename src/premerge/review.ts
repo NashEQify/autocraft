@@ -1,6 +1,8 @@
 // Pre-merge review: Opus reads, independently of the first review, the head commit of each PR the merge rule would merge
-// without a person, and lists defects and minor findings. One call per PR head. Reads GitHub (the diff); writes only to
-// the local database. What the findings do to the PR is the merge queue (src/merge/queue.ts) and the fix-up route.
+// without a person, and lists defects and minor findings. One call per PR head; on a PR a person approved for merge, only at a head
+// some review since the full one read new code at (src/review/carry.ts carriedPremerges stores the others' rows with no call).
+// Reads GitHub (the diff); writes only to the local database. What the findings do to the PR is the merge queue (src/merge/queue.ts)
+// and the fix-up route.
 import { poolRoom, takersCut } from "../agents/call.ts";
 import { pool } from "../classify/run.ts";
 import { runModelStep } from "../agents/step.ts";
@@ -24,6 +26,7 @@ import { REREADS_PER_HOUR, coreRate, pauseRereads, rereadDiff, takeRereadSlot } 
 import { SYNC_RESERVE } from "../mirror.ts";
 import { ownerOf } from "../owners.ts";
 import { recordLiveBase } from "../merge/base.ts";
+import { carriedPremerges } from "../review/carry.ts";
 import { opusCandidateOf, type OpusCandidate } from "../review/opus-candidates.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { checkoutForPr } from "../sandbox/index.ts";
@@ -51,7 +54,7 @@ export type PremergeParams = {
   approved?: boolean;
 };
 export type PremergeDeps = Pick<OpusDeps, "fetchDiff" | "model" | "maxChars" | "checkout" | "semantic"> & { now?: () => number };
-export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; findings: number; /** Defects that block, or carry no class (which blocks). */ defects: number; /** Defects classed as not blocking: on a PR approved for merge they are filed as follow-ups. */ notBlocking: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
+export type PremergeSummary = { runId: string; repo: string; candidates: string[]; reviewed: number; /** Rows stored with no model call (carriedPremerges). */ carried: number; findings: number; /** Defects that block, or carry no class (which blocks). */ defects: number; /** Defects classed as not blocking: on a PR approved for merge they are filed as follow-ups. */ notBlocking: number; failed: string[]; moved: string[]; /** PRs that left the path that asked for the review (their diff keeps them outside the merge rule, or the plan changed): no model call. */ off: string[] };
 
 export function defaultPremergeDeps(): PremergeDeps {
   const d = defaultOpusDeps();
@@ -93,7 +96,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   const runId = `premerge-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
   let cands = await premergeCandidates(db, { repo, at: deps.now?.() ?? Date.now(), ...(params.by ? { by: params.by } : {}), ...(params.approved !== undefined ? { approved: params.approved } : {}) });
   if (params.number !== undefined) cands = cands.filter((e) => e.number === params.number);
-  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, findings: 0, defects: 0, notBlocking: 0, failed: [], moved: [], off: [] };
+  const s: PremergeSummary = { runId, repo, candidates: cands.map(refOf), reviewed: 0, carried: 0, findings: 0, defects: 0, notBlocking: 0, failed: [], moved: [], off: [] };
   cands = await takersCut(db, cands, params.limit, repo, (e) => e.number);
   if (params.dryRun || !cands.length) {
     log(`premerge ${repo}: ${s.candidates.length} candidates${params.dryRun ? "; dry run, nothing fetched or asked" : ""}`);
@@ -102,6 +105,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
   const opusDeps: OpusDeps = { ...deps, fetchDelta: async () => ({ ok: false, tooLarge: false, error: "not used" }) };
   let handled = 0;
   const bases = await loadItems(db, cands.filter((e) => e.facts.diffPending).map((e) => ({ repo, number: e.number })), "pr");
+  const carried = await carriedPremerges(db, cands.filter((e) => !e.facts.diffPending).map((e) => ({ repo, number: e.number, head: e.head })), runId, now());
   // Read once per pass, before the first re-read.
   let rateLowP: Promise<boolean> | undefined;
   // A job of one lane (src/runner/concurrency.ts) reviews a PR under the step's lease: the other lane's job of the repo may hold it.
@@ -136,6 +140,16 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
       const d = await rereadDiff(db, repo, e.number, head, deps.fetchDiff, liveBase, deps.now?.() ?? Date.now());
       if (d.ok && d.base && liveBase !== undefined && d.base !== liveBase) await recordLiveBase(db, repo, e.number, head, d.base, { by: "premerge", keepDiff: true });
       await jobItem(db, repo, e.number, d.ok ? "diff read again for the merge rule" : `diff not read again: ${d.error}`, log);
+      params.onHandled?.(++handled);
+      return;
+    }
+    // A head of a PR approved for merge that owes no reading of its own gets its row without a model call.
+    const kept = carried.get(`${ref}@${head}`);
+    if (kept) {
+      await saveReviews(db, [kept]);
+      const n = kept.findings?.length ?? 0;
+      await jobItem(db, repo, e.number, n ? `pre-merge review carried from an earlier head, no model call: ${n} findings` : "pre-merge review not owed since the full review: clean, no model call", log);
+      s.carried++;
       params.onHandled?.(++handled);
       return;
     }
@@ -175,6 +189,6 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
     }
     params.onHandled?.(++handled);
   })), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));
-  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.findings} findings (${s.defects} blocking defects, ${s.notBlocking} not blocking), ${s.failed.length} without an answer, ${s.off.length} off the path, ${s.moved.length} moved`);
+  log(`premerge ${repo}: ${s.reviewed} reviewed, ${s.carried} carried, ${s.findings} findings (${s.defects} blocking defects, ${s.notBlocking} not blocking), ${s.failed.length} without an answer, ${s.off.length} off the path, ${s.moved.length} moved`);
   return s;
 }

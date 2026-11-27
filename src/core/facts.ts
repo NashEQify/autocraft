@@ -138,9 +138,9 @@ function integrationOf(d: PrPassData, ref: string): boolean {
 const headOf = (d: PrPassData, ref: string, m: Mirrored): string | null =>
   (integrationOf(d, ref) ? d.merge.integration.get(ref)?.commitSha : undefined) ?? currentHead(m);
 
-/** Our own plain fix-up, or a base merge that left the diff the same, made `head`. */
+/** Our own fix-up of any source, or a base merge that left the diff the same, made `head`: a review may carry to it (src/review/carry.ts decides). */
 const madeByUs = (pushes: PushEdge[], head: string): boolean =>
-  pushes.some((e) => e.to === head && ((e.kind === "fixup" && e.source === null && e.state === "pushed") || (e.kind === "conflict" && e.state === "merged" && e.ownDiff === "same")));
+  pushes.some((e) => e.to === head && ((e.kind === "fixup" && e.state === "pushed") || (e.kind === "conflict" && e.state === "merged" && e.ownDiff === "same")));
 
 /** The pass universe: open PRs, merged PRs with a take review or merged by us, PRs of a live implementation attempt. */
 function inUniverse(d: PrPassData, ref: string, state: string): boolean {
@@ -193,7 +193,7 @@ export async function prFacts(db: Db, opts: LoadOptions & { base: PassBase; dupe
   const d = await loadPrPass(db, keys, { now, base: opts.base, repo: opts.repo, dupes: opts.dupes, mergeEntryHead, carryHead, rows: rowsOf }, endWave);
   const ownPrs = ownPrSet(d.mainFixPrs, d.quiet, d.control.settings.get(PIPELINE_LOGIN_KEY) ?? null);
   const openPrs = new Map([...d.mirror].filter(([, m]) => m.item.kind === "pr" && m.item.state === "OPEN").map(([ref, m]) => [ref, m.item] as const));
-  const staleOf = (respectCap: boolean): Promise<Set<string>> => staleFrom({ facts: d.review, items: openPrs, repos: d.repos, reads: d.blockers }, respectCap, { now, refresh: refresh.soon });
+  const staleOf = (respectCap: boolean): Promise<Set<string>> => staleFrom({ facts: d.review, items: openPrs, repos: d.repos, reads: d.blockers, approved: (ref) => !!workflowFactOf(d, ref)?.approved }, respectCap, { now, refresh: refresh.soon });
   return () => withConfig(db, async () => {
     const cfg = config(db);
     const ctx: Ctx = {

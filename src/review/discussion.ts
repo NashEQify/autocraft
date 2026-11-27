@@ -12,6 +12,7 @@ import { ownerOf } from "../owners.ts";
 import type { Exec } from "../fixup/git.ts";
 import { pipelineMe, setPipelineLogin } from "../github/pipeline-account.ts";
 import { isOwnLogin, ownLogins } from "../github/identity.ts";
+import { mergeApprovedIn, mergeApprovedOf } from "../core/author-round.ts";
 import type { Db } from "../db/index.ts";
 import { loginsWithRole } from "../data/access/index.ts";
 import { setting } from "../data/control/index.ts";
@@ -303,7 +304,8 @@ const cappedToday = (facts: ReviewFacts, ref: string, now: number): boolean => {
 
 /**
  * PRs, as "repo#n@head", whose latest Opus review read the discussion before a counted comment or review that it
- * did not read, that an operator marked stale, or whose diff was read against another base branch than the PR has now
+ * did not read (not on a PR a person approved for merge: there only the `review` command asks for a new review, and the next
+ * review reads the comment anyway), that an operator marked stale, or whose diff was read against another base branch than the PR has now
  * (a review that recorded none counts as read against the default branch). With `respectCap`, PRs that already had
  * MAX_RERUNS_PER_DAY discussion- or base-triggered re-reviews today are left out (an operator mark is never capped).
  * `now` is the time of the decision (default: the clock); `refresh` is told, per "repo#number", when the answer changes with the clock
@@ -314,18 +316,20 @@ export async function staleReviews(db: Db, repo?: string, respectCap = false, op
   const [facts, items, repos] = await db.together(() => Promise.all([
     loadReviewFacts(db, keys, { now: opts.now ?? Date.now() }), loadItems(db, keys, "pr"), loadRepos(db, repo !== undefined ? { names: [repo] } : { all: true }),
   ]));
-  const reads = await loadBlockerReads(db, [...facts.latest.values()].flatMap((r) => r.blocked_by));
-  return await staleFrom({ facts, items, repos, reads }, respectCap, opts);
+  const [reads, approved] = await db.together(() => Promise.all([
+    loadBlockerReads(db, [...facts.latest.values()].flatMap((r) => r.blocked_by)), mergeApprovedIn(db, [...facts.latest.values()].map((r) => ({ repo: r.repo, number: r.number }))),
+  ]));
+  return await staleFrom({ facts, items, repos, reads, approved: (ref) => approved.has(ref) }, respectCap, opts);
 }
 
 type StaleOpts = { now?: number; refresh?: (ref: string, at: number) => void };
 
-/** staleReviews() from its loads: `items` are the open PRs to judge, `reads` the blockers their latest reviews name. */
+/** staleReviews() from its loads: `items` are the open PRs to judge, `reads` the blockers their latest reviews name, `approved` whether a person approved a PR for merge. */
 export async function staleFrom(
-  d: { facts: ReviewFacts; items: ReadonlyMap<string, { base_ref: string | null }>; repos: ReadonlyMap<string, { default_branch: string | null }>; reads: BlockerReads },
+  d: { facts: ReviewFacts; items: ReadonlyMap<string, { base_ref: string | null }>; repos: ReadonlyMap<string, { default_branch: string | null }>; reads: BlockerReads; approved: (ref: string) => boolean },
   respectCap: boolean, opts: StaleOpts = {},
 ): Promise<Set<string>> {
-  const { facts, items, repos, reads } = d;
+  const { facts, items, repos, reads, approved } = d;
   const now = opts.now ?? Date.now();
   const state = discussionStateOf(facts);
   const marked = staleMarksOf(facts);
@@ -337,7 +341,8 @@ export async function staleFrom(
     const rebased = !!it.base_ref && !!reviewedBase && it.base_ref !== reviewedBase;
     const isMarked = marked(r.repo, r.number, r.at);
     // On a head that has a review, only a maintainer's words (or an operator's request) make it stale: the PR author's comments feed the next review but do not start one.
-    const talked = await maintainerSince(state.get(ref), r.seen_at ?? r.at, r.disc_hash);
+    // On a PR approved for merge a maintainer's words do not either: a maintainer who wants a new review says `review`.
+    const talked = !approved(ref) && await maintainerSince(state.get(ref), r.seen_at ?? r.at, r.disc_hash);
     // A hold that waited for other items is reviewed once when none is open any more.
     const blocked = r.blocked_by.length > 0 ? activeFrom(reads, ref, r.blocked_by, r.at, now) : null;
     const unblocked = blocked !== null && blocked.length === 0;
@@ -361,7 +366,7 @@ export async function ensurePipelineLogin(db: Db, _q: Querier, run?: Exec): Prom
 /**
  * Just before a merge: reads the PR's discussion and reviews live in one query. `moved`: a counted entry newer than
  * the final review's snapshot (and different from what it read) was written by a maintainer or operator (the PR author's comments are read by the next review without stopping the merge); the PR's reviews are then marked stale so the
- * pipeline reviews it again. `blocked`: a maintainer's changes-requested review stands. Either way the caller must
+ * pipeline reviews it again. Not on a PR a person approved for merge, which a comment that is no command does not hold back. `blocked`: a maintainer's changes-requested review stands. Either way the caller must
  * not merge. What the read saw of the formal reviews is stored in review_gates.
  */
 export async function liveGate(db: Db, q: Querier, repo: string, number: number, head: string): Promise<{ moved: boolean; blocked: string | null }> {
@@ -369,6 +374,7 @@ export async function liveGate(db: Db, q: Querier, repo: string, number: number,
   const blocked = await recordGate(db, repo, number, live.formal, live.reviewDecision);
   const snap = (await loadReviewsAt(db, [{ repo, number, head }])).get(`${repo}#${number}@${head}`);
   if (!snap || !live.newestMaint || !changedSince({ newest: live.newestMaint, hash: live.snap.hash! }, snap.seen_at ?? snap.at, snap.disc_hash)) return { moved: false, blocked };
+  if (await mergeApprovedOf(db, { repo, number })) return { moved: false, blocked };
   await markStale(db, [{ repo, number }], null);
   return { moved: true, blocked };
 }

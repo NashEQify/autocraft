@@ -27,7 +27,7 @@ import type { StopCode } from "../core/codes.ts";
 import { conflictPath, decidePr, premergeStopLifts } from "../core/decide.ts";
 import { loadPrFacts } from "../core/facts.ts";
 import { loadItemFacts } from "../core/issue-facts.ts";
-import { acceptedHeads, agreedAt, approvedHead, chainsOwn, isAccepted, neededReview, pushesSince, type RecordedPush } from "../core/evidence.ts";
+import { acceptedHeads, agreedAt, approvedHead, chainsOwn, isAccepted, LOCKFILE, neededReview, pushesSince, type RecordedPush } from "../core/evidence.ts";
 import type { ItemFacts, PrFacts } from "../core/plan.ts";
 import type { PlanReply } from "../implement/types.ts";
 import { PreapprovalRefused, preapproveMerge } from "../preapproval/index.ts";
@@ -62,9 +62,6 @@ export type Moved = { id: number; repo: string; number: number; to: ItemWorkflow
  * latest error, and the row's version then. It is tried again at `until`, or when a person's command changed the row.
  */
 export type FailedCheck = { ref: string; times: number; error: unknown; until: number; version: string };
-
-/** Lockfiles a fix-up may touch as a side effect of its change: never "beyond what was agreed". */
-const LOCKFILE = /(^|\/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Gemfile\.lock|poetry\.lock|go\.sum)$/;
 
 /** What the pass loaded for every live workflow, keyed `repo#number` (of the item, or of its PR). */
 type Pass = {

@@ -16,6 +16,7 @@ import { queueLaneActions } from "../github/user-lane.ts";
 import { t } from "../i18n/index.ts";
 import { removeFromBatch } from "../merge/controls.ts";
 import { conflictAhead } from "../core/conflict-ahead.ts";
+import { PARTS_ONLY, partLine } from "../core/evidence.ts";
 import { byHand, conflictPath, type ConflictPath } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
 import { cancelPreapproval, checkFixup, checkMergeLeg, inActiveBatch, INSTRUCTIONS_MAX, PreapprovalRefused, type CheckedStep } from "../preapproval/index.ts";
@@ -166,9 +167,10 @@ export function fixInstructions(plan: readonly PlanPart[], fix: readonly number[
   const parts = plan.filter((p) => fix.includes(p.n));
   const said = instruction ? (instruction.review ? `Fix what the latest review of this pull request found:\n${instruction.text}` : instruction.text) : null;
   if (!parts.length) return said ?? "Make the fixes the latest review of this pull request lists.";
-  let out = said ? `${said}\n\nAlso fix these findings of the review:` : "Fix these findings of the review, and nothing else:";
+  // A request of parts alone is one the review carries over once its check passed (src/review/carry.ts reads it with askedParts).
+  let out = said ? `${said}\n\nAlso fix these findings of the review:` : PARTS_ONLY;
   for (const p of parts) {
-    const line = `\n${p.n}. ${p.title}${p.file ? ` (${p.file})` : ""}`;
+    const line = `\n${partLine(p)}`;
     if (out.length + line.length > INSTRUCTIONS_MAX) break;
     out += line;
   }

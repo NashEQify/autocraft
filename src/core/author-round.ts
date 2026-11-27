@@ -20,8 +20,13 @@ export async function roundHeadOf(db: Db, c: { repo: string; number: number; hea
 
 /** True when the PR's live workflow (its own, or an implementation PR's issue's) is approved for merge. */
 export async function mergeApprovedOf(db: Db, c: { repo: string; number: number }): Promise<boolean> {
-  const wf = (await loadPrWorkflows(db, [{ repo: c.repo, number: c.number }])).get(`${c.repo}#${c.number}`);
-  return !!wf && wf.approvedBy !== null;
+  return (await mergeApprovedIn(db, [c])).size > 0;
+}
+
+/** mergeApprovedOf() for a set of PRs: the `repo#number` of those approved for merge. */
+export async function mergeApprovedIn(db: Db, refs: { repo: string; number: number }[]): Promise<Set<string>> {
+  const wfs = await loadPrWorkflows(db, refs);
+  return new Set([...wfs].filter(([, wf]) => wf.approvedBy !== null).map(([ref]) => ref));
 }
 
 /** Why a round's review was not made (the review's reason; src/workflow/advance.ts stops for the approver with it): the new commits could not be told apart from a PR too large to review whole. */

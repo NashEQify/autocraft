@@ -532,9 +532,11 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     const synced = pf.syncedAt.get(p.repo) ?? null;
     const lag = p.state === "review" && cur === p.from_head && (synced === null || synced <= p.updated_at) && !pf.reviews.has(`${ref}@${head}`);
     if (!lag) {
-      // A push of ours carries the approval on, after the hand-over too: the new head needs the whole chain again.
+      // A push of ours carries the approval on, after the hand-over too: the new head needs green CI, and a review of what changed unless our push carries the earlier one.
       const own = ownPush(pf, ref, head, cur);
-      const needs = needsReview(leg, pf, ref, cur) ? "a review, a clean pre-merge review and green CI" : "a clean pre-merge review and green CI";
+      const needs = needsReview(leg, pf, ref, cur)
+        ? "green CI and, unless the push is a checked fix-up or a base merge that left the PR's own diff unchanged, a review of what changed"
+        : "a clean pre-merge review and green CI";
       if (own) return void await move(db, p, "review", { head: cur, line: `The ${own} pushed ${short(cur)}; the approval stands, and it needs ${needs} before the PR ${p.state === "queued" ? "goes back" : "goes"} to the merge queue.` });
     }
     if (!lag) return cur === p.from_head ? cancel("head-back", `the head went back to ${short(cur)}`, { to: cur }) : cancel("author-push", `another push moved the head to ${short(cur)}`, { to: cur });

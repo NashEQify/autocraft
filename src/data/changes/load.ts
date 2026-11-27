@@ -212,6 +212,25 @@ export async function loadFixupVerdicts(db: Db, pairs: { ref: RefKey; subject: s
 }
 
 /**
+ * What carrying a review over a pushed fix-up reads, per (PR, head it was made on, head it made): the files it changed and, for an operator's
+ * fix-up, the instructions of the request it worked. Key is `repo#number@from>to`. 1 statement per 10,000 pushes.
+ */
+export async function loadFixupPushes(db: Db, pushes: { ref: RefKey; from: string; to: string }[]): Promise<Map<string, { files: string[]; instructions: string | null }>> {
+  const out = new Map<string, { files: string[]; instructions: string | null }>();
+  if (!pushes.length) return out;
+  const k = queryDb(db).k as any;
+  for (const part of kx.chunks(pushes)) {
+    const rows = await rowsOf<any>(db, k.selectFrom("main.fixups as f").leftJoin("main.operator_fixups as o", "o.id", "f.operator_fix")
+      .select(["f.repo", "f.number", "f.from_head", "f.to_head", "f.files", "o.instructions"])
+      .where("f.state", "in", FIXUP_EDGE_STATES)
+      .where(kx.tupleIn(db, ["f.repo", "f.number", "f.from_head", "f.to_head"], part.map((p) => { const [repo, n] = splitRef(p.ref); return [repo, n, p.from, p.to]; }), ["text", "bigint", "text", "text"]))
+      .orderBy(kx.rowid("main.fixups", "f")));
+    for (const r of rows) out.set(`${refKey(r.repo, Number(r.number))}@${r.from_head}>${r.to_head}`, { files: strings(r.files), instructions: r.instructions ?? null });
+  }
+  return out;
+}
+
+/**
  * The newest merged conflict-merge row at each (PR, head the merge produced): the PR's own diff flag and the delta the review
  * reads instead of the head diff (the delta is a blob, so it is returned for the named rows only). Key is `repo#number@toHead`.
  */
