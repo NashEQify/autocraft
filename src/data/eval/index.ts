@@ -109,20 +109,20 @@ export async function loadEvalNames(db: Db): Promise<EvalNames> {
 
 type Raw = {
   cause_key: string; detector: string; summary: string; state: string; first_seen: string; last_seen: string; evidence: string; seen: number | string;
-  investigated_at: string | null; investigated_seen: number | string; verdict: string | null; finding: string | null; model: string | null; run_id: string | null;
+  investigated_at: string | null; investigated_seen: number | string; verdict: string | null; failures: number | string; finding: string | null; model: string | null; run_id: string | null;
   issue_number: number | string | null; filed_at: string | null; reported_seen: number | string; commented_at: string | null; attempts: number | string; note: string | null;
 };
 const parse = <T,>(s: string | null, dflt: T): T => { try { return s === null ? dflt : JSON.parse(s) as T; } catch { return dflt; } };
 const causeOf = (r: Raw): EvalCause => ({
   key: r.cause_key, detector: r.detector, summary: r.summary, state: r.state as EvalCauseState, firstSeen: r.first_seen, lastSeen: r.last_seen,
   evidence: parse<EvalEvidence[]>(r.evidence, []), seen: Number(r.seen), investigatedAt: r.investigated_at, investigatedSeen: Number(r.investigated_seen),
-  verdict: r.verdict as EvalVerdict | null, finding: parse<unknown>(r.finding, null), model: r.model, runId: r.run_id,
+  verdict: r.verdict as EvalVerdict | null, failures: Number(r.failures ?? 0), finding: parse<unknown>(r.finding, null), model: r.model, runId: r.run_id,
   issueNumber: r.issue_number === null ? null : Number(r.issue_number), filedAt: r.filed_at, reportedSeen: Number(r.reported_seen), commentedAt: r.commented_at,
   attempts: Number(r.attempts), note: r.note,
 });
 const rowOf = (c: EvalCause) => ({
   cause_key: c.key, detector: c.detector, summary: c.summary, state: c.state, first_seen: c.firstSeen, last_seen: c.lastSeen, evidence: JSON.stringify(c.evidence), seen: c.seen,
-  investigated_at: c.investigatedAt, investigated_seen: c.investigatedSeen, verdict: c.verdict, finding: c.finding === null || c.finding === undefined ? null : JSON.stringify(c.finding),
+  investigated_at: c.investigatedAt, investigated_seen: c.investigatedSeen, verdict: c.verdict, failures: c.failures, finding: c.finding === null || c.finding === undefined ? null : JSON.stringify(c.finding),
   model: c.model, run_id: c.runId, issue_number: c.issueNumber, filed_at: c.filedAt, reported_seen: c.reportedSeen, commented_at: c.commentedAt, attempts: c.attempts, note: c.note,
 });
 

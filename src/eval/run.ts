@@ -13,7 +13,7 @@ import type { By } from "../core/gates.ts";
 import type { Db } from "../db/index.ts";
 import { loadEvalCauses, loadEvalFacts, saveEvalCauses, type EvalCause } from "../data/eval/index.ts";
 import { loadRepos } from "../data/mirror/index.ts";
-import { mergeGroup, wantsInvestigation } from "./causes.ts";
+import { investigationsDue, mergeGroup, wantsInvestigation } from "./causes.ts";
 import { DETECTOR_RULES, detect, HOUR, type Detector, type HealthCheck } from "./detect.ts";
 import { evalRepo } from "./schedule.ts";
 import { commentDraft, draftCtx, filedIssues, filingPlan, issueDraft, runEvalFiling, type FileDeps, type FileSummary } from "./file.ts";
@@ -125,8 +125,8 @@ async function investigate(db: Db, due: EvalCause[], o: { repo: string; runId: s
 
 /** The cause after an investigation answered at `nowIso`. */
 const afterInvestigation = (was: EvalCause, r: Investigated, runId: string, nowIso: string): EvalCause => r.got
-  ? { ...was, investigatedAt: nowIso, investigatedSeen: r.cause.seen, verdict: r.got.value.real_defect ? "defect" : "not-defect", finding: r.got.value, model: r.got.model, runId, state: was.state === "new" ? "investigated" : was.state }
-  : { ...was, investigatedAt: nowIso, verdict: "failed", runId, state: was.state === "new" ? "investigated" : was.state };
+  ? { ...was, investigatedAt: nowIso, investigatedSeen: r.cause.seen, verdict: r.got.value.real_defect ? "defect" : "not-defect", failures: 0, finding: r.got.value, model: r.got.model, runId, state: was.state === "new" ? "investigated" : was.state }
+  : { ...was, investigatedAt: nowIso, investigatedSeen: r.cause.seen, verdict: "failed", failures: was.failures + 1, runId, state: was.state === "new" ? "investigated" : was.state };
 
 /** One evaluation: detect, store, investigate what is new or grew, file. */
 export async function runEval(db: Db, p: EvalParams, log: (l: string) => void = console.log, deps?: EvalDeps): Promise<EvalSummary> {
@@ -141,7 +141,10 @@ export async function runEval(db: Db, p: EvalParams, log: (l: string) => void = 
   await saveEvalCauses(db, merged);
   for (const c of merged) log(`  ${c.key}: ${c.evidence.length} kept, ${c.seen} seen, ${c.state}${c.issueNumber ? ` (issue ${c.issueNumber})` : ""}`);
 
-  s.waiting = await investigate(db, merged.filter((c) => wantsInvestigation(c, nowMs)), { repo: p.repo, runId, stopping: p.stopping, onHandled: p.onHandled }, d, log, async (r) => {
+  const due = investigationsDue(merged, nowMs);
+  const over = merged.filter((c) => wantsInvestigation(c, nowMs)).length - due.length;
+  if (over > 0) log(`eval: ${over} more causes want an investigation; they wait for the next run`);
+  s.waiting = over + await investigate(db, due, { repo: p.repo, runId, stopping: p.stopping, onHandled: p.onHandled }, d, log, async (r) => {
     s.investigated++;
     if (r.got?.value.real_defect) s.defects++;
     await saveEvalCauses(db, [afterInvestigation((await loadEvalCauses(db, [r.cause.key])).get(r.cause.key) ?? r.cause, r, runId, nowIso)]);
@@ -153,17 +156,20 @@ export async function runEval(db: Db, p: EvalParams, log: (l: string) => void = 
 }
 
 /**
- * What an evaluation would do now, written to `log` and nothing else: the candidate groups with their newest evidence, which
- * causes would be investigated, and what would be filed or commented on `repo` (with `text`, the posted text itself).
- * Calls the model only with `investigate` (and a repo); saves nothing and posts nothing.
+ * What an evaluation would do now, written to `log`: the candidate groups with their newest evidence, which causes would be
+ * investigated, and what would be filed or commented on `repo` (with `text`, the posted text itself). Posts nothing and
+ * leaves `eval_causes` as it is. Without `investigate` it writes nothing at all; with it (and a repo) it fetches the
+ * repo's checkout and makes the investigation calls, which leave their usual rows (the queued call, the agent run and
+ * its token usage).
  */
 export async function dryRunEval(db: Db, o: { repo: string | null; investigate: boolean; text: boolean }, log: (l: string) => void = console.log, deps?: EvalDeps): Promise<void> {
   const d = deps ?? await defaultEvalDeps();
   const nowMs = d.now(), nowIso = new Date(nowMs).toISOString();
   const runId = `eval-dry-${nowIso.replace(/[-:]/g, "").slice(0, 15)}`;
   const { groups, added, merged } = await detectCauses(db, d, nowMs, log);
-  log(`${groups} candidate groups, ${added} new pieces of evidence${o.repo ? `; eval repo ${o.repo}` : "; no eval repo set"}`);
-  const due = new Set(merged.filter((c) => wantsInvestigation(c, nowMs)).map((c) => c.key));
+  const due = new Set(investigationsDue(merged, nowMs).map((c) => c.key));
+  const over = merged.filter((c) => wantsInvestigation(c, nowMs)).length - due.size;
+  log(`${groups} candidate groups, ${added} new pieces of evidence${o.repo ? `; eval repo ${o.repo}` : "; no eval repo set"}${over > 0 ? `; ${over} more causes want an investigation than one run makes` : ""}`);
   for (const c of merged) {
     log(`\n${c.key}  ${c.state}${c.verdict ? ` ${c.verdict}` : ""}${c.issueNumber ? ` issue ${c.issueNumber}` : ""}  seen ${c.seen}${due.has(c.key) ? "  (would be investigated)" : ""}`);
     log(`  ${c.summary}`);
