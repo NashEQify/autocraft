@@ -46,6 +46,7 @@ import { loadToken, pruneTokens, type McpCaller } from "../mcp/tokens.ts";
 import { sha256hex } from "./crypto.ts";
 import * as remote from "../../remote/calls.ts";
 import { sweepTakers } from "../../remote/takers.ts";
+import { stallNotices } from "../../core/runner-room.ts";
 import { withdrawGoneCalls } from "../../data/runners/index.ts";
 import { ClaimWaits, heldMsOf } from "../../remote/claim-wait.ts";
 import { scaled, TIME_SCALE } from "../../remote/time-scale.ts";
@@ -317,11 +318,14 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   }
 
   // Ended remote calls, finished check relays and the status of deleted tokens, once a minute; a busy database skips a round.
-  // The same pass withdraws queued calls no Task Runner has been able to take for a while and marks repos without one (takers.ts).
+  // The same pass withdraws queued calls no Task Runner has been able to take for a while and marks repos without one (takers.ts), and
+  // tells the person whose work such a call is, once, in the item's chat (src/core/runner-room.ts stallNotices).
   const maintain = exclusive(async () => {
     try {
       await remote.pruneRemote(rdb);
-      await sweepTakers(rdb);
+      await sweepTakers(rdb, Date.now(), {
+        stalled: async (v, calls) => { await stallNotices(rdb, v, calls).catch((e: Error) => { if (!isBusy(e)) console.log(`Task Runner notices failed: ${e.message}`); }); },
+      });
       // The live hub refreshes it only while a page is open.
       await refreshReadIdentity(rdb);
     } catch (e) {

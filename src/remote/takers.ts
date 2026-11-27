@@ -10,7 +10,7 @@
 // in that user's runners.
 import { NO_TAKER_PREFIX } from "./calls.ts";
 import { t, tk } from "../i18n/index.ts";
-import { orderedOf } from "./cands.ts";
+import { orderedOf, type Cand } from "./cands.ts";
 import { pickCounts } from "./picks-rules.ts";
 import { heldForOwner, startedOf } from "./started.ts";
 import { acceptedModels } from "./mode.ts";
@@ -84,15 +84,18 @@ export async function waitingOn(db: Db, c: TakerCall, nowMs: number = Date.now()
 export type RunnerWait = { login: string; hold: RunnerHold; until: number | null };
 
 export function waitingOnIn(v: RemoteView, c: TakerCall): RunnerWait[] {
-  const runners = takersIn(v), canWrite = canWriteOf(v.snapshot), s = startedOf(v), nowMs = v.now;
+  const runners = takersIn(v), canWrite = canWriteOf(v.snapshot), s = startedOf(v);
   if (runners.some((r) => runnerTakes(r, c, canWrite)) || [...s.ownersFor(c)].some((o) => s.canTake(o, c))) return [];
-  const logins = [...s.waitersFor(c)].sort();
-  return logins.map((login) => {
-    const fresh = v.snapshot.runners.filter((r) => r.login.toLowerCase() === login && r.reportedAt !== null && r.reportedAt >= nowMs - STATUS_FRESH_MS);
-    const hold: RunnerHold = !fresh.length ? "offline" : fresh.some((r) => r.readiness === "quota-held") ? "usage-limit" : v.snapshot.cooled.has(login) || fresh.some((r) => r.readiness === "cooled-off") ? "cooling-off" : "not-ready";
-    const ends = hold === "usage-limit" ? fresh.flatMap((r) => (r.readiness === "quota-held" && r.until !== null && Date.parse(r.until) > nowMs ? [Date.parse(r.until)] : [])) : [];
-    return { login, hold, until: ends.length ? Math.min(...ends) : null };
-  });
+  return [...s.waitersFor(c)].sort().map((login) => runnerHoldOf(v, login));
+}
+
+/** Why none of `login`'s Task Runners can claim now (RunnerWait), for a login whose runners cannot. */
+export function runnerHoldOf(v: RemoteView, login: string): RunnerWait {
+  const key = login.toLowerCase(), nowMs = v.now;
+  const fresh = v.snapshot.runners.filter((r) => r.login.toLowerCase() === key && r.reportedAt !== null && r.reportedAt >= nowMs - STATUS_FRESH_MS);
+  const hold: RunnerHold = !fresh.length ? "offline" : fresh.some((r) => r.readiness === "quota-held") ? "usage-limit" : v.snapshot.cooled.has(key) || fresh.some((r) => r.readiness === "cooled-off") ? "cooling-off" : "not-ready";
+  const ends = hold === "usage-limit" ? fresh.flatMap((r) => (r.readiness === "quota-held" && r.until !== null && Date.parse(r.until) > nowMs ? [Date.parse(r.until)] : [])) : [];
+  return { login: key, hold, until: ends.length ? Math.min(...ends) : null };
 }
 
 const HOLD_TEXT: Record<RunnerHold, string> = { offline: tk("offline"), "usage-limit": tk("usage limit"), "cooling-off": tk("cooling off"), "not-ready": tk("not ready") };
@@ -209,9 +212,10 @@ export async function noTakerFor(db: Db, repo: string, step: string, nowMs: numb
  * that counts and is not held for the user who started its work (started.ts) gets the same mark (no_taker_since), and is withdrawn once
  * the mark is NO_TAKER_MS old. Before that, queued calls whose items all merged or closed are withdrawn (withdrawGoneCalls), so one the sync
  * did not see close (queued before that rule, say) ends here; their jobs skip the item. One statement, one read wave and one write transaction.
- * Returns the number of calls withdrawn.
+ * Then `stalled` gets the calls without a taker (src/core/runner-room.ts stallNotices tells the people whose work they are). Returns the
+ * number of calls withdrawn.
  */
-export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<number> {
+export async function sweepTakers(db: Db, nowMs: number = Date.now(), o: { stalled?: StalledHook } = {}): Promise<number> {
   const gone = (await withdrawGoneCalls(db, nowMs)).length;
   const [st, accepted] = await db.together(() => Promise.all([loadSweepState(db, nowMs), acceptedModels(db)]));
   const v: RemoteView = { now: nowMs, snapshot: st.snapshot, accepted };
@@ -226,5 +230,12 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<n
     } else if (since === undefined) plan.mark.push(c.id);
     else if (since <= nowMs - NO_TAKER_MS) plan.withdraw.push({ id: c.id, reason: whyNoTaker(v, takes, c) });
   }
-  return gone + await saveTakerSweep(db, plan, nowMs);
+  const withdrawn = await saveTakerSweep(db, plan, nowMs);
+  const cleared = new Set(plan.clear);
+  const stalled = orderedOf(st.queue, nowMs).all.filter((c) => c.forLogin === null && !cleared.has(c.id) && (st.marked.has(c.id) || plan.mark.includes(c.id)));
+  if (stalled.length && o.stalled) await o.stalled(v, stalled);
+  return gone + withdrawn;
 }
+
+/** What the sweep hands on of the calls that have no taker (marked or withdrawn this pass, or marked before), bound calls left out. */
+export type StalledHook = (v: RemoteView, calls: readonly Cand[]) => Promise<void>;

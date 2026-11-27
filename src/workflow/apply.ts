@@ -23,8 +23,8 @@ import { takeRefusal, type TakeRefusal } from "../core/item-runner.ts";
 import { parseTripKey } from "../core/push-outcome.ts";
 import { loadOwnPushes } from "../data/views/own-pushes.ts";
 import { redAtHead } from "../core/decide.ts";
-import { loadRunnerRoom } from "../core/runner-room.ts";
-import { envVar } from "../env.ts";
+import { connectUrl, loadRunnerRoom } from "../core/runner-room.ts";
+import type { Tier } from "../remote/protocol.ts";
 import { loadPrFact } from "../core/facts.ts";
 import type { Db } from "../db/index.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -337,7 +337,7 @@ async function tryOne(db: Db, actor: Actor, via: Surface, input: CommandInput, t
 
   const c: fx.Ctx = { db, by: login, via, at, item: on, ...(input.exec ? { exec: input.exec } : {}), ...(input.keepBatch ? { keepBatch: true } : {}) };
   try {
-    const runners = via === "cli" || login === RULE_STARTER || !needsRunner(r.run) ? null : await runnerNotice(db, on.repo, login, input.clock);
+    const runners = via === "cli" || login === RULE_STARTER || !needsRunner(r.run) ? null : await runnerNotice(db, on, login, input.clock);
     // A close names the item it was written on; a yes to a recommended close is the issue's, as it would be there.
     const close = r.run.end === "close" && says(input.parsed, "close") ? said : on;
     const closeAs = r.run.close ? await closeAsOf({ ...c, item: close }, r.run.close, batch, input.visible) : null;
@@ -406,9 +406,6 @@ function takeRefusalText(r: TakeRefusal, connect: string): string {
   }
 }
 
-/** The Connect page, where a person sets up a Task Runner. */
-const connectUrl = (): string => `${envVar("BASE_URL")?.replace(/\/+$/, "") ?? ""}/connect`;
-
 /**
  * A run that gives a Task Runner work: anything but an end, an autorepin, a take or release, a weight alone, a resume of what nobody
  * started, and a question to an issue's reporter, which only posts.
@@ -417,10 +414,13 @@ const needsRunner = (r: Run): boolean =>
   r.end === null && r.autorepin === null && r.runner === null && r.resume !== "unstarted" && r.asks === null
   && (r.start !== null || r.again !== null || r.approve || r.retryMerge || r.answers || r.resume !== null || r.goesOn || r.pick !== null || r.fix.length > 0 || r.implements);
 
-/** The Task Runner line for work `login` started or approved on `repo` (runnerLine); null when there is nothing to say or the runners could not be read. */
-async function runnerNotice(db: Db, repo: string, login: string, clock: Clock = utcClock): Promise<string | null> {
+/** The tier of the workflow's model steps (review, fix-up, implement), which run on Opus. */
+const WORKFLOW_TIER: Tier = "top";
+
+/** The Task Runner line for work `login` started or approved on an item (runnerLine); null when there is nothing to say or the runners could not be read. */
+async function runnerNotice(db: Db, item: { repo: string; number: number }, login: string, clock: Clock = utcClock): Promise<string | null> {
   try {
-    return runnerLine(await loadRunnerRoom(db, repo, login), repo, connectUrl(), clock);
+    return runnerLine(await loadRunnerRoom(db, { repo: item.repo, login, tier: WORKFLOW_TIER, refs: [{ repo: item.repo, number: item.number }] }), item.repo, connectUrl(), clock);
   } catch {
     return null;
   }

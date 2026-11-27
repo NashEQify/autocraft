@@ -80,7 +80,7 @@ async function homeRows(db: Db, refs: string[], opts: { login: string | null; st
       repo, number, kind: it?.kind === "pr" ? "pr" : "issue", title: it?.title ?? ref, author: it?.author ?? null, entry: wf?.entry ?? "review",
       line: wf ? wfLine(wf, false, quiet.has(ref))! : "", waits: open, blocked: wf?.state === "blocked", weight: wf ? weightLabel(wf.weight) : null,
       startedBy: wf?.startedBy ?? "", approvedBy: wf?.approvedBy ?? null, stoppedBy: wf?.stoppedBy ?? null, updatedAt: last && last.at > (it?.updated_at ?? "") ? last.at : it?.updated_at ?? wf?.updatedAt ?? "",
-      ...(state && { state }), ...(last && { last: { by: last.by, text: clip(last.body), question: asked } }),
+      ...(state && { state }), ...(last && { last: { by: last.by, text: clip(last.kind === "notice" && !opts.staff ? t("Waiting for a Task Runner") : last.body), question: asked } }),
     };
   });
 }

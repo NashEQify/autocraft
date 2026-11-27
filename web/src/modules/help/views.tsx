@@ -100,6 +100,7 @@ function Start() {
           .
         </p>
         <p>{t("Without one, your work waits for another runner that takes it. Home shows how many there are.")}</p>
+        <p>{t("When no Task Runner can take work you start or approve, AutoCraft's reply says why and links the setup page. Work that waits for one later says so once, in the item's chat and its Discord thread.")}</p>
       </Part>
       <Part title={t("Link Discord")}>
         <p>
