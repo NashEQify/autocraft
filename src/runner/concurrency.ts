@@ -1,15 +1,16 @@
 // Which jobs may run together: one queued or running job per (step, repo), at most `step_parallel` repos per step,
 // and the named mutexes of StepDef.exclusive. The planner, the command-line gate and the runner use the same rules.
 // A queued job that no Task Runner may take (untakenTest) holds no repo of the step.
-// Approved lane (hasApprovedLane): each PR a maintainer approved for merge gets a job of its own, `{ repo, number, lane: "approved" }`,
-// beside the repo's regular job, which leaves approved PRs alone. One live job per (step, repo, number); approved jobs neither
-// count toward step_parallel nor wait for it, so an approved PR never waits for another PR's job.
+// Approved lane (hasApprovedLane): each PR a person started or approved for merge (ownLane in src/core/select.ts) gets a job of its
+// own, `{ repo, number, lane: "approved" }`, beside the repo's regular job, which leaves those PRs alone. One live job per (step, repo,
+// number); such jobs neither count toward step_parallel nor wait for it, so a person's PR never waits for another PR's job.
 import { freshConfig, saveSettings } from "../data/control/index.ts";
 import { loadLiveJobs } from "../data/jobs/index.ts";
 import { taskOfStep, TASK_CHOICES } from "../remote/my-tasks.ts";
 import { takerTest } from "../remote/takers.ts";
 import { approvedLane, knownStep, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
-import { filterSeq } from "../async-seq.ts";
+import { filterSeq, someSeq } from "../async-seq.ts";
+import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
 
 export const STEP_PARALLEL_KEY = "step_parallel";
@@ -51,8 +52,11 @@ export async function activeJobs(db: Db, states: ("queued" | "running")[] = ["qu
   return (await loadLiveJobs(db)).filter((j) => (states as string[]).includes(j.state)).map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
 }
 
-/** A job or proposal as untakenTest reads it: `params` as an object or the stored JSON. */
-export type JobOfRepo = { step: string; repo: string | null; params?: Params | string | null };
+/**
+ * A job or proposal as untakenTest reads it: `params` as an object or the stored JSON; `refs`, where known, the items its calls
+ * would name (the planner's due items of the job), each of which a call names alone.
+ */
+export type JobOfRepo = { step: string; repo: string | null; params?: Params | string | null; refs?: readonly ItemRef[] };
 
 /** Why a job waits for a Task Runner, or null when it does not: see untakenTest. */
 export type UntakenTest = ((j: JobOfRepo) => Promise<string | null>) & {
@@ -67,12 +71,20 @@ export const noRunnerForTask = (repo: string, step: string): string => {
   const task = taskOfStep(step);
   return `No Task Runner takes ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} tasks on ${repo}`;
 };
+/** The reason a job waits when Task Runners take its repo and step's task, but none takes a call about any of its due items. */
+export const noRunnerForItems = (repo: string, step: string, refs: readonly ItemRef[]): string => {
+  const task = taskOfStep(step);
+  return `No Task Runner takes ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} tasks on ${refs.map((r) => `${r.repo}#${r.number}`).join(", ")}`;
+};
 
 /**
  * Why a job waits for a Task Runner, or null: a job of a step that calls Claude, for a repo no Task
  * Runner may take now or whose step's task none of those takes (src/remote/takers.ts, the rule the runner's job starts and the
  * pools use). The runners are read once, on the first such job, so one test serves a whole pass. Never for a job with no repo. A job names no item (a `number` param is a security finding), so a runner that takes only some
  * items counts on the repos with such an item (src/remote/task-items.ts); the job's pools then ask about each unit's items.
+ * With the job's due items (`refs`) the test is the call's own: the job waits unless a call about one of them has a taker. Without
+ * them, someone's started work elsewhere in the repo makes their runner a taker for the whole repo, although a call about an item
+ * nobody started never reaches it and is withdrawn.
  */
 export async function untakenTest(db: Db, steps?: Map<string, StepDef>, nowMs: number = Date.now()): Promise<UntakenTest> {
   const takes = takerTest(db, nowMs);
@@ -84,8 +96,11 @@ export async function untakenTest(db: Db, steps?: Map<string, StepDef>, nowMs: n
     return usesClaude(modelsOf(steps?.get(j.step) ?? knownStep(j.step), params));
   };
   const test: UntakenTest = async (j) => {
-    if (j.repo === null || !claude(j) || await takes({ prompt_id: "", repos: [j.repo], step: j.step })) return null;
-    return await takes({ prompt_id: "", repos: [j.repo] }) ? noRunnerForTask(j.repo, j.step) : noRunnerFor(j.repo);
+    if (j.repo === null || !claude(j)) return null;
+    const repo = j.repo, refs = j.refs?.length ? j.refs : null;
+    if (refs ? await someSeq(refs, async (r) => await takes({ prompt_id: "", repos: [r.repo], step: j.step, refs: [r] })) : await takes({ prompt_id: "", repos: [repo], step: j.step })) return null;
+    if (!await takes({ prompt_id: "", repos: [repo] })) return noRunnerFor(repo);
+    return refs && await takes({ prompt_id: "", repos: [repo], step: j.step }) ? noRunnerForItems(repo, j.step, refs) : noRunnerForTask(repo, j.step);
   };
   return Object.assign(test, { load });
 }

@@ -10,6 +10,7 @@
 //
 // The planner reads the database, writes only its Plan cache (item_plans) and queues jobs; the runner starts them.
 // Each lane's `detect` reads the Plans of the pass (src/core/plan-set.ts).
+import type { ItemRef } from "../../web/src/api/types.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { REFEREE_RETRY_MS } from "../core/item-rules.ts";
 import type { PipelineState, StageLimit } from "../../web/src/api/types.ts";
@@ -31,8 +32,7 @@ import { approvedRepos } from "../core/repo-approvals.ts";
 import { ciApproveRepos } from "../merge/ci-approval.ts";
 import { batchesDue } from "../merge/batch-store.ts";
 import { trackedNames } from "../repos.ts";
-import { inFlightNow, planned, type Planned } from "../core/select.ts";
-import { approvedForMerge } from "../core/decide.ts";
+import { inFlightNow, ownLane, planned, type Planned } from "../core/select.ts";
 import { isQueueState } from "../core/plan.ts";
 import { isWork } from "../core/assignment.ts";
 import { collectDue } from "../verify/results.ts";
@@ -114,8 +114,10 @@ export type Candidate = {
   step: string; params: Params;
   /** Polls an external system (CI, GitHub, the sandbox): it may run again on unchanged inputs, at most once a minute. */
   poll?: boolean;
+  /** The due items the job's calls would name: the job is proposed only while a call about one of them has a Task Runner (untakenTest). */
+  refs?: readonly ItemRef[];
   /** Another job that must also be startable now, e.g. the review that follows a checks job. */
-  gate?: { step: string; params: Params; poll?: boolean };
+  gate?: { step: string; params: Params; poll?: boolean; refs?: readonly ItemRef[] };
   /** What its repo must be in scope for, where that is not the lane's. */
   scope?: ScopeFor;
 };
@@ -317,8 +319,8 @@ async function withPassReads<T>(db: Db, r: Pick<PassReads, "reads"> & Partial<Pa
 }
 
 async function lastJobEnd(db: Db, step: string, repo: string | null, requestedBy?: string, lane?: number | null): Promise<JobEnd | undefined> {
-  // The newest ended job of each step, repo, requester and approved PR; the answer is the newest of those that match. `lane`: only the
-  // jobs of that approved PR (approvedPrOf), or with null only the step's regular jobs.
+  // The newest ended job of each step, repo, requester and lane PR; the answer is the newest of those that match. `lane`: only the
+  // jobs of that lane PR (approvedPrOf), or with null only the step's regular jobs.
   let best: EndedJob | undefined;
   for (const e of (await readsOf(db)).inputs.ends) if (e.step === step && (repo === null || e.repo === repo) && (requestedBy === undefined || e.requested_by === requestedBy) && (lane === undefined || e.approved_number === lane) && (!best || e.id > best.id)) best = e;
   return best && { id: best.id, endedAt: best.ended_at!, state: best.state, items: best.items, acted: best.acted, lease_skips: best.lease_skips, lease_skip_keys: best.lease_skip_keys };
@@ -345,7 +347,7 @@ async function fpRecord(db: Db, step: string, repo: string | null, lane: number 
 /** The PR of a job of the approved lane (src/runner/concurrency.ts), null for a regular job. */
 export const approvedPrOf = (params: Params): number | null => (approvedLane(params) && typeof params.number === "number" ? params.number : null);
 
-/** The step under which a job's input fingerprint is kept: an approved PR's jobs keep their own. */
+/** The step under which a job's input fingerprint is kept: a lane PR's jobs keep their own. */
 const fpStep = (step: string, lane: number | null): string => (lane === null ? step : `${step}:${APPROVED_LANE}:${lane}`);
 
 /** Tracked repos after `cursor` first, wrapping round. */
@@ -416,17 +418,19 @@ async function cifixRepos(db: Db, ctx: PlanCtx, buckets: string[]): Promise<stri
 
 /** A PR due the work of an approved-lane step (src/runner/concurrency.ts). */
 type LaneDue = { repo: string; number: number; approved: boolean };
-const laneDue = (p: { facts: PrFacts }): LaneDue => ({ repo: p.facts.repo, number: p.facts.number, approved: approvedForMerge(p.facts) });
+const laneDue = (p: { facts: PrFacts }): LaneDue => ({ repo: p.facts.repo, number: p.facts.number, approved: ownLane(p.facts) });
 
 /**
- * The jobs of an approved-lane step: first one for each approved PR in `due` order (`{ repo, number, lane: "approved" }`), then one
- * regular job for each of `repos`, in that order, that has other due work. `make` builds a candidate from the job's params.
+ * The jobs of an approved-lane step: first one for each PR of its own lane in `due` order (`{ repo, number, lane: "approved" }`), then one
+ * regular job for each of `repos`, in that order, that has other due work. `make` builds a candidate from the job's params and the
+ * due items its calls would name.
  */
-export function laneCandidates(step: string, repos: string[], due: readonly LaneDue[], make: (params: Params) => Candidate = (params) => ({ step, params })): Candidate[] {
-  const inScope = new Set(repos), regular = new Set(due.filter((d) => !d.approved).map((d) => d.repo));
+export function laneCandidates(step: string, repos: string[], due: readonly LaneDue[], make: (params: Params, refs: ItemRef[]) => Candidate = (params, refs) => ({ step, params, refs })): Candidate[] {
+  const inScope = new Set(repos), regular = new Map<string, ItemRef[]>();
+  for (const d of due) if (!d.approved) (regular.get(d.repo) ?? regular.set(d.repo, []).get(d.repo)!).push({ repo: d.repo, number: d.number });
   const seen = new Set<string>();
   const approved = due.filter((d) => d.approved && inScope.has(d.repo) && !seen.has(`${d.repo}#${d.number}`) && seen.add(`${d.repo}#${d.number}`));
-  return [...approved.map((d) => make({ repo: d.repo, number: d.number, lane: APPROVED_LANE })), ...repos.filter((r) => regular.has(r)).map((repo) => make({ repo }))];
+  return [...approved.map((d) => make({ repo: d.repo, number: d.number, lane: APPROVED_LANE }, [{ repo: d.repo, number: d.number }])), ...repos.filter((r) => regular.has(r)).map((repo) => make({ repo }, regular.get(repo)!))];
 }
 
 /** The code of each lane, keyed by name. Names, steps and order come from the stage registry. */
@@ -494,8 +498,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         return [repo, checks?.state === "done" && Date.now() - Date.parse(checks.endedAt) < CHECKS_FRESH_MS] as const;
       }));
       const order = flightFirst(await plansOf(db, ctx), roundRobin(ctx.tracked, await cursorOf(db, ctx, "review")));
-      const out: Candidate[] = laneCandidates("opus-review", order, due.map(laneDue), (params) => {
-        const review = { step: "opus-review", params };
+      const out: Candidate[] = laneCandidates("opus-review", order, due.map(laneDue), (params, refs) => {
+        const review = { step: "opus-review", params, refs };
         return fresh.get(String(params.repo)) ? review : { step: "checks", params: { repo: params.repo! }, poll: true, gate: review };
       });
       // A repo whose waiting heads have all been pending for more than an hour is read every 5 minutes instead.
@@ -629,7 +633,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const plans = await plansOf(db, ctx);
       // Each planned action is judged on its own PR: a person's fix-up runs whatever the repo approves.
       const due: LaneDue[] = [], failed: unknown[] = [];
-      const approved = new Set(plans.prs.filter((p) => approvedForMerge(p.facts)).map((p) => `${p.facts.repo}#${p.facts.number}`));
+      const approved = new Set(plans.prs.filter((p) => ownLane(p.facts)).map((p) => `${p.facts.repo}#${p.facts.number}`));
       for (const repo of ctx.tracked) {
         try {
           const sel = await selectFixups(db, repo, ctx.run, plans, "pipeline");
@@ -957,7 +961,7 @@ export const DEADLINE_BACKOFF_MS = 3600_000;
  * minute would otherwise retry a failing step at once, every time. Jobs a runner restart ended, and jobs that failed only because a write was paced (it is retried later anyway), do not count.
  */
 export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string; lane?: number | null } = {}): Promise<{ until: number; failures: number } | null> {
-  // The pipeline jobs of the step (of the repo, and the regular jobs or one approved PR's, when given), newest first, back to the first success, at most 12.
+  // The pipeline jobs of the step (of the repo, and the regular jobs or one lane PR's, when given), newest first, back to the first success, at most 12.
   const rows = (await readsOf(db, ms)).inputs.streaks.filter((r) => r.step === step && (o.repo == null || r.repo === o.repo) && (o.lane === undefined || r.approved_number === o.lane)).sort((a, b) => b.id - a.id).slice(0, 12);
   let failures = 0;
   while (failures < rows.length && rows[failures]!.state === "failed") failures++;
@@ -1165,7 +1169,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
    * The job's `limit` (undefined when the step has none), or null when it cannot start now. With `lane`, the
    * input checks apply too: failure backoff and "nothing changed since a job that handled nothing".
    */
-  const gate = async (stepName: string, params: Params, lane?: Lane, poll = false, precheck = false): Promise<{ limit?: number } | null> => {
+  const gate = async (stepName: string, params: Params, lane?: Lane, poll = false, precheck = false, refs?: readonly ItemRef[]): Promise<{ limit?: number } | null> => {
     const step = steps.get(stepName);
     if (!step) return null;
     const pending: Active[] = proposals.filter((p) => p.step === stepName).map((p) => ({ ...wantOf(p.step, p.params), id: 0, state: "proposed", number: typeof p.params.number === "number" ? p.params.number : null }));
@@ -1173,7 +1177,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (await jobBlock(db, steps, wantOf(stepName, params), { extra: pending, precheck, untaken, active, cap })) return null;
     const reason = await pausedWhy(stepName);
     if (reason) { note(stepName, reason); return null; }
-    const waits = repo0 === null ? null : await untaken({ step: stepName, repo: repo0, params });
+    const waits = repo0 === null ? null : await untaken({ step: stepName, repo: repo0, params, ...(refs ? { refs } : {}) });
     if (waits !== null) { note(stepName, waits); return null; }
     if (lane) {
       const repo = typeof params.repo === "string" ? params.repo : null;
@@ -1230,14 +1234,14 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
         const scope = scopeOf(c.scope ?? lane.scope ?? "work");
         const outside = [c, c.gate].find((x) => x && typeof x.params.repo === "string" && !scope.has(x.params.repo));
         if (outside) { note(outside.step, "outside the pipeline scope"); continue; }
-        if (c.gate && !await gate(c.gate.step, c.gate.params, lane, c.gate.poll)) continue;
-        const g = await gate(c.step, c.params, lane, c.poll);
+        if (c.gate && !await gate(c.gate.step, c.gate.params, lane, c.gate.poll, false, c.gate.refs)) continue;
+        const g = await gate(c.step, c.params, lane, c.poll, false, c.refs);
         if (!g) continue;
-        // An approved PR's job works one PR: it keeps no more of the daily limit than that.
+        // A lane PR's own job works one PR: it keeps no more of the daily limit than that.
         const limit = g.limit === undefined ? undefined : approvedPrOf(c.params) !== null ? Math.min(g.limit, 1) : g.limit;
         const params: Params = { ...c.params, ...(limit === undefined ? {} : { limit }) };
-        proposals.push({ lane: lane.name, step: c.step, params, fp: await fingerprintOf(db, lane, c.step, c.params, seqs), ...(c.gate ? { gate: c.gate } : {}) });
-        // Each approved PR's job is proposed as soon as it is due: those do not count toward the lane's proposals.
+        proposals.push({ lane: lane.name, step: c.step, params, fp: await fingerprintOf(db, lane, c.step, c.params, seqs), ...(c.gate ? { gate: (({ refs: _, ...g }) => g)(c.gate) } : {}) });
+        // Each lane PR's own job is proposed as soon as it is due: those do not count toward the lane's proposals.
         if (approvedPrOf(c.gate?.params ?? c.params) === null && ++taken >= perLane) break;
       }
     } catch (e) {
@@ -1276,6 +1280,18 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   return { proposals, logs, wakeAt: wakes.length ? Math.min(...wakes) : null, status, timing: { loadMs, lanesMs, cacheMs, ...cache, ...(passKind ? { pass: passKind } : {}) } };
 }
 
+/**
+ * A job that acted on nothing and whose every handled item was skipped because its call was withdrawn for want of a taker: it did
+ * nothing either, so like an idle job it runs again only once its input or the Task Runners change.
+ */
+function onlyUntaken(j: { items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null }): boolean {
+  if (j.acted || !j.lease_skips || (j.items ?? 0) > j.lease_skips || !j.lease_skip_keys) return false;
+  try {
+    const keys = JSON.parse(j.lease_skip_keys) as string[];
+    return keys.length > 0 && keys.every((k) => k.startsWith(NO_TAKER_SKIP));
+  } catch { return false; }
+}
+
 /** The lease keys among a job's skip keys: null for a job from before the keys were recorded. */
 function leaseSkipKeys(keys: string | null): string[] | null {
   if (!keys) return null;
@@ -1291,7 +1307,7 @@ async function skippedLeaseHeld(db: Db, keys: string[] | null): Promise<boolean>
 /** True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it. */
 async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp: string, lane: number | null = null): Promise<boolean> {
   const last = await lastJobEnd(db, step, repo, AUTOPILOT_USER, lane);
-  if (!last || last.state !== "done" || !wasIdle(last)) return false;
+  if (!last || last.state !== "done" || !(wasIdle(last) || onlyUntaken(last))) return false;
   // A job that skipped items another job was working retries once no running job holds a lease on any of them. While one does, the step stays parked, so the planner does not queue it in a loop.
   // Skips for want of a taker do not count: such a step is woken by the taker signature in its fingerprint.
   const leaseKeys = leaseSkipKeys(last.lease_skip_keys);
@@ -1354,7 +1370,7 @@ async function acceptProposals(db: Db, proposals: Proposal[], log: (line: string
   });
   await withPassReads(db, { reads }, async () => {
     for (const p of proposals) {
-      // Per lane and repo the first one, and each approved PR's own.
+      // Per lane and repo the first one, and each lane PR's own.
       const slot = `${p.lane}\0${repoOf(p) ?? ""}\0${approvedPrOf(p.gate?.params ?? p.params) ?? ""}`;
       if (done.has(slot)) continue;
       try {
@@ -1469,17 +1485,13 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
   if (!kinds) return [];
   const plans = await plansOf(db, ctx);
   const seen = new Set<string>(), all: LaneItem[] = [];
-  // A repo whose jobs of every step of the lane wait for a Task Runner: the planner proposes none for it.
+  // An item whose calls no Task Runner takes in any step of the lane: the planner proposes no job for it.
   const scope = new Set(reposFor(ctx, lane.scope ?? "work"));
-  const untaken = (ctx.untaken ??= await untakenTest(db)), noRunner = new Map<string, string | null>();
-  // Why the repo's jobs wait (the first step's reason), or null when some step of the lane has a taker.
-  const waits = async (repo: string): Promise<string | null> => {
-    let w = noRunner.get(repo);
-    if (w === undefined) {
-      const why = lane.steps ? await mapSeq(lane.steps, async (step) => await untaken({ step, repo })) : [];
-      noRunner.set(repo, (w = why.length > 0 && why.every((x) => x !== null) ? why[0]! : null));
-    }
-    return w;
+  const untaken = (ctx.untaken ??= await untakenTest(db));
+  // Why the item's jobs wait (the first step's reason), or null when some step of the lane has a taker for a call about it.
+  const waits = async (repo: string, number: number): Promise<string | null> => {
+    const why = lane.steps ? await mapSeq(lane.steps, async (step) => await untaken({ step, repo, refs: [{ repo, number }] })) : [];
+    return why.length > 0 && why.every((x) => x !== null) ? why[0]! : null;
   };
   const add = async (f: Planned["facts"] | PlannedItem["facts"], state: string, a: Action) => {
     const ref = `${f.repo}#${f.number}`;
@@ -1487,7 +1499,7 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
     seen.add(ref);
     const may = mayRun({ facts: f, action: a }, "pipeline"), refused = may.ok || may.why.code === "pipeline-off" ? null : may.why;
     const outside = !scope.has(f.repo);
-    const blocked = outside ? "outside the pipeline scope" : refused?.text ?? (may.ok ? await waits(f.repo) : null);
+    const blocked = outside ? "outside the pipeline scope" : refused?.text ?? (may.ok ? await waits(f.repo, f.number) : null);
     all.push({
       repo: f.repo, number: f.number, kind: "kind" in f ? f.kind : "pr", action: a.kind, bucket: typeof a.params?.bucket === "string" ? a.params.bucket : null,
       rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked, refusal: outside ? null : refused?.code ?? null,

@@ -1,7 +1,8 @@
 // What an approved workflow's merge leg waits for when nothing can move it on: the app identity (as an implement workflow does
 // from its start), without which nobody's started work counts; the merge, made as the approver, waiting for them
-// to sign in; or the pre-merge check of the PR's head, due once the leg is in `ci`, with no Task Runner that may take it, or only
-// the approver's own runners, none of which can claim now (src/remote/takers.ts waitingOn). For a closed workflow: what keeps the
+// to sign in; or the pre-merge check of the PR's head, due once the leg is in `ci`, or the model step of the item's first due action,
+// with no Task Runner that may take a call about the item, or only the own runners of the people whose work it is, none of which can
+// claim now (src/remote/takers.ts waitingOn). For a closed workflow: what keeps the
 // close from being made. A merge refused for its approver's access is no wait but a question (ask.ts), which an answer closes, or the
 // approver's next sign-in (src/github/user-lane.ts retryWaiting). A contributor, or a person on GitHub, whom the item waits for without a question. The status comment, the item page and the agent show it as the state line.
 import { loadPremerge, loadPremergeFollowups, PREMERGE_MAX_TRIES } from "../data/review/index.ts";
@@ -9,6 +10,7 @@ import { loadShown } from "../data/mirror/index.ts";
 import { loadActions, loadLegs, loadLinks, type WorkflowAction } from "../data/workflow/index.ts";
 import { loadPlans } from "../data/planner/index.ts";
 import type { RefusalCode, WaitCode } from "../core/codes.ts";
+import type { ActionKind } from "../core/plan.ts";
 import type { Db } from "../db/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { t, tk } from "../i18n/index.ts";
@@ -34,7 +36,7 @@ export const legWait = async (db: Db, wf: Waiter, nowMs: number = Date.now()): P
 
 /**
  * Per workflow id the state line of a workflow whose started work waits for the app identity, whose merge leg waits for its approver's
- * sign-in, or for a pre-merge check that no Task Runner can take, or that only the own runners of the people whose work it is take while
+ * sign-in, or for a pre-merge check or the model step of its first due action that no Task Runner can take, or that only the own runners of the people whose work it is take while
  * none of them can claim (offline, held for its usage, cooling off), or for the contributor or a person on GitHub, or whose close is not made,
  * and the line of a done workflow whose PR merged with follow-ups filed; the others are absent.
  */
@@ -82,16 +84,30 @@ export async function legWaits(db: Db, wfs: readonly Waiter[], nowMs: number = D
   }
   const premerge = await loadPremerge(db, inCi.map((x) => ({ repo: x.w.repo, number: x.pr, head: x.head })));
   const unread = inCi.filter((x) => { const pm = premerge.get(`${x.w.repo}#${x.pr}@${x.head}`); return !(pm && (pm.findings !== null || pm.tries >= PREMERGE_MAX_TRIES)); });
-  if (!unread.length) return out;
+  // The other items: the step of the plan's first due action, when it calls a model.
+  const due = moving.flatMap((w, i) => {
+    if (out.has(w.id) || unread.some((x) => x.w.id === w.id)) return [];
+    const number = planned[i]!.number, kind = plans.get(`${w.repo}#${number}`)?.actions.find((a) => !a.refused)?.kind;
+    const step = kind === undefined ? undefined : ACTION_STEP[kind];
+    return step ? [{ w, step, number }] : [];
+  });
+  if (!unread.length && !due.length) return out;
   const view = await loadView(db, nowMs), takes = takerTestIn(view);
-  for (const { w, pr } of unread) {
-    const call = { prompt_id: "", repos: [w.repo], step: "premerge", refs: [{ repo: w.repo, number: pr }] };
-    if (!takes(call)) { add(w.id, t("Waiting for the pre-merge check: no Task Runner can take it")); continue; }
+  for (const { w, step, number } of [...unread.map((x) => ({ w: x.w, step: "premerge", number: x.pr })), ...due]) {
+    const call = { prompt_id: "", repos: [w.repo], step, refs: [{ repo: w.repo, number }] };
+    if (!takes(call)) { add(w.id, t("Waiting for the {step}: no Task Runner can take it", { step: t(STEP_WORD[step]!) })); continue; }
     const [first] = waitingOnIn(view, call);
     add(w.id, first ? t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) }) : null);
   }
   return out;
 }
+
+/** The step that works an item's due action, for the actions whose step calls a model. */
+const ACTION_STEP: Partial<Record<ActionKind, string>> = { review: "opus-review", fixup: "fixup", conflict: "fixup", cifix: "cifix", premerge: "premerge", verify: "verify", implement: "implement" };
+/** Each ACTION_STEP step as the wait line names it. */
+const STEP_WORD: Record<string, string> = {
+  "opus-review": tk("review"), fixup: tk("fix-up"), cifix: tk("CI fix"), premerge: tk("pre-merge check"), verify: tk("verification"), implement: tk("implementation"),
+};
 
 /** Per workflow id, the line of a done workflow whose PR merged with follow-ups filed in its follow-up issue (src/premerge/followups.ts). */
 async function followUpLines(db: Db, done: readonly Waiter[]): Promise<Map<number, string>> {

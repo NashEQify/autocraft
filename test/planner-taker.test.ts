@@ -13,7 +13,10 @@ process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", i
 const { connect } = await import("../src/db.ts");
 const { enqueue, getJob } = await import("../src/runner/jobs.ts");
 const { noRunnerFor, noRunnerForTask, setStepParallel } = await import("../src/runner/concurrency.ts");
-const { applyProposals, detectAutopilot, reservedByJobs } = await import("../src/runner/autopilot.ts");
+const { applyProposals, detectAutopilot, laneCandidates, reservedByJobs } = await import("../src/runner/autopilot.ts");
+const { legWait } = await import("../src/workflow/waits.ts");
+const { liveWorkflow } = await import("../src/workflow/store.ts");
+const { SNAPSHOT_CACHE_MS } = await import("../src/data/runners/snapshot-cache.ts");
 const { createToken } = await import("../src/dash/mcp/tokens.ts");
 const { parseStatus, storeStatus } = await import("../src/remote/helpers.ts");
 const { setUserRepos } = await import("../src/remote/my-repos.ts");
@@ -65,4 +68,48 @@ test("a Task Runner whose user unticked the step's task: nothing is planned, a q
   const queued = await enqueue(db, "test-model", { repo: "deckcraft", limit: 5 }, "olga");
   assert.equal((await getJob(db, queued.id)).waiting, noRunnerForTask("deckcraft", "test-model"));
   assert.equal(await reservedByJobs(db, "test-model"), 0);
+});
+
+const T = new Date().toISOString();
+const startWork = (db: Awaited<ReturnType<typeof connectDb>>, repo: string, number: number, login: string) =>
+  db.prepare("INSERT INTO item_workflows (repo, number, kind, entry, state, started_by, started_at, started_via, updated_at) VALUES (?, ?, 'pr', 'review', 'running', ?, ?, 'github', ?)").run(repo, number, login, T, T);
+
+test("a lane job starts only while a call about one of its due items has a Task Runner: started work elsewhere in the repo does not count", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "planner-taker-items-")), "t.db"));
+  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('deckcraft', 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1").run();
+  await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
+  const token = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
+  await storeStatus(db, token, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  // Olga's runner does not take deckcraft; only the item she started there is hers.
+  await setUserRepos(db, "olga", ["photocraft"]);
+  await startWork(db, "deckcraft", 1, "olga");
+
+  const lane = (due: { repo: string; number: number; approved: boolean }[]) => [{ name: "fixup", steps: ["fixup"], perRepo: true, detect: async () => laneCandidates("fixup", ["deckcraft"], due) }];
+  const nobodys = await detectAutopilot(db, { lanes: lane([{ repo: "deckcraft", number: 2, approved: false }]) });
+  assert.equal(nobodys.proposals.length, 0, "no job for an item whose call no runner would take");
+  assert.equal(nobodys.status?.fixup, noRunnerFor("deckcraft"));
+  const hers = await detectAutopilot(db, { lanes: lane([{ repo: "deckcraft", number: 1, approved: true }, { repo: "deckcraft", number: 2, approved: false }]) });
+  assert.deepEqual(hers.proposals.map((p) => p.params.number ?? null), [1], "her item's own job, and no regular job for the other");
+});
+
+test("a started item whose next model step no Task Runner can take says so, naming its owner's runner while only that one takes it", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "planner-taker-wait-")), "t.db"));
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = 'app'").run();
+  await db.prepare("INSERT INTO access (login, role) VALUES ('mira', 'maintainer'), ('olga', 'operator')").run();
+  await startWork(db, "app", 5, "mira");
+  await db.prepare("INSERT INTO item_plans (repo, number, kind, head, state, actions, reasons, view, planned_at) VALUES ('app', 5, 'pr', 'h1', 'fixup', ?, '[]', '{}', ?)").run(JSON.stringify([{ kind: "fixup", head: "h1" }]), T);
+  const wf = (await liveWorkflow(db, "app", 5))!;
+  let at = Date.now();
+  // Each read past the window the runner snapshot is kept for, so a new report shows.
+  const line = async () => await legWait(db, wf, (at += 2 * SNAPSHOT_CACHE_MS));
+  assert.equal(await line(), "Waiting for the fix-up: no Task Runner can take it");
+  const report = async (login: string, readiness: string) => {
+    const token = (await createToken(db, login, "runner", { kind: "runner" })).row.id;
+    await storeStatus(db, token, login, parseStatus({ slots: 1, busy: 0, readiness, harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }), at + 2 * SNAPSHOT_CACHE_MS);
+  };
+  await report("mira", "quota-held");
+  assert.equal(await line(), "Waiting for mira's Task Runner (usage limit)");
+  // Another runner that takes the repo and task takes the call while hers is held for its usage limit.
+  await report("olga", "ready");
+  assert.equal(await line(), null);
 });

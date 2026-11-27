@@ -32,17 +32,18 @@ export type Params = Record<string, string | number>;
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
 /**
- * The `lane` of a job of a per-repo step that works PRs a maintainer approved for merge: such a job works only those, and
- * a job without it only the others, so approved work never waits behind the repo's other work (src/runner/concurrency.ts).
+ * The `lane` of a job of a per-repo step that works one PR a person started or approved for merge (core/select.ts ownLane): such a
+ * job works only that PR, and a job without it only the others, so a person's work never waits behind the repo's other work
+ * (src/runner/concurrency.ts).
  */
 export const APPROVED_LANE = "approved";
-const LANE_PARAM: ParamDef = { name: "lane", label: "Lane", kind: "enum", options: [APPROVED_LANE], help: "approved: only pull requests a maintainer approved for merge; empty: only the others" };
+const LANE_PARAM: ParamDef = { name: "lane", label: "Lane", kind: "enum", options: [APPROVED_LANE], help: "approved: only pull requests a person started or approved for merge; empty: only the others" };
 const PR_PARAM: ParamDef = { name: "number", label: "Pull request", kind: "int", min: 1, max: 1_000_000_000, help: "only this pull request" };
 
 /** The `number` param of a job of an approved-lane step: the one PR it works. */
 const onlyPr = (params: Params): { number?: number } => (typeof params.number === "number" ? { number: params.number } : {});
 
-/** The step has an approved lane (Review, Pre-merge review, Fix-up, Fix): each approved PR gets a job of its own, `{ repo, number, lane: "approved" }`. */
+/** The step has an approved lane (Review, Pre-merge review, Fix-up, Fix): each PR a person started or approved (core/select.ts ownLane) gets a job of its own, `{ repo, number, lane: "approved" }`. */
 export const hasApprovedLane = (step: StepDef | undefined): boolean => !!step?.params.some((p) => p.name === LANE_PARAM.name);
 
 /** True for a job (its params, as an object or the stored JSON) of the approved lane. */

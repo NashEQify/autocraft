@@ -1,6 +1,5 @@
 // The PRs the fix-up and conflict steps work on: those whose Plan holds a `fixup` or `conflict` action.
-import { planned } from "../core/select.ts";
-import { approvedForMerge } from "../core/decide.ts";
+import { ownLane, planned } from "../core/select.ts";
 import { mayRun } from "../core/authority.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import type { PrFacts } from "../core/plan.ts";
@@ -148,7 +147,7 @@ export async function selectFixups(db: Db, repo: string, run?: string | null, pl
   out.fix.push(...fix);
   if (approved === undefined) return out;
   // Every stored patch stays listed, so neither job drops the other one's.
-  const lane = new Set([...conflicts, ...fixups, ...lintFixups, ...lintConflicts].filter((p) => approvedForMerge(p.facts) === approved).map((p) => p.facts.number));
+  const lane = new Set([...conflicts, ...fixups, ...lintFixups, ...lintConflicts].filter((p) => ownLane(p.facts) === approved).map((p) => p.facts.number));
   const mine = <T extends { number: number }>(l: T[]): T[] => l.filter((c) => lane.has(c.number));
   return { ...out, fix: mine(out.fix), cannotPush: mine(out.cannotPush), ask: mine(out.ask), lint: mine(out.lint), conflictMerge: mine(out.conflictMerge), conflictAsk: mine(out.conflictAsk) };
 }

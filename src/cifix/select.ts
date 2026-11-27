@@ -1,8 +1,8 @@
 // The PRs the CI fix step works on: those whose Plan holds a `cifix` action.
 import { mayRun, permit, pushPermission } from "../core/authority.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
-import { planned } from "../core/select.ts";
-import { approvedForMerge, cifixMayRerun } from "../core/decide.ts";
+import { ownLane, planned } from "../core/select.ts";
+import { cifixMayRerun } from "../core/decide.ts";
 import type { PrFacts } from "../core/plan.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { CifixCandidate, CifixSelection } from "./candidates.ts";
@@ -16,7 +16,7 @@ const mayComment = (f: PrFacts): boolean => !f.quiet && permit(f, { kind: "cifix
 export async function selectCifix(db: Db, repo: string, run?: string | null, plans?: PlanSet, by: By = CLI_BY, approved?: boolean, number?: number): Promise<CifixSelection> {
   const out: CifixSelection = { work: [], collect: [], rerun: [], capped: [], ask: [], lint: [], listed: [] };
   const opts = { repo, by, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
-  const inLane = (f: PrFacts): boolean => (approved === undefined || approvedForMerge(f) === approved) && (number === undefined || f.number === number);
+  const inLane = (f: PrFacts): boolean => (approved === undefined || ownLane(f) === approved) && (number === undefined || f.number === number);
   for (const { facts: f, action } of await planned(db, "cifix", opts)) {
     if (!inLane(f)) continue;
     const x = f.cifix!, r = f.review;
