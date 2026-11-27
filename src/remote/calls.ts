@@ -1040,7 +1040,7 @@ async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceSer
     }
     if (r.state === "failed" && r.error?.startsWith(NO_TAKER_PREFIX)) {
       const named = repos ?? [...new Set((await runners.loadCalls(db, [id])).get(id)?.items.map((i) => i.repo) ?? [])];
-      skipItem(`${NO_TAKER_SKIP}${named.join(",")}`, log, r.error);
+      skipItem(`${NO_TAKER_SKIP}${named.join(",")}`, log, r.error, named.join(", ") || `call ${id}`);
       throw new NoTakerError(r.error);
     }
     if (r.state === "failed" && r.error?.startsWith(runners.ITEM_WITHDRAWN_PREFIX)) {

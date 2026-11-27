@@ -33,7 +33,7 @@ import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import { flagsOf, parseRef, refOf, type Item, type Verdict } from "./parse.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq } from "../async-seq.ts";
-import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
+import { NO_TAKER_SKIP, skipItem, unitRan } from "../runner/leases.ts";
 import type { Db } from "../db/index.ts";
 import { loadItems as loadMirrorItems, loadRepos } from "../data/mirror/index.ts";
 import { keepEarlierUsage, loadRunsById, recordUsage, type UsageRow } from "../data/inference/index.ts";
@@ -141,7 +141,7 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
     pending.splice(pending.indexOf(i), 1);
     const u: PoolUnit = { called: false };
     units.add(u);
-    const p: Promise<void> = runAsUnit(u, jobs[i]!).then((r) => void (results[i] = r), (e) => void (e instanceof NoTakerError ? opts.skipped?.(i) : (failed ??= { e }))).finally(() => { running.delete(p); units.delete(u); });
+    const p: Promise<void> = runAsUnit(u, jobs[i]!).then((r) => { results[i] = r; unitRan(); }, (e) => { if (e instanceof NoTakerError) opts.skipped?.(i); else { unitRan(); failed ??= { e }; } }).finally(() => { running.delete(p); units.delete(u); });
     running.add(p);
     return p;
   };
@@ -149,7 +149,10 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
   // The jobs left unstarted once the pool ends: only those no Task Runner may take (a failure throws first).
   const leftUntaken = (): void => {
     for (const x of pending) {
-      if (roomy?.untaken) skipItem(`${NO_TAKER_SKIP}${roomy.untaken(x)}`, opts.log ?? console.log, "no Task Runner takes it");
+      if (roomy?.untaken) {
+        const what = roomy.untaken(x) || `unit ${x + 1}`;
+        skipItem(`${NO_TAKER_SKIP}${what}`, opts.log ?? console.log, "no Task Runner takes it", what);
+      }
       opts.skipped?.(x);
     }
   };
