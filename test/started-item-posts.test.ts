@@ -8,6 +8,7 @@ import { listWorkflows } from "../src/data/workflow/index.ts";
 import type { Exec } from "../src/fixup/git.ts";
 import type { Querier } from "../src/mirror.ts";
 import { runPrStatus } from "../src/prstatus/index.ts";
+import { checkRequest } from "../src/runner/jobs.ts";
 import { postCandidates } from "../src/review/post.ts";
 import { RULE_STARTER } from "../src/workflow/types.ts";
 import { notPostedLines } from "../src/workflow/waits.ts";
@@ -34,6 +35,8 @@ test("a maintainer's start posts the review and the status comment without the r
     const posted: string[] = [];
     const exec: Exec = async (_cmd, args) => { posted.push(args[2]!); return { code: 0, stdout: `https://github.com/o/app/pull/${args[2]}#issuecomment-1${args[2]}\n`, stderr: "" }; };
     const querier: Querier = { spent: 0, remaining: 5000, query: async () => ({ repository: { pullRequest: { comments: { pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [] } } } }) as never };
+    // The planner's request for the step is accepted without the repo's PR status switch.
+    await checkRequest(db, "pr-status", { repo: "app" });
     const r = await runPrStatus(db, { repo: "app", by: "pipeline", runId: "t", limit: 10, exec, querier, base: null, mint: async () => "installation-token" });
     assert.deepEqual([r.posted, posted], [["app#1"], ["1"]], "the status comment goes out for the maintainer's item only");
   } finally {

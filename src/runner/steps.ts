@@ -946,17 +946,14 @@ export const STEPS: StepDef[] = [
   {
     name: "pr-status",
     title: "PR status comments",
-    description: "Keeps one status comment on each pull request the pipeline works on: posted once the PR is past triage, then edited in place when its step or place in the merge queue changes, and when it merges or closes. Only in repos where the PR status switch is on. Calls no model.",
+    description: "Keeps one status comment on each pull request the pipeline works on, in repos where the PR status switch is on, and on each issue or PR a person started or approved, in any repo: posted once the item is past triage or started, then edited in place when its status changes, and when it merges or closes. Calls no model.",
     stage: runStage("pr-status"),
     requires: "operator",
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "limit", label: "At most", kind: "int", min: 1, max: 2000, default: 100, help: "comments to post or edit in this job" },
     ],
-    check: async (db, p) => {
-      const { repoApproved } = await import("../core/repo-approvals.ts");
-      return await repoApproved(db, String(p.repo), "prstatus") ? null : `PR status comments are off for ${p.repo}`;
-    },
+    // No check on the repo's PR status switch: the comments of started items need none (src/prstatus/index.ts runPrStatus guards each write).
     run: async (ctx) => {
       const { runPrStatus } = await import("../prstatus/index.ts");
       const repo = String(ctx.params.repo);
