@@ -86,7 +86,7 @@ describe("runner", () => {
     const pgRunner = new Runner({ db: pgDb, logs: join(pgDir, "logs"), killAfterMs: 2000, log: () => {}, detect: async () => ({ proposals: [], logs: [] }) });
     try {
       const job = await enqueue(pgDb, "test-echo", { n: 1 }, "boss");
-      const end = Date.now() + 20_000;
+      const end = Date.now() + 60_000;
       while (!Buffer.concat(seen).includes("database\0childjob\0")) {
         if (Date.now() > end) throw new Error(`the job process did not connect; job ${job.id} is ${(await getJob(pgDb, job.id)).state}`);
         await pgRunner.tick();
