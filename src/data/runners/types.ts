@@ -55,6 +55,8 @@ export type RunnerRow = {
   canAgent: boolean; canAnswer: boolean; readiness: Readiness | null; until: string | null; reason: string | null; harness: string | null;
   models: Partial<Record<Tier, string>>; reserve: Reserve | null; usage: unknown; reportedAt: number | null; slots: number | null; busy: number | null;
   lastError: string | null; idleClaimAt: number | null; idleTiers: Tier[] | null; idleRepos: string[] | null;
+  /** When the runner's harness login renews, while its claims leave calls for want of that login's room (remote_helpers.login_renews_at). */
+  loginRenewsAt?: number | null;
   /** Leases outside the own lane. */
   leased: number; ownLaneLeased: number; beatAt: number | null;
 };
@@ -71,6 +73,8 @@ export type LiveLease = {
   id: number; jobId: number | null; runId: number | null; login: string; promptId: string; items: ItemRef[]; repo: string | null; root: string | null;
   secretHash: string; tokenId: number | null; tier: Tier; model: string | null; askedModel: string; step: string; attempt: number; maxAttempts: number;
   leasedAt: number | null; parentId: number | null; forLogin: string | null; refusals: number; setupRetries: number;
+  /** The lease's own time limit when it was cut below the call's (LeaseRequest.timeoutMs), and when its run started. */
+  leaseTimeoutMs: number | null; startedAt: number | null;
 };
 export type HelperInfo = {
   tokenId: number; label: string | null; readiness: Readiness | null; until: string | null; reason: string | null; fresh: boolean; lastSeen: string | null;
@@ -98,6 +102,8 @@ export type LeaseRequest = {
   /** The call is for work the caller started or approved: checked in the lease statement; else the Manual only rules apply. */
   started: boolean;
   clearIdle: boolean; source: LeaseSource;
+  /** The lease's time limit when it is shorter than the call's own (the room left on the claim's harness login); null or absent: the call's own. */
+  timeoutMs?: number | null;
   /** The run's stored prompt: `inference.packPrompt` of the harness-worded bundle, scrubbed by the caller. */
   prompt: Uint8Array;
   /** A bundle whose text was rewritten for this lease (a workspace session's resume note) and the text it was rewritten from. */

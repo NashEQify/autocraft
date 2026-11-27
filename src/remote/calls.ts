@@ -75,6 +75,20 @@ export const RELEASE_SKIP_MS = scaled(10 * 60_000);
  */
 export const SETUP_RETRY_MS = scaled(60_000);
 /**
+ * A claim names the room left on its harness login before the login's refresh (Claim.maxTimeoutSeconds). Calls carry worst-case
+ * timeouts far above their usual run time, so with at least this much room a longer call is leased anyway, with the lease's time
+ * limit cut to the room; one that runs into the cut goes back to the queue without using an attempt (submitCall) and runs again
+ * after the refresh. With less room a longer call is left for the refresh, and the runner shows when its login renews.
+ */
+export const LOGIN_CUT_MIN_MS = 20 * 60_000;
+/**
+ * What a Task Runner keeps back from the login room it claims with, beyond the call's timeout (the helper's LOGIN_CALL_SLACK_S and
+ * LOGIN_PREPARE_S): the login renews this long after the room ends.
+ */
+const LOGIN_ROOM_SLACK_MS = 120_000;
+/** A failure this close to a cut lease's time limit, or later, is the cut running out: the run is not the call's fault. */
+const CUT_END_MARGIN_MS = 30_000;
+/**
  * The most queue time the runner leaves out of a job's deadline and no-progress stop. Helpers run on people's own machines
  * across time zones, so a call may wait out a night with nobody online; past 12 hours the call is unlikely to be taken at all
  * (no eligible helper: the only maintainers authored the item), and the job is stopped so it no longer holds its item.
@@ -529,9 +543,11 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
           if (r.pickedBy === login) unpick.push(r.id);
           continue;
         }
-        // The limit counts from the claim's arrival: the time it was held is gone from the helper's login too.
-        if (claim.maxTimeoutSeconds !== undefined && r.timeoutMs > claim.maxTimeoutSeconds * 1000 - (now - nowMs)) { tooLong++; continue; }
-        const got = await leaseOne(db, caller, claim, r, {
+        // The room counts from the claim's arrival: the time it was held is gone from the helper's login too.
+        const room = claim.maxTimeoutSeconds === undefined ? null : claim.maxTimeoutSeconds * 1000 - (now - nowMs);
+        const cut = room !== null && r.timeoutMs > room;
+        if (cut && room < LOGIN_CUT_MIN_MS) { tooLong++; continue; }
+        const got = await leaseOne(db, caller, claim, r, cut ? Math.floor(room / 1000) * 1000 : null, {
           perLogin: lane || max === null || own ? null : r.parent_id !== null ? max + 1 : max, interactive: lane ? slots : null,
         }, started, !fast && !own && !lane && f.idle, live);
         // The client left, or shutdown answered the claim: nothing is leased to nobody.
@@ -542,6 +558,8 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
           continue;
         }
         if (!got) continue;
+        // A lease with the room again ends the wait for the login's renewal that an earlier claim recorded.
+        if ((room === null || room >= LOGIN_CUT_MIN_MS) && w.view.snapshot.runners.some((h) => h.tokenId === caller.tokenId && h.loginRenewsAt != null)) await runners.markLoginRenewal(db, caller.tokenId, null);
         return { lease: got, reserve: set.reserve };
       }
       return undefined;
@@ -558,7 +576,11 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     attempt,
     // An idle helper, with what it takes (the user's picks narrowed by the helper's list): an author's claim gives way to it
     // (idleOthers). The fast lane and the own lane say nothing about the helper's other slots.
-    idle: async (now) => { if (!fast && !own && !tooLong && !oldHelper) await runners.markHelperIdle(db, caller, { now, tiers: [...tiers], repos: repos ? [...repos] : null }); },
+    // A claim that left calls for want of login room says when the login renews (the wait lines of the items, src/workflow/waits.ts).
+    idle: async (now) => {
+      if (tooLong) await runners.markLoginRenewal(db, caller.tokenId, nowMs + claim.maxTimeoutSeconds! * 1000 + LOGIN_ROOM_SLACK_MS);
+      else if (!fast && !own && !oldHelper) await runners.markHelperIdle(db, caller, { now, tiers: [...tiers], repos: repos ? [...repos] : null });
+    },
     empty: async (now, held) => ({ lease: null, retryAfter: held ? scaledS(1) : CLAIM_RETRY_S, reserve: last?.at === now ? last.reserve : settingsOf(await runners.loadRunnerSnapshot(db, now), login).reserve,
       ...(!tooLong && oldHelper && { reason: `${oldHelper} queued workspace call${oldHelper === 1 ? "" : "s"} need a helper of ${WORKSPACE_HELPER} or newer, this one is ${claim.helperVersion}: update the Task Runner` }),
       ...(tooLong && { reason: `${tooLong} queued call${tooLong === 1 ? " needs" : "s need"} more time than the ${Math.max(0, Math.floor((claim.maxTimeoutSeconds! * 1000 - (now - nowMs)) / 60_000))} min this Task Runner's harness login has before its refresh` }) }),
@@ -571,7 +593,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
  * compare-and-set). The run's stored prompt is built before: scrubbing and compressing a large prompt takes milliseconds. A
  * call whose bundle lists the workspace server goes only to the claude harness, with the resume note of its workspace.
  */
-async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { perLogin: number | null; interactive: number | null }, started: boolean, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | "old" | null> {
+async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, timeoutMs: number | null, caps: { perLogin: number | null; interactive: number | null }, started: boolean, clearIdle: boolean, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | "old" | null> {
   const source = await runners.loadLeaseSource(db, r.id);
   if (!source) return null;
   const bundle = JSON.parse(source.bundle) as Omit<TaskBundle, "callId">;
@@ -588,7 +610,7 @@ async function leaseOne(db: Db, caller: Caller, claim: Claim, r: Cand, caps: { p
   const l = await runners.leaseCall(db, {
     id: r.id, caller: { tokenId: caller.tokenId, login: caller.login, role: caller.role, claimId: claim.requestId },
     claim: { harness: claim.harness, harnessVersion: claim.harnessVersion, root: claim.root ?? null, requestId: claim.requestId, ownLane: claim.ownLane === true },
-    model: claim.tiers[r.tier]!, now: Date.now(), caps, started, clearIdle, source, prompt, rewrite: rewritten ? { bundle: JSON.stringify(bundle), baseStdin: base } : null, live,
+    model: claim.tiers[r.tier]!, now: Date.now(), caps, started, clearIdle, timeoutMs, source, prompt, rewrite: rewritten ? { bundle: JSON.stringify(bundle), baseStdin: base } : null, live,
   });
   if (l === null || l === "limit" || l === "gone") return l;
   return { id: l.id, secret: l.secret, title: titleOf(source.promptId, source.items), requiredHelper: REQUIRED_HELPER };
@@ -620,12 +642,13 @@ const unrooted = (text: string, root: string | null): string => (root ? text.spl
 /** A JSON value (the reply's tool uses) with the claim's path root taken off every string in it; the root is plain characters, so its JSON form is itself. */
 const rootless = (v: unknown, root: string | null): unknown => (root && v !== undefined ? JSON.parse(unrooted(JSON.stringify(v), root)) as unknown : v);
 
-/** The task bundle of a live lease, worded for the harness that claimed it, or null. */
+/** The task bundle of a live lease, worded for the harness that claimed it, with the lease's time limit, or null. */
 export async function bundleOf(db: Db, secret: string | undefined): Promise<TaskBundle | null> {
   const l = secret ? await runners.loadLeaseBundle(db, secret, Date.now()) : null;
   // A claim always records its harness.
   if (!l || l.harness === null) return null;
-  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), callId: l.lease.id, ...(await transcriptsOn(db) && { transcriptAfter: true }) };
+  const cut = l.lease.leaseTimeoutMs === null ? {} : { timeoutSeconds: Math.floor(l.lease.leaseTimeoutMs / 1000) };
+  return { ...forHarness(JSON.parse(l.bundle) as Omit<TaskBundle, "callId">, l.harness as HarnessId, l.lease.root ?? "", l.harnessVersion), ...cut, callId: l.lease.id, ...(await transcriptsOn(db) && { transcriptAfter: true }) };
 }
 
 /** A plain one-line progress text from the helper: control characters removed, scrubbed, cut. */
@@ -663,7 +686,8 @@ const storedTokens = (v: unknown): { input: number; output: number; cacheRead: n
  * Takes a helper's result; null when the lease is gone (the route answers 410). A repeat of an accepted reply (the first
  * answer was lost) is accepted again. A reply from another model than the claim declared for the tier, and a failed reply
  * (`ok: false`), send the call back to the queue with its next attempt, not offered to that login for a while, and count
- * toward the login's cool-off; the call fails once its attempts are used up.
+ * toward the login's cool-off; the call fails once its attempts are used up. A lease cut to its login's room (LOGIN_CUT_MIN_MS)
+ * that fails at its cut goes back to the queue without any of these.
  */
 export async function submitCall(db: Db, secret: string | undefined, raw: unknown, nowMs: number = Date.now()): Promise<SubmitReply | null> {
   const l = await liveLease(db, secret, nowMs);
@@ -726,6 +750,12 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
       console.log(`remote call ${l.id} (${l.promptId}) refused by ${by}; ${to ? `retried on ${"token" in to ? "another Task Runner" : `the ${to.tier} tier (${to.model})`}` : "not retried"}`);
       await keep("refused");
     }
+    return { accepted: true };
+  }
+  // A lease cut to its login's room that ran out: the call goes back to the queue without using an attempt or a cool-off strike,
+  // and runs with its own time limit after the login's refresh.
+  if (l.leaseTimeoutMs !== null && l.startedAt !== null && nowMs - l.startedAt >= l.leaseTimeoutMs - CUT_END_MARGIN_MS) {
+    if (await runners.returnLease(db, l, `returned to the queue: the run reached the ${Math.round(l.leaseTimeoutMs / 60_000)} min its Task Runner's harness login had before its refresh`, { usage, output }, nowMs)) await keep("failed");
     return { accepted: true };
   }
   // The last attempt's tokens stay with the failed call.

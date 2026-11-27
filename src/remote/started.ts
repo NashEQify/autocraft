@@ -24,7 +24,7 @@ const ENTRY_TASKS: Record<Entry, ReadonlySet<string>> = {
   review: new Set(["review", "fixup", "verify", "merge"]),
   fixup: new Set(["fixup", "review", "verify", "merge"]),
   implement: new Set(["fix", "review", "fixup", "verify", "merge"]),
-  merge: new Set(["fixup", "merge"]),
+  merge: new Set(["fixup", "review", "verify", "merge"]),
 };
 /** Workflow states in which AutoCraft runs steps; in the others the workflow waits for a person. */
 const WORKING = new Set(["running", "waiting"]);

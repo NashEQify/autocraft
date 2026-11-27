@@ -64,7 +64,7 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
     if (to) {
       const bundle = "tier" in to ? JSON.stringify({ ...JSON.parse((await q.get(q.k.selectFrom("main.remote_calls").select("bundle").where("id", "=", lease.id)))!.bundle), tier: to.tier }) : null;
       const up = await q.run(leaseWhere(q.k.updateTable("main.remote_calls").set((eb) => ({
-        state: "queued", refusals: eb("refusals", "+", 1), lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: now, error: a.error, progress: null,
+        state: "queued", refusals: eb("refusals", "+", 1), lease_secret_hash: null, token_id: null, claim_id: null, lease_timeout_ms: null, started_at: null, queued_since: now, error: a.error, progress: null,
         picked_by: null, picked_at: null, pick_until: null,
         // The bundle hash stays: a resumed job adopts the call as it was asked.
         ...("token" in to ? { refused_token: to.token } : { tier: to.tier, asked_model: to.model, bundle: bundle! }),
@@ -77,7 +77,7 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
     }
     const why = lease.refusals > 0 ? `${REFUSED_PREFIX} again: ${by}, after the retry` : lease.parentId !== null ? `${REFUSED_PREFIX}: ${by}, in a follow-up turn` : `${REFUSED_PREFIX}: ${by}; no other Task Runner or tier could take the call`;
     const up = await q.run(leaseWhere(q.k.updateTable("main.remote_calls").set({
-      state: "failed", error: why, ended_at: now, lease_secret_hash: null, token_id: null, claim_id: null, progress: null, usage: a.usage ? JSON.stringify(a.usage) : null, duration_ms: a.duration,
+      state: "failed", error: why, ended_at: now, lease_secret_hash: null, token_id: null, claim_id: null, lease_timeout_ms: null, progress: null, usage: a.usage ? JSON.stringify(a.usage) : null, duration_ms: a.duration,
     })));
     if (Number(up.changes) !== 1) return false;
     await bury(db, [{ id: lease.id, hash: lease.secretHash }], now);
@@ -88,6 +88,18 @@ export async function refuseLease(db: Db, lease: LiveLease, to: RefusalRetry, a:
     dropQueueCache(db);
   }
   return ok;
+}
+
+/**
+ * Puts the call back in the queue without using an attempt, a cool-off strike or a skip of its login, in one transaction with its run's finish,
+ * which keeps the tokens the attempt used. False when the lease was not the one named.
+ */
+export async function returnLease(db: Db, lease: LiveLease, reason: string, a: { usage: Tokens | null; output?: Uint8Array }, now: number): Promise<boolean> {
+  return await db.write(async () => {
+    if (!(await unlease(db, { id: lease.id, runId: null, hash: lease.secretHash }, reason, now))) return false;
+    if (lease.runId !== null) await finishRuns(db, [{ id: lease.runId, state: "failed", error: reason, summary: "returned to the queue", ...(a.usage && { tokens: a.usage }), ...(a.output && { output: a.output }) }]);
+    return true;
+  });
 }
 
 /** Unleases with `released_by` and the skip `wait` (src/remote/calls.ts releaseWait), tombstone and run finish. False when the lease was not the one named. */

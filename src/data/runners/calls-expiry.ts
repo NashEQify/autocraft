@@ -46,7 +46,7 @@ export async function expireLeases(db: Db, o: { now: number; ids?: number[]; fac
         const fail = w("attempt", ">=", w.ref("max_attempts"));
         return {
           state: w.case().when(fail).then("failed").else("queued").end(), attempt: w("attempt", "+", w.case().when(fail).then(0).else(1).end()),
-          lease_secret_hash: null, token_id: null, claim_id: null, started_at: null,
+          lease_secret_hash: null, token_id: null, claim_id: null, lease_timeout_ms: null, started_at: null,
           queued_since: w.case().when(fail).then(w.lit(null)).else(now).end(), ended_at: w.case().when(fail).then(now).else(w.lit(null)).end(),
           error: lostReasonExpr(eb, now), progress: null, picked_by: null, picked_at: null, pick_until: null,
         } as any;

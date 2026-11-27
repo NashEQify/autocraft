@@ -15,7 +15,8 @@ import type { ActionKind } from "../core/plan.ts";
 import type { Db } from "../db/index.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { t, tk } from "../i18n/index.ts";
-import { takerTestIn, waitingOnIn, type RunnerHold } from "../remote/takers.ts";
+import { loginWaitIn, takerTestIn, waitingOnIn, type RunnerHold } from "../remote/takers.ts";
+import { loadQueue } from "../data/runners/index.ts";
 import { loadView } from "../remote/view.ts";
 import type { ItemWorkflow } from "./types.ts";
 
@@ -38,7 +39,7 @@ export const legWait = async (db: Db, wf: Waiter, nowMs: number = Date.now()): P
 /**
  * Per workflow id the state line of a workflow whose started work waits for the app identity, whose merge leg waits for its approver's
  * sign-in, or for a pre-merge check or the model step of its first due action that no Task Runner can take, or that only the own runners of the people whose work it is take while
- * none of them can claim (offline, held for its usage, cooling off), or for the contributor or a person on GitHub, or whose close is not made,
+ * none of them can claim (offline, held for its usage, cooling off) or each leaves its queued call until its harness login renews, or for the contributor or a person on GitHub, or whose close is not made,
  * and the line of a done workflow whose PR merged with follow-ups filed or not posted; the others are absent. A live workflow whose check
  * failed several passes in a row shows that instead.
  */
@@ -103,11 +104,16 @@ async function legLines(db: Db, wfs: readonly Waiter[], nowMs: number): Promise<
   });
   if (!unread.length && !due.length) return out;
   const view = await loadView(db, nowMs), takes = takerTestIn(view);
+  // Items with a queued call, read only while some runner waits for its login's renewal: a call already running waits for nothing.
+  const queued = view.snapshot.runners.some((r) => (r.loginRenewsAt ?? 0) > nowMs)
+    ? new Set((await loadQueue(db, nowMs)).calls.flatMap((c) => c.refs.map((i) => `${i.repo}#${i.number}`))) : new Set<string>();
   for (const { w, step, number } of [...unread.map((x) => ({ w: x.w, step: "premerge", number: x.pr })), ...due]) {
     const call = { prompt_id: "", repos: [w.repo], step, refs: [{ repo: w.repo, number }] };
     if (!takes(call)) { add(w.id, t("Waiting for the {step}: no Task Runner can take it", { step: t(STEP_WORD[step]!) })); continue; }
     const [first] = waitingOnIn(view, call);
-    add(w.id, first ? t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) }) : null);
+    if (first) { add(w.id, t("Waiting for {login}'s Task Runner ({why})", { login: first.login, why: t(HOLD_WORD[first.hold]) })); continue; }
+    const renew = queued.has(`${w.repo}#${number}`) ? loginWaitIn(view, call) : null;
+    if (renew) add(w.id, t("Waiting for {login}'s Task Runner (login renews at {time} UTC)", { login: renew.login, time: new Date(renew.at).toISOString().slice(11, 16) }));
   }
   return out;
 }

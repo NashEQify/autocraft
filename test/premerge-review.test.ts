@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { lintPremerge, parsePremerge } from "../src/premerge/parse.ts";
 import { OPUS_MAX_FIXES } from "../src/review/opus-parse.ts";
+import { notBlocking } from "../src/premerge/types.ts";
 
 const REF = "app#1";
 const finding = (extra: Record<string, unknown> = {}) => ({ severity: "defect", file: "src/a.rs", line: 7, title: "off by one", scenario: "an empty list panics", blocking: { class: "regression", why: "an empty list worked on the base branch" }, ...extra });
@@ -22,6 +23,13 @@ describe("premerge claims", () => {
     assert.deepEqual([unknown.findings, unknown.unsure], [[], true]);
     assert.equal(parse([{ claim: "x", status: "verified", evidence: "src/a.rs:1 ok" }]).unsure, false);
     assert.equal(parse([]).unsure, false);
+  });
+
+  test("a code-incomplete claim is a defect that does not block; a code-wrong one blocks as off-purpose", () => {
+    const r = parse([claim("code-incomplete"), { ...claim("code-wrong"), claim: "keeps the order" }]);
+    assert.deepEqual(r.findings.map((f) => [f.severity, f.blocking?.class]), [["defect", null], ["defect", "off-purpose"]]);
+    assert.deepEqual(r.findings.map((f) => notBlocking(f)), [true, false]);
+    assert.equal(r.unsure, false);
   });
 
   test("missing claims with a description is unsure and a lint problem", () => {

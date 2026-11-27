@@ -91,6 +91,20 @@ export function waitingOnIn(v: RemoteView, c: TakerCall): { login: string; hold:
 }
 
 /**
+ * The person whose Task Runner a call waits for while its harness login renews, and when it renews: every runner that may take
+ * the call now (a taker, or for started work a runner of its people) left calls at its latest claim for want of room on that login
+ * (RunnerRow.loginRenewsAt, src/remote/calls.ts LOGIN_CUT_MIN_MS); the earliest renewal. Null when some runner may take it
+ * without that wait, or none may.
+ */
+export function loginWaitIn(v: RemoteView, c: TakerCall): { login: string; at: number } | null {
+  const canWrite = canWriteOf(v.snapshot), s = startedOf(v), owners = s.ownersFor(c);
+  const now = takersIn(v).filter((r) => runnerTakes(r, c, canWrite) || (owners.has(r.login.toLowerCase()) && s.canTake(r.login, c)));
+  if (!now.length || now.some((r) => (r.row.loginRenewsAt ?? 0) <= v.now)) return null;
+  const first = now.reduce((a, b) => (b.row.loginRenewsAt! < a.row.loginRenewsAt! ? b : a));
+  return { login: first.login, at: first.row.loginRenewsAt! };
+}
+
+/**
  * Whether a taker other than the runner token `exceptToken` (null: any) may take `c` on `c.tier` now: where a call that a
  * model's safety filter declined can run once more (calls.ts submitCall). A bound call counts only its user's runners.
  */

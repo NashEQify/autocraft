@@ -21,7 +21,7 @@ export async function unlease(db: Db, r: { id: number; runId: number | null; has
   return await db.write(async () => {
     const q = queryDb(db);
     const up = await q.run(q.k.updateTable("main.remote_calls").set((eb) => ({
-      state: "queued", lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: now, error: why, progress: null, picked_by: null, picked_at: null, pick_until: null,
+      state: "queued", lease_secret_hash: null, token_id: null, claim_id: null, lease_timeout_ms: null, started_at: null, queued_since: now, error: why, progress: null, picked_by: null, picked_at: null, pick_until: null,
       ...(releasedBy !== null && { released_by: releasedBy.login, released_at: now, release_wait_ms: releasedBy.waitMs, ...(releasedBy.setupRetry && { setup_retries: eb("setup_retries", "+", 1) }) }),
     })).where("id", "=", r.id).where("state", "=", "leased").where((eb) => (r.hash === null ? eb("lease_secret_hash", "is", null) : eb("lease_secret_hash", "=", r.hash))));
     if (Number(up.changes) !== 1) return false;
@@ -41,7 +41,7 @@ export async function requeue(db: Db, l: { id: number; runId: number | null; att
   const fail = l.attempt >= l.maxAttempts;
   const q = queryDb(db);
   const up = await q.run(q.k.updateTable("main.remote_calls").set((eb) => ({
-    state: fail ? "failed" : "queued", attempt: eb("attempt", "+", fail ? 0 : 1), lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: fail ? null : now,
+    state: fail ? "failed" : "queued", attempt: eb("attempt", "+", fail ? 0 : 1), lease_secret_hash: null, token_id: null, claim_id: null, lease_timeout_ms: null, started_at: null, queued_since: fail ? null : now,
     ended_at: fail ? now : null, error: reason, progress: null, picked_by: null, picked_at: null, pick_until: null, ...(opts.skipLogin !== undefined && { released_by: opts.skipLogin, released_at: now, release_wait_ms: null }),
   })).where("id", "=", l.id).where("state", "=", "leased").where("attempt", "=", l.attempt).where("lease_secret_hash", "=", l.hash));
   if (Number(up.changes) !== 1) return null;

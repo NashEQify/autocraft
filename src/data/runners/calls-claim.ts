@@ -75,9 +75,16 @@ export async function markHelperIdle(db: Db, caller: ClaimCaller, a: { now: numb
   await q.run(q.k.insertInto("main.remote_helpers")
     .values({
       token_id: caller.tokenId, login: caller.login, readiness: "paused", harness: "claude", models: "{}", reserve: JSON.stringify(DEFAULT_RESERVE), reported_at: 0,
-      idle_claim_at: a.now, idle_tiers: JSON.stringify(a.tiers), idle_repos: a.repos ? JSON.stringify(a.repos) : null,
+      idle_claim_at: a.now, idle_tiers: JSON.stringify(a.tiers), idle_repos: a.repos ? JSON.stringify(a.repos) : null, login_renews_at: null,
     })
-    .onConflict((oc) => oc.column("token_id").doUpdateSet(excluded(["idle_claim_at", "idle_tiers", "idle_repos"]))));
+    .onConflict((oc) => oc.column("token_id").doUpdateSet(excluded(["idle_claim_at", "idle_tiers", "idle_repos", "login_renews_at"]))));
+  dropSnapshotCache(db);
+}
+
+/** Records when a helper's harness login renews (null: its claims have the room again); a helper with no status row yet gets none. */
+export async function markLoginRenewal(db: Db, tokenId: number, at: number | null): Promise<void> {
+  const q = queryDb(db);
+  await q.run(q.k.updateTable("main.remote_helpers").set({ login_renews_at: at }).where("token_id", "=", tokenId));
   dropSnapshotCache(db);
 }
 

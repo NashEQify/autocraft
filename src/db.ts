@@ -327,6 +327,10 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   // A give-back after a local setup failure: the short wait before the same login may take it again, and how many got it.
   ["remote_calls", "release_wait_ms", "INTEGER"],
   ["remote_calls", "setup_retries", "INTEGER NOT NULL DEFAULT 0"],
+  // A lease whose time limit is cut to the room its Task Runner's harness login had before its refresh (src/remote/calls.ts LOGIN_CUT_MIN_MS); null: the call's own timeout_ms.
+  ["remote_calls", "lease_timeout_ms", "INTEGER"],
+  // When a Task Runner's harness login renews, as its latest claim that left calls for want of that login's room told it; null after a claim with room.
+  ["remote_helpers", "login_renews_at", "INTEGER"],
   // The login whose conversation message the reply that wrote the choices answered.
   ["decision_choices", "asked_by", "TEXT"],
   // Build pod placement and capacity (src/build/pods.ts, src/build/sizing.ts).

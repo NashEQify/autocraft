@@ -25,7 +25,7 @@ export function runnerCredentials(db: Db, nowMs: number, liveOnly = true) {
   return q.k.selectFrom("main.mcp_tokens as t").leftJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login")
     .select(["t.id", "t.login", "a.role", "t.label", "t.created_at", "t.expires_at", "t.can_agent", "t.can_answer", "t.last_used_at", "t.machine as token_machine",
       "h.machine", "h.helper_version", "h.readiness", "h.until", "h.reason", "h.harness", "h.models", "h.reserve", "h.usage", "h.reported_at", "h.slots", "h.busy",
-      "h.last_error", "h.idle_claim_at", "h.idle_tiers", "h.idle_repos"])
+      "h.last_error", "h.idle_claim_at", "h.idle_tiers", "h.idle_repos", "h.login_renews_at"])
     .where("t.kind", "=", "runner").$if(liveOnly, (s) => s.where("t.expires_at", ">", new Date(nowMs).toISOString()));
 }
 type Credential = Awaited<ReturnType<ReturnType<typeof runnerCredentials>["execute"]>>[number];
@@ -41,7 +41,7 @@ export function runnerRowOf(r: Credential): RunnerRow {
     models: has ? json<Partial<Record<Tier, string>>>(r.models, {}) : {}, reserve: has ? json<Reserve | null>(r.reserve, null) : null, usage: has ? json<unknown>(r.usage, null) : null,
     reportedAt: reported, slots: r.slots === null ? null : Number(r.slots), busy: r.busy === null ? null : Number(r.busy), lastError: has ? r.last_error : null,
     idleClaimAt: r.idle_claim_at === null ? null : Number(r.idle_claim_at), idleTiers: json<Tier[] | null>(r.idle_tiers, null), idleRepos: json<string[] | null>(r.idle_repos, null),
-    leased: 0, ownLaneLeased: 0, beatAt: null,
+    loginRenewsAt: r.login_renews_at === null ? null : Number(r.login_renews_at), leased: 0, ownLaneLeased: 0, beatAt: null,
   };
 }
 
