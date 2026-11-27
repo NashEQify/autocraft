@@ -116,7 +116,7 @@ test("a recommendation on a conflicting PR offers nothing that is refused", asyn
   }
 });
 
-test("a yes on a conflict only the contributor can resolve approves the merge and waits for them: it claims no merge, asks nothing again and goes on once the conflict is gone", async () => {
+test("a yes on a conflict only the contributor can resolve approves the merge and waits for it to be resolved: it claims no merge, asks nothing again and goes on once the conflict is gone", async () => {
   for (const verdict of ["take", "take-fix"] as const) for (const asked of [false, true]) {
     const w = await conflicting({ verdict, canModify: false, before: async (w) => { if (asked) await conflictRow(w, "sha1", "asked"); } });
     const rec = (await liveWorkflow(w.db, "app", 1))!;
@@ -131,7 +131,8 @@ test("a yes on a conflict only the contributor can resolve approves the merge an
     assert.deepEqual([wf.state, wf.approvedBy, wf.rec], ["running", MAINT, null], verdict);
     const legs = await w.rows("SELECT state FROM preapprovals");
     assert.deepEqual(legs.map((l) => l.state), [verdict === "take" ? "ci" : "review"], verdict);
-    if (asked) assert.equal((await w.prPlan(1)).waitKind, "contributor");
+    // The merge is approved: a person settles the conflict, and the approver, who answered at this head, is asked nothing again.
+    if (asked) assert.equal((await w.prPlan(1)).waitCode, "conflict-person");
     else assert.ok((await acts(w, 1)).includes("conflict:ask"));
 
     // The base branch no longer conflicts: the approval stands and the leg goes on.

@@ -34,6 +34,8 @@ export type Run = {
   replaces: boolean;
   /** Approves again a merge that waits for the sender's sign-in or access: it is tried again. */
   retryMerge: boolean;
+  /** Gives the pre-merge review that failed for good at the question's head one more try. */
+  retryPremerge: boolean;
   /** The steps end in a merge (approved now or before); false: they end in a recommendation. */
   merges: boolean;
   weight: number | null;
@@ -100,7 +102,7 @@ export const isLive = (wf: ItemWorkflow | null): wf is ItemWorkflow => !!wf && L
 
 const run = (r: Partial<Run>): Resolved => ({
   kind: "run",
-  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, instruction: null, ...r },
+  run: { how: null, start: null, again: null, fix: [], drop: [], approve: false, replaces: false, retryMerge: false, retryPremerge: false, merges: false, weight: null, end: null, resume: null, autorepin: null, answers: false, goesOn: false, pick: null, instruction: null, ...r },
 });
 
 /** The item stopped at defects of the pre-merge review: their plan parts (none where nobody asked for their fixes yet); null otherwise. */
@@ -108,6 +110,12 @@ export function premergeStopped(wf: ItemWorkflow): number[] | null {
   const parts = wf.state === "blocked" ? wf.blockerParams?.premerge : undefined;
   return Array.isArray(parts) ? (parts as number[]) : null;
 }
+
+/** The person drops every part of the pre-merge stop that blocks the merge (with those dropped before): they overrule the findings, and it goes on to the merge. */
+const overrules = (wf: ItemWorkflow, drop: readonly number[]): boolean => {
+  const blocking = (premergeStopped(wf) ?? []).filter((n) => wf.plan.some((p) => p.n === n && p.major));
+  return blocking.length > 0 && blocking.every((n) => drop.includes(n) || wf.plan.some((p) => p.n === n && p.state === "dropped"));
+};
 
 const ENTRY_OF = { review: "review", "fix-up": "fixup", implement: "implement" } as const;
 type EntryWord = keyof typeof ENTRY_OF;
@@ -245,7 +253,7 @@ export function resolve(parsed: Parsed, state: ItemState): Resolved {
     if (merge && state.redCi) return refused({ why: "red-ci", approved });
     if (merge && state.reviewFailed) return withoutReview(wf, drop, weight, ambiguous);
     const left = rec.parts.fix.filter((n) => !drop.includes(n));
-    if (!left.length && (merge || rec.merges) && premergeStopped(wf)) return refused({ why: "premerge-defects" });
+    if (!left.length && (merge || rec.merges) && premergeStopped(wf) && !overrules(wf, drop)) return refused({ why: "premerge-defects" });
     return accept(wf, left, [...new Set([...rec.parts.drop, ...drop])], weight, merge);
   }
   if (!entry && !named.length && merge) {
@@ -341,6 +349,6 @@ function accept(wf: ItemWorkflow, fix: number[], drop: number[], weight: number 
   if (rec.answer && !fix.length) return run({ pick: rec.answer, drop, approve, merges, weight, answers: true, how: approve ? "approved" : "answered" });
   return run({
     again: fix.length ? "fixup" : merge ? null : rec.again ?? null, fix, drop, approve, merges, weight, answers: true, goesOn: !!rec.goes,
-    how: approve ? "approved" : "answered",
+    retryPremerge: !!rec.retriesPremerge && !merge && !fix.length, how: approve ? "approved" : "answered",
   });
 }

@@ -353,16 +353,20 @@ function verifyStop(p: Row, head: string, pf: PassFacts, leg: LegContext | null)
 type Hand = { done: true } | { gone: true } | { wait: true } | { stop: Stop };
 
 /** Moves the row from ci to queued: the merge queue merges it as the workflow's approver from here. Idempotent. */
-async function handOver(db: Db, p: Row, head: string, pf: PassFacts, leg: LegContext | null, unsure = false): Promise<Hand> {
+async function handOver(db: Db, p: Row, head: string, pf: PassFacts, leg: LegContext | null, unsure = false, past: "overruled" | "premerge-failed" | null = null): Promise<Hand> {
   // A hand-over waits for a running verification, and goes on over a failed one only when the person answered after it.
   const v = pf.merge.verifications.get(`${refOf(p.repo, p.number)}@${head}`);
   if (v && (v.state === "planned" || v.state === "running")) return { wait: true };
   const failed = verifyStop(p, head, pf, leg);
   if (failed) return { stop: failed };
   if (!await moveRaw(db, p, "queued", { head })) return { gone: true };
-  await say(db, p.repo, p.number, unsure
-    ? "CI is green and the pre-merge review found no defect, though it could not verify every claim of the description: the merge was approved, so the PR is in the merge queue, which checks it as for any approved merge."
-    : "CI is green and the pre-merge review is clean: the PR is in the merge queue, which checks it as for any approved merge.");
+  await say(db, p.repo, p.number, past === "premerge-failed"
+    ? "CI is green, and the merge goes on without the pre-merge review that failed, as a maintainer answered: the PR is in the merge queue, which checks it as for any approved merge."
+    : past === "overruled"
+      ? "CI is green, and a maintainer dropped the pre-merge review's findings that blocked the merge: the PR is in the merge queue, which checks it as for any approved merge."
+      : unsure
+        ? "CI is green and the pre-merge review found no defect, though it could not verify every claim of the description: the merge was approved, so the PR is in the merge queue, which checks it as for any approved merge."
+        : "CI is green and the pre-merge review is clean: the PR is in the merge queue, which checks it as for any approved merge.");
   return { done: true };
 }
 
@@ -616,10 +620,21 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     // The pre-merge review of this head must be clean; the planner runs it (src/core/decide.ts) and retries a failed one.
     const pm = await premergeAt(db, p.repo, p.number, head);
     if (!pm || (pm.findings === null && pm.tries < PREMERGE_MAX_TRIES)) return;
-    if (pm.findings === null) return await stop(stopOf("premerge-failed", `the pre-merge review of ${headName(p)} failed`));
+    if (pm.findings === null) {
+      // A person who answered after it failed for good went on without it (the word merge; a yes gave it one more try, so it waits above).
+      // An answer is what moves `since` past the start: one given before the failure, or no answer at all, stops here and asks.
+      const without = leg.since > leg.startedAt && pm.at <= leg.since;
+      if (!without) return await stop(stopOf("premerge-failed", `the pre-merge review of ${headName(p)} failed`));
+      const h = await handOver(db, p, head, pf, leg, false, "premerge-failed");
+      if ("stop" in h) await stop(h.stop);
+      return;
+    }
     const all = findingsOf(pm);
     // On the leg of a PR approved for merge only blocking defects stop it; the others are filed as follow-ups (core/decide.ts) and it merges.
-    const defects = all.some((x) => x.severity === "defect") ? stoppingDefects(all, !!(await factOf())?.workflow?.approved).length : 0;
+    // A defect a person dropped from the workflow's plan stops nothing: they overruled it.
+    const wf = all.some((x) => x.severity === "defect") ? (await factOf())?.workflow : undefined;
+    const overruled = wf?.dropped?.length ? stoppingDefects(all, !!wf.approved).length - stoppingDefects(all, !!wf.approved, wf.dropped).length : 0;
+    const defects = all.some((x) => x.severity === "defect") ? stoppingDefects(all, !!wf?.approved, wf?.dropped).length : 0;
     if (defects) {
       const found = `the pre-merge review found ${defects} defect${defects === 1 ? "" : "s"}`;
       // Safe fixes get up to PREMERGE_FIX_ROUNDS fix-up rounds, whose pushes are our own; a defect that comes back or what is left after the last round is a person's.
@@ -636,7 +651,7 @@ async function advance(db: Db, p: Row, ctx: LegContext | "ended" | "unlinked", p
     }
     // The merge approval says the change is wanted: an unsure pre-merge review (a claim of the description it could not verify) with
     // no defect goes on to the merge queue; only a defect, or another blocker, brings the item back.
-    const h = await handOver(db, p, head, pf, leg, pm.unsure === 1);
+    const h = await handOver(db, p, head, pf, leg, pm.unsure === 1, overruled ? "overruled" : null);
     if ("stop" in h) await stop(h.stop);
     return;
   }

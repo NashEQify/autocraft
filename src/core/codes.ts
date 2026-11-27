@@ -40,8 +40,8 @@ const NO_QUESTION: ReadonlySet<WaitCode> = new Set([
   "repo-approval", "changes-requested", "sign-in", "open-pr", "conflict-person", "review-hold", "box-identity", "pipeline-off", "breaker",
 ]);
 
-/** Whether a started item with this wait has to have a question open. */
-export const needsQuestion = (code: WaitCode, who: Who): boolean => who === "person" && !NO_QUESTION.has(code);
+/** Whether a started item with this wait has to have a question open. A conflict our step cannot resolve on a PR approved for merge (`approved`) is its approver's question. */
+export const needsQuestion = (code: WaitCode, who: Who, approved = false): boolean => who === "person" && (!NO_QUESTION.has(code) || (approved && code === "conflict-person"));
 
 // ---- codes of the texts ---------------------------------------------------------------------------------------------
 

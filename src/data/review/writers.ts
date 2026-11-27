@@ -179,6 +179,16 @@ export async function savePremerge(db: Db, saves: PremergeSave[]): Promise<void>
   });
 }
 
+/** Gives each head's pre-merge review that failed for good one more try: its failed tries go back to one below the maximum. A stored review is left as it is. */
+export async function retryPremergeAt(db: Db, heads: { repo: string; number: number; head: string }[]): Promise<void> {
+  if (!heads.length) return;
+  const q = queryDb(db);
+  await db.write(async () => {
+    await q.run(q.k.updateTable("main.premerge_reviews").set({ tries: PREMERGE_MAX_TRIES - 1 })
+      .where("findings", "is", null).where("tries", ">=", PREMERGE_MAX_TRIES).where(kx.tupleIn(db, ["repo", "number", "head_oid"], headTuples(heads), TUPLE)));
+  });
+}
+
 /**
  * A failed try never replaces a stored clean review; a `retry:` error adds to `tries` and becomes `held: gave up after N tries` at the
  * maximum; one skipped-minor or skipped-duplicate follow-up row per finding. Returns the defect count of each PR stored, for the caller

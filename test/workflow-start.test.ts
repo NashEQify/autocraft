@@ -291,6 +291,26 @@ test("an approved merge stopped at a pre-merge defect goes on without a question
   assert.ok(leg.head === "theirs" && !["failed", "cancelled"].includes(leg.state as string), JSON.stringify(leg));
 });
 
+test("drop of a blocking pre-merge finding overrules it: the merge goes on with green CI and no new pre-merge review, while merge alone stays refused", async () => {
+  const w = await unstarted(false);
+  await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));
+  await run(w, "merge");
+  await w.premerge(1, "defect", false);
+  await w.premergeRoundsSpent(1);
+  await settle(w);
+  const stopped = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([stopped.state, stopped.rec!.parts.fix], ["blocked", [1]], stopped.rec?.text ?? "");
+  assert.match(stopped.rec!.text, /write drop 1/);
+  assert.equal((await send(w, "merge")).outcome, "refused");
+  const o = await send(w, "drop 1");
+  assert.equal(o.outcome, "run", o.line);
+  await settle(w);
+  const wf = (await liveWorkflow(w.db, "app", 1))!;
+  assert.deepEqual([wf.state, wf.blocker, wf.plan.find((p) => p.n === 1)?.state, wf.plan.find((p) => p.n === 1)?.droppedBy], ["running", null, "dropped", MAINT], JSON.stringify(wf.rec));
+  await mergesAsPerson(w);
+  assert.equal((await w.rows("SELECT tries FROM premerge_reviews WHERE number = 1")).length, 1);
+});
+
 test("merge at a stop on defects the pre-merge review gave no fix for is refused and asks to fix them first; the yes has them fixed", async () => {
   const w = await unstarted(false);
   await w.db.run(w.db.k.deleteFrom("main.premerge_reviews"));

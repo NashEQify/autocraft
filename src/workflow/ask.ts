@@ -99,6 +99,7 @@ function recFor(code: WaitCode, f: PrFacts, wait: string | null, o: Asked): Reco
   const skip = code === "answer" || code === "ask-failed" ? withoutFixes(f, o) : null;
   if (skip) return skip;
   if (code === "review-failed") return reviewFailed(o);
+  if (code === "conflict-person") return conflictByHand(parts, merges);
   const why = (REVIEW_AGAIN[code] ?? (() => waitText(wait ?? "")))(f);
   // The session does not make the review's fixes: a fix-up of ours does.
   const fix = code === "revision-failed" && o.review?.verdict === "take-fix" ? planned(o.parts) : [];
@@ -122,11 +123,31 @@ function reviewFailed(o: Pick<Asked, "approved" | "parts" | "review">): Recommen
   };
 }
 
+/** A conflict with the base branch that AutoCraft's merge of it could not resolve, on a PR approved for merge: someone resolves it on its branch, and a yes looks again. */
+const conflictByHand = (parts: Recommendation["parts"], merges: boolean): Recommendation => ({
+  text: t("It conflicts with its base branch, and AutoCraft could not resolve the conflict. Resolve it on the pull request's branch, or ask the contributor to; the merge stays approved, and AutoCraft reviews the new commits before it merges. Say yes once it is resolved."),
+  parts, merges, goes: "look",
+});
+
+/**
+ * The recommendation where the pre-merge review failed for good at the head: a yes gives it one more try, and the merge goes on once it is clean
+ * and CI is green; the word merge goes on without it.
+ */
+function premergeFailed(f: PrFacts, o: Pick<Asked, "approved" | "parts">): Recommendation {
+  const tries = f.premerge?.tries ?? 0;
+  const failed = tries > 1 ? t("The pre-merge review of this commit failed {n} times.", { n: tries }) : t("The pre-merge review of this commit failed.");
+  return {
+    text: `${failed} ${t("Yes gives it one more try, and the merge goes on once it is clean and CI is green. Write merge to merge it without that review once CI is green.")}`,
+    parts: { fix: [], drop: droppedOf(o.parts) }, merges: o.approved, retriesPremerge: true,
+  };
+}
+
 /** The recommendation of a stopped merge leg that says what its wait would: going on with it as it is would stop it there again. */
 export function legStop(code: StopCode, f: PrFacts, o: Asked): Recommendation | null {
   switch (code) {
     case "fix-cannot-run": case "fix-failed": case "fix-too-large": return withoutFixes(f, o);
     case "review-failed": return reviewFailed(o);
+    case "premerge-failed": return premergeFailed(f, o);
     case "ci-failed": return recFor(f.brokeByUs ? "ci-own-breakage" : "ci-fix-failed", f, null, o);
     default: return null;
   }
@@ -152,7 +173,7 @@ export function questionFor(f: PrFacts, p: Plan, o: Asked): Question | null {
   if (!o.approved && !busy && waitsForAnswer(p)) return { blocker: "other", params: {}, rec: asItStands(fixable(afterSteps(o.review, o.parts, unapprovedStop(f), o.conflict), f, o), f) };
   if (!o.approved && isGone(f.standing?.work)) return goneQuestion(f.repo, f.standing!.work!.login, o);
   const code = p.waitCode;
-  if (busy || !code || !p.waitKind || !needsQuestion(code, p.waitKind)) return null;
+  if (busy || !code || !p.waitKind || !needsQuestion(code, p.waitKind, o.approved)) return null;
   // The implementation's own question, and a review that says hold or close: what the person has not answered comes back by itself (question.ts, blockers.ts).
   if (code === "implement-question" || code === "implement-stuck" || p.state === "opus-hold" && code === "answer") return null;
   const rec = recFor(code, f, p.wait, o);
