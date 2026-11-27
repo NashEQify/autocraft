@@ -41,7 +41,7 @@ import { JOB_DEADLINE_ENV, RUNNER_FAILING_MS, stepDeadlineMin, stepNoProgressMin
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
 import { REMOTE_WAIT_CAP_MS } from "../remote/calls.ts";
-import { CALLER_STALE_MS, roomState, type RoomState } from "../remote/room.ts";
+import { CALLER_STALE_MS, jobRoom, roomState, type JobCalls, type RoomState } from "../remote/room.ts";
 import { CAPACITY_EVERY_MS, capacityText, readJobCapacity, type JobCapacity } from "./capacity.ts";
 import { claimJob, failQueued, loadLiveJobs, loadRunnerTick, markDeadlineStops, saveLaneState, setPids, type LogCursor, type QueuedJob, type RunningState } from "../data/jobs/index.ts";
 import { loadSyncState, hasSyncRequests } from "../data/mirror/index.ts";
@@ -127,6 +127,12 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
 /** The `number` param of a job (a security finding), or null. */
 function numberOfParams(params: string): number | null {
   try { const n = (JSON.parse(params) as { number?: unknown }).number; return typeof n === "number" ? n : null; } catch { return null; }
+}
+
+/** The calls a job makes as the start test reads them: its repo and step, and the item a lane job works on (its `number`). */
+export function jobCalls(step: string, repo: string | null, params: string): JobCalls {
+  const number = repo && laneOf(params) ? numberOfParams(params) : null;
+  return { step, ...(repo && { repos: [repo] }), ...(repo && number !== null && { refs: [{ repo, number }] }) };
 }
 
 type TickReads = Awaited<ReturnType<Runner["load"]>>;
@@ -628,12 +634,13 @@ export class Runner {
   }
 
   /**
-   * Starts queued jobs: security first (priority 2), then by id. A job whose step calls Claude starts only while the
-   * model queue has room for its class and its repo (queueRoomPass; a job without a repo param spans repos and is asked about
-   * none), so processes do not sit waiting for slots, unless no job of its step runs. Such a job with a repo starts only while
-   * a Task Runner that may take its repo and its step's task is connected and ready (busy or not); a job no Task Runner may take
-   * waits queued. The room is read once per pass, so a start takes one from every room counted so far, and a room first read
-   * later in the pass starts with the pass's starts taken off: the Task Runners that serve one repo or task may serve others.
+   * Starts queued jobs: security first (priority 2), then by id. A job whose step calls Claude starts only while a Task Runner
+   * user who would take its calls (its repo, its step's task and, for a lane job, its item; the people whose started work it is
+   * first) has a slot left after the queued calls that user would take (src/remote/room.ts jobRoom), so processes do not sit
+   * waiting for slots, unless no job of its step runs. Calls no free runner takes hold nobody's room. A job without a repo param
+   * spans repos and is asked about none. Such a job with a repo starts only while a Task Runner may take its calls (the taker
+   * rule, src/remote/takers.ts); a job no Task Runner may take waits queued. The room is read once per pass; each start, and each
+   * Claude job still preparing its call, holds a slot of one user who would take it.
    */
   private async startJobs(read: TickReads): Promise<void> {
     const steps = await loadSteps();
@@ -643,19 +650,20 @@ export class Runner {
     if (!queued.length) return;
     const running = live.filter((j) => j.state === "running");
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
-    // Room by class, then by the job's step and repo ("" for a job without one): a runner counts only for the tasks it takes.
-    const room = new Map<number, Map<string, number>>();
     const st = state ?? await roomState(this.db);
     const pass = await queueRoomPass(this.db, undefined, st);
+    const rooms = jobRoom(st);
     const maxJobs = await this.jobCap(st);
-    // Claude jobs still preparing their call take room the queue does not count yet, as this pass's starts do.
+    // Claude jobs still preparing their call hold a slot the queue does not show yet, of a Task Runner that would take it, as this pass's starts do.
     const nowMs = Date.now();
     const calling = new Map(tick.running.map((r) => [r.id, r.queued || r.lastLeaseAt !== null]));
-    let started = running.filter((j) => {
+    for (const j of running) {
       const r = this.running.get(j.id), step = steps.get(j.step);
-      if (!r || calling.get(j.id) !== false || nowMs - r.startedAt > PREPARING_MS || !step) return false;
-      try { return usesClaude(modelsOf(step, JSON.parse(j.params) as Params)); } catch { return false; }
-    }).length;
+      if (!r || calling.get(j.id) !== false || nowMs - r.startedAt > PREPARING_MS || !step) continue;
+      let claude = false;
+      try { claude = usesClaude(modelsOf(step, JSON.parse(j.params) as Params)); } catch { /* not a Claude job */ }
+      if (claude) rooms.take(step.priority ?? 0, jobCalls(j.step, j.repo, j.params));
+    }
     const pids: Promise<unknown>[] = [];
     const failed: { id: number; error: string }[] = [];
     try {
@@ -671,33 +679,21 @@ export class Runner {
         if (await jobBlock(this.db, steps, { ...wantOf(q.step, q.params), repo: q.repo }, { states: ["running"], mutex: true, active: running, cap })) continue;
         let claude = false;
         try { claude = usesClaude(modelsOf(step, JSON.parse(q.params) as Params)); } catch { /* params are checked when the job runs */ }
-        const cls = step.priority ?? 0;
-        let byRepo = room.get(cls);
-        if (!byRepo) room.set(cls, (byRepo = new Map()));
-        const key = `${q.step}\n${q.repo ?? ""}`;
-        const roomOf = async (): Promise<number> => byRepo.get(key) ?? await pass.room(cls, q.repo ? [q.repo] : undefined, q.step) - started;
-        if (claude && q.repo && !await pass.taker([q.repo], q.step)) {
+        const cls = step.priority ?? 0, calls = jobCalls(q.step, q.repo, q.params);
+        if (claude && q.repo && !await pass.taker(calls.repos, q.step, calls.refs)) {
           // A pipeline job waits for a Task Runner; a command-line session job (`workspace try`) is not replanned, so it fails.
           const why = q.step === TRY_STEP ? await noTakerFor(this.db, q.repo, q.step) : null;
           if (why) failed.push({ id: q.id, error: why });
           continue;
         }
-        if (claude && !running.some((j) => j.step === step.name)) {
-          // Nothing of the step runs: it starts anyway, and takes a slot of the room.
-        } else if (claude) {
-          byRepo.set(key, await roomOf());
-          if (byRepo.get(key)! <= 0) continue;
-        }
+        // Nothing of the step runs: it starts anyway, and takes a slot of the room.
+        if (claude && running.some((j) => j.step === step.name) && rooms.room(cls, calls) <= 0) continue;
         const spawned = await this.start(q, step, steps, cap, tick.logCursors.get(q.id));
         if (spawned) {
           // Written at once, beside the next starts: a runner that takes over stops what the process left running by its pid (recover).
           if (spawned.pid !== null) pids.push(setPids(this.db, [{ id: q.id, pid: spawned.pid }]).catch((e: unknown) => this.fault(`job ${q.id}: pid not stored`, e)));
           running.push({ id: q.id, step: step.name, state: "running", repo: q.repo, number: numberOfParams(q.params), params: q.params, items: null, requested_by: q.requested_by, resumes: q.resumes, cancel_requested_at: null, started_at: null, pid: spawned.pid });
-          if (claude) {
-            byRepo.set(key, await roomOf());
-            started++;
-            for (const m of room.values()) for (const [k, n] of m) m.set(k, n - 1);
-          }
+          if (claude) rooms.take(cls, calls);
         }
       }
     } finally {
