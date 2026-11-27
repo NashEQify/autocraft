@@ -257,29 +257,41 @@ const STEP_FAILED_RUNS = 3;
 const STEP_MIN_STALL_MS = 6 * 3_600_000;
 
 /**
- * One check per pipeline step (jobs the autopilot started) whose last three finished runs all failed. It fails when the last
- * success is older than max(6 h, 4 x the step's median gap between successes over the last week), else it warns.
+ * One check per pipeline step (jobs the autopilot started) whose last three finished runs on a repo all failed, unless a run of the
+ * step on another repo succeeded since the first of them or within the stall limit: a step that works on other repos is not stalled,
+ * and one repo's failing job waits out its own backoff (src/runner/autopilot.ts failureBackoff). The stall limit is max(6 h, 4 x the
+ * median gap between the repo's successes over the last week); the check fails when the repo's last success is older, else it warns.
  */
 async function stepStalledChecks({ nowMs, f }: CheckCtx): Promise<Check[]> {
-  const rows = f.stepRuns.map((r) => ({ step: r.step, state: r.state, error: r.error, endedAt: r.ended_at }));
+  const rows = f.stepRuns.map((r) => ({ step: r.step, repo: r.repo, state: r.state, error: r.error, endedAt: r.ended_at }));
   const bySteps = new Map<string, typeof rows>();
   for (const r of rows) bySteps.set(r.step, [...(bySteps.get(r.step) ?? []), r]);
   const out: Check[] = [];
-  for (const [step, runs] of bySteps) {
-    const last = runs.slice(0, STEP_FAILED_RUNS);
-    if (last.length < STEP_FAILED_RUNS || last.some((r) => r.state !== "failed")) continue;
-    const times = runs.filter((r) => r.state === "done" && r.endedAt).map((r) => Date.parse(r.endedAt!)).filter((t) => !Number.isNaN(t));
-    const lastOk = times[0] ?? null;
-    const gaps = times.slice(0, -1).map((t, i) => t - times[i + 1]!).sort((a, b) => a - b);
-    const usual = gaps.length ? gaps[Math.floor(gaps.length / 2)]! : 0;
-    const limit = Math.max(STEP_MIN_STALL_MS, 4 * usual);
+  for (const [step, all] of bySteps) {
+    let worst: { repo: string | null; last: typeof rows; lastOk: number | null; limit: number } | null = null;
+    for (const repo of new Set(all.map((r) => r.repo))) {
+      const runs = all.filter((r) => r.repo === repo);
+      const last = runs.slice(0, STEP_FAILED_RUNS);
+      if (last.length < STEP_FAILED_RUNS || last.some((r) => r.state !== "failed")) continue;
+      const times = runs.filter((r) => r.state === "done" && r.endedAt).map((r) => Date.parse(r.endedAt!)).filter((t) => !Number.isNaN(t));
+      const lastOk = times[0] ?? null;
+      const gaps = times.slice(0, -1).map((t, i) => t - times[i + 1]!).sort((a, b) => a - b);
+      const usual = gaps.length ? gaps[Math.floor(gaps.length / 2)]! : 0;
+      const limit = Math.max(STEP_MIN_STALL_MS, 4 * usual);
+      // The step works on another repo: one of its runs there succeeded since this repo's failures began, or within the stall limit.
+      const from = Date.parse(last[last.length - 1]!.endedAt ?? "");
+      if (all.some((r) => r.repo !== repo && r.state === "done" && r.endedAt && (Date.parse(r.endedAt) > from || nowMs - Date.parse(r.endedAt) <= limit))) continue;
+      if (!worst || (worst.lastOk !== null && (lastOk === null || lastOk < worst.lastOk))) worst = { repo, last, lastOk, limit };
+    }
+    if (!worst) continue;
+    const { repo, last, lastOk, limit } = worst;
     const label = stepTitle(step);
     const errors = last.map((r) => (r.error ?? "failed").replace(/\s+/g, " ").trim()).sort((a, b) => a.length - b.length);
     const since7 = lastOk === null ? `in ${STEP_DAYS} days` : `since ${new Date(lastOk).toISOString().slice(0, 16).replace("T", " ")} UTC`;
     out.push({
       id: `step-stalled:${step}`, state: lastOk === null || nowMs - lastOk > limit ? "fail" : "warn", group: "steps", to: "/pipeline",
       since: last[last.length - 1]!.endedAt,
-      text: `${label} has not completed a run ${since7}; its last ${last.length} runs failed (${clip(errors[0]!, 120)})`,
+      text: `${label} has not completed a run${repo ? ` on ${repo}` : ""} ${since7}; its last ${last.length} runs${repo ? " there" : ""} failed (${clip(errors[0]!, 120)})`,
       brief: `${label} is failing`,
     });
   }
