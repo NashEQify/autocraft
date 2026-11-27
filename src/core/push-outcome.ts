@@ -28,11 +28,11 @@ export function requiredResult(checks: { name: string; state: string }[], option
 /**
  * A green result before a push counts only when its run is newer than the base branch head the push's run merges with. `ranAt`:
  * the earliest the run can have started (when its head was pushed or committed); `baseAt`: when the base head at the push landed.
- * Either time unknown: the green is not shown to be fresh.
+ * Either time unknown: the green counts, so the breaker does not go quiet while those facts are not read yet.
  */
 export function freshBefore(res: Required | "unknown", ranAt: string | null, baseAt: string | null): Before {
   if (res !== "green") return res;
-  return ranAt !== null && baseAt !== null && baseAt <= ranAt ? "green" : "stale";
+  return ranAt !== null && baseAt !== null && baseAt > ranAt ? "stale" : "green";
 }
 
 /** The outcome once the checks after the push are final, or null while they are not (including before any required check exists; the 3-day expiry then gives `unknown`). A side without a known result gives `unknown`. */

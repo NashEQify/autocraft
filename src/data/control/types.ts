@@ -29,8 +29,8 @@ export type PaceKey = { action: string; identity: string; owner: string };
 
 export type PushOutcomeRow = Selectable<DB["push_outcomes"]>;
 export type NewPush = { action: string; repo: string; number: number | null; from: string | null; to: string; base?: string | null; at?: string };
-/** `moves`: the recorded pushes that moved the head, from the head each was made on. */
-export type PushFacts = { pushed: Set<string>; movedOffAt: Map<string, string>; moves: OutcomePush[]; brokeHead: string | null };
+/** `moves`: the recorded pushes that moved the head, from the head each was made on. `brokeStale`: the push that left `brokeHead` red had a stale green before it (the base branch moved since). */
+export type PushFacts = { pushed: Set<string>; movedOffAt: Map<string, string>; moves: OutcomePush[]; brokeHead: string | null; brokeStale: boolean };
 /** A push about to be made to a pull request. `lines`: how many of its lines it changes. */
 export type NewOwnPush = { repo: string; number: number; from: string; to: string; action: string; lines: number | null };
 export type TripStageKey = "outside-surge" | string;

@@ -53,12 +53,12 @@ function latestMain(heads: MainHeadTime[]): MainHeadTime | undefined {
 
 /**
  * Records pushes that succeeded: the required-check result at the head before each (from the stored checks, when they are for
- * that head). A branch the push created has no earlier head: it takes the CI result of the commit it was built on (`base`),
- * else of the default branch's latest CI (a red or unknown baseline is no baseline for "broke"). A green before counts only when
- * the default branch did not move after its run (core `freshBefore`), else it is `stale`: for a moved head the run is dated by
- * our own push of that head, else by its commit time, and the base by the default branch's newest head; a created branch's base
- * commit is stale once a newer head is on the default branch. Actions with no push stage are skipped. A push is recorded once
- * per `(repo, number, to, action)`, also across calls, in one statement.
+ * that head). A green before counts only when the default branch did not move after its run (core `freshBefore`), else it is
+ * `stale`: the run is dated by our own push of that head, else by its commit time, and the base by the default branch's newest
+ * head; with either time unknown the green counts. A branch the push created has no earlier head: it takes the CI result of the
+ * default branch's newest head, the one its run merges with, else (no head, or no check on it) of the commit it was built on
+ * (`base`); a red or unknown baseline is no baseline for "broke". Actions with no push stage are skipped. A push is recorded
+ * once per `(repo, number, to, action)`, also across calls, in one statement.
  */
 export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> {
   const first = new Map<string, NewPush>();
@@ -83,10 +83,9 @@ export async function addPushOutcomes(db: Db, pushes: NewPush[]): Promise<void> 
     let before: Before = "unknown";
     const latest = latestMain(ciHeads.get(p.repo) ?? []);
     if (!p.from) {
-      const atBase = p.base ? ciAt.get(`${p.repo}@${p.base}`) : undefined;
-      const m = atBase?.state ?? latest?.state;
+      // The new PR's run merges with the newest default-branch head; its own CI result is unknown only without a head or a check.
+      const m = latest && latest.state !== "none" ? latest.state : p.base ? ciAt.get(`${p.repo}@${p.base}`)?.state : undefined;
       before = m === "green" || m === "optional" ? "green" : m === "red" ? "red" : "unknown";
-      if (before === "green" && atBase && latest && latest.head_sha !== atBase.head_sha) before = "stale";
     } else if (p.number !== null) {
       const ref = `${p.repo}#${p.number}`;
       const row = stored.get(ref);
@@ -245,14 +244,14 @@ export async function loadPushFacts(db: Db, keys: { repo: string; number: number
     .select(["p.repo as repo", "p.number as number", "p.from_oid as from_oid", "p.to_oid as to_oid", "p.at as at", "p.outcome as outcome", "p.after_res as after_res", "p.action as action"]).orderBy("p.id"));
   for (const r of rows) {
     const ref = `${r.repo}#${r.number}`;
-    const f = out.get(ref) ?? out.set(ref, { pushed: new Set(), movedOffAt: new Map(), moves: [], brokeHead: null }).get(ref)!;
+    const f = out.get(ref) ?? out.set(ref, { pushed: new Set(), movedOffAt: new Map(), moves: [], brokeHead: null, brokeStale: false }).get(ref)!;
     f.pushed.add(r.to_oid);
     if (r.from_oid !== null) {
       f.pushed.add(r.from_oid);
       f.moves.push(outcomePush({ ...r, from_oid: r.from_oid }));
       if (r.to_oid !== r.from_oid && r.at > (f.movedOffAt.get(r.from_oid) ?? "")) f.movedOffAt.set(r.from_oid, r.at);
     }
-    if (r.outcome === "broke" || (r.outcome === "stale" && r.after_res === "red")) f.brokeHead = r.to_oid;
+    if (r.outcome === "broke" || (r.outcome === "stale" && r.after_res === "red")) { f.brokeHead = r.to_oid; f.brokeStale = r.outcome === "stale"; }
   }
   return out;
 }

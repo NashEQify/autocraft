@@ -465,6 +465,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
   // Our push to this head turned its required checks red: the CI fix works on it now, without waiting for a review of the new head.
   // A head that our own push or the review's CI gate (red CI at a new head, reviewed earlier) left red is repaired against that head.
   base.brokeByUs = push?.brokeHead === head && redNow;
+  if (base.brokeByUs && push?.brokeStale) base.brokeByDrift = true;
   base.gateRed = !base.brokeByUs && !!base.reviewHold?.red && !!head && head !== qh && redNow;
   base.tier = tierOf(head);
   const ownHere = isOwn(i.author) && c.ownPrs.has(ref) && !!head && ownHead(head);

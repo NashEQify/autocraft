@@ -26,7 +26,7 @@ test("push outcome: green to red is broke, red to green is fixed, optional check
   assert.equal(breakerTripped(["broke", ...Array(9).fill("fixed"), "broke"]), false);
 });
 
-test("a new branch takes the CI result of its base commit, not the latest main CI", async () => {
+test("a new branch takes the CI result of the default branch's newest head, else of its base commit", async () => {
   const db = await connectDb(join(tmpdir("push-base"), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "o/r", added_by: "op", added_at: "2026-11-01T00:00:00Z" }));
   const ci = async (sha: string, state: string, at: string) => await db.run(db.k.insertInto("main_ci").values({ repo: "o/r", head_sha: sha, branch: "main", state, failing: "[]", checks: "[]", committed_at: at, first_seen_at: at, state_changed_at: at, updated_at: at }));
@@ -34,14 +34,15 @@ test("a new branch takes the CI result of its base commit, not the latest main C
   await ci("latest", "green", "2026-11-02T00:00:00Z");
   const before = async () => (await db.get(db.k.selectFrom("push_outcomes").select("before_res").orderBy("id", "desc").limit(1)))!.before_res;
   await addPushOutcomes(db, [{ action: "implement-push", repo: "o/r", number: null, from: null, to: "c1", base: "base" }]);
-  assert.equal(await before(), "red");
-  await addPushOutcomes(db, [{ action: "implement-push", repo: "o/r", number: null, from: null, to: "c2", base: "gone" }]);
-  assert.equal(await before(), "green", "no row for the base: the latest main CI");
+  assert.equal(await before(), "green", "the new PR's run merges with the newest head");
+  await ci("newest", "none", "2026-11-03T00:00:00Z");
+  await addPushOutcomes(db, [{ action: "implement-push", repo: "o/r", number: null, from: null, to: "c2", base: "base" }]);
+  assert.equal(await before(), "red", "no check on the newest head: the base commit's result");
   await addPushOutcomes(db, [{ action: "implement-push", repo: "o/r", number: null, from: null, to: "c3" }]);
-  assert.equal(await before(), "green");
-  const rows = [{ repo: "o/r", number: 5, head_oid: "c1", checks: JSON.stringify([{ name: "gate", state: "failure" }]) }];
+  assert.equal(await before(), "unknown");
+  const rows = [{ repo: "o/r", number: 5, head_oid: "c2", checks: JSON.stringify([{ name: "gate", state: "failure" }]) }];
   await resolvePushes(db, rows);
-  assert.equal((await db.get(db.k.selectFrom("push_outcomes").select("outcome").where("to_oid", "=", "c1")))!.outcome, "still-red");
+  assert.equal((await db.get(db.k.selectFrom("push_outcomes").select("outcome").where("to_oid", "=", "c2")))!.outcome, "still-red");
 });
 
 test("the unsettled-push gate counts only recent pushes whose PR is open at the pushed head", async () => {
@@ -90,5 +91,10 @@ test("a push whose green before predates a move of the default branch is stale a
   await pr(5, "2026-11-11T00:00:00Z");
   await push([4, 5]);
   assert.deepEqual((await outcomes()).slice(2), ["4:broke", "5:broke"]);
+  // A head whose time is not known yet: the green counts.
+  await pr(6, "2026-11-01T00:00:00Z");
+  await db.run(db.k.deleteFrom("pr_commits").where("number", "=", 6));
+  await push([6]);
+  assert.deepEqual((await outcomes()).slice(4), ["6:broke"]);
   assert.ok((await loadTrips(db)).has("fixup:o/r"), "two broken pushes trip the repo's breaker; the stale ones take no place in its window");
 });
