@@ -137,8 +137,13 @@ export type ReviewFacts = {
   reason: string;
   /** Number of fixes the pipeline makes: no person dropped them, and on a PR approved for merge they block it. */
   fixes: number;
-  /** On a PR approved for merge: its fixes that do not block it, and its hold when that does not block it, which are filed as follow-ups (src/core/review-blocking.ts). */
+  /** On a PR approved for merge: its fixes that do not block it, its hold when that does not block it, and its code-incomplete claims no fix covers, which are filed as follow-ups (src/core/review-blocking.ts); at least 1 while `filingHead` is an earlier head. */
   followUps: number;
+  /**
+   * The head whose `review_followups` row holds the review's filing: the review's head, or for a carried review the nearest head of its
+   * carry chain (back to the review it came from) that has a row, so a carry neither files again nor skips a retry of that row.
+   */
+  filingHead: string;
   /** The review's head is the PR's head, or leads to it through our own pushes: what it files belongs to the head. */
   leadsToHead: boolean;
   /** The discussion moved on after the review read it, or an operator marked it stale (no daily cap). */

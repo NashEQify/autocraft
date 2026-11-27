@@ -5,7 +5,7 @@
 import { ourPathIn, type OurCommit } from "./ours.ts";
 import type { OpusReview, ReviewFix } from "./opus-parse.ts";
 import { reviewAfterBaseMerge } from "./own-diff.ts";
-import { mergeApprovedIn } from "../core/author-round.ts";
+import { mergeApprovalsIn, mergeApprovedIn } from "../core/author-round.ts";
 import { askedParts, beyondPlanned, premergeSource, type ChainReview } from "../core/evidence.ts";
 import { findingsOf } from "../premerge/store.ts";
 import { notBlocking, stoppingDefects } from "../premerge/types.ts";
@@ -75,9 +75,10 @@ export async function carriedReviews(db: Db, cs: Cand[], stale: Set<string> = ne
   const out = new Map<string, Carried>();
   if (!cs.length) return out;
   const refs = cs.map((c) => ({ repo: c.repo, number: c.number }));
-  const [rows, items, repos, edges, approved] = await db.together(() => Promise.all([
-    loadReviewRows(db, refs), loadItems(db, refs, "pr"), loadRepos(db, { names: [...new Set(cs.map((c) => c.repo))] }), loadPushEdges(db, refs), mergeApprovedIn(db, refs),
+  const [rows, items, repos, edges, approvals] = await db.together(() => Promise.all([
+    loadReviewRows(db, refs), loadItems(db, refs, "pr"), loadRepos(db, { names: [...new Set(cs.map((c) => c.repo))] }), loadPushEdges(db, refs), mergeApprovalsIn(db, refs),
   ]));
+  const approved = new Set(approvals.keys());
   type Pick = { c: Cand; e: ReviewRow; baseRef: string | null; key: string; commits: OurCommit[] };
   const picked: Pick[] = [];
   for (const c of cs) {
@@ -98,16 +99,19 @@ export async function carriedReviews(db: Db, cs: Cand[], stale: Set<string> = ne
   const [texts, facts] = await db.together(() => Promise.all([
     loadReviewTexts(db, picked.map((p) => ({ repo: p.c.repo, number: p.c.number, head: p.e.head }))), loadFixupFacts(db, picked.flatMap((p) => fixupKeys(p.key, p.commits))),
   ]));
-  for (const { c, e, baseRef, key, commits } of picked) {
+  for (const { e, baseRef, key, commits } of picked) {
     const steps = commits.map((x) => carriable(key, x, edges.get(key) ?? [], facts));
     if (steps.some((s) => s === null)) continue;
     const t = texts.get(`${key}@${e.head}`);
     // Our fix-ups made the review's fixes, or the ones a person named; a base merge and a fix-up of the pre-merge review's defects leave them.
-    // On a PR approved for merge the review's fix-up made only its blocking fixes: the others stay, to be filed as follow-ups.
+    // A fix-up started after the merge approval made only the review's blocking fixes: the others stay, to be filed as follow-ups.
+    const approvedAt = approvals.get(key);
+    const startedAt = (x: OurCommit) => (edges.get(key) ?? []).find((p) => p.kind === "fixup" && p.from === x.from && p.to === x.sha)?.at;
     let verdict = e.verdict as "take" | "take-fix", fixes = e.fixes as unknown as ReviewFix[], made = false;
-    for (const s of steps as Step[]) {
+    for (const [i, s] of (steps as Step[]).entries()) {
       if (s.kind === "fix-up") {
-        const left = approved.has(`${c.repo}#${c.number}`) ? fixes.filter(notBlocking) : [];
+        const at = startedAt(commits[i]!);
+        const left = approvedAt !== undefined && at !== undefined && approvedAt <= at ? fixes.filter(notBlocking) : [];
         made ||= verdict === "take-fix";
         fixes = left;
         if (!fixes.length) verdict = "take";

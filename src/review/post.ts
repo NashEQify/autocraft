@@ -90,7 +90,7 @@ async function postsDue(db: Db, repo: string, by: By): Promise<{ due: PostCandid
 function postFollowUps(o: PostSource, f: PrFacts): { fixes: string[]; later: string[]; notFiled: string | null } | null {
   if (!f.workflow?.approved) return null;
   const fu = reviewFollowUps({ verdict: o.sourceVerdict, fixes: o.fixes, hold: o.hold, blockedBy: o.blockedBy }, f.workflow.dropped);
-  const claims = claimFindings(followUpClaims({ ...o, verdict: o.sourceVerdict }), []).map((x) => x.title);
+  const claims = claimFindings(followUpClaims({ ...o, verdict: o.sourceVerdict }, f.review?.verdict === "take" || f.review?.verdict === "take-fix"), []).map((x) => x.title);
   const later = [...fu.fixes.map(partTitle), ...(fu.hold ? [fu.hold] : []), ...claims];
   if (!later.length) return null;
   // The same gate as the filing itself (src/core/decide.ts reviewFollowUpsDue): a refused one says why.

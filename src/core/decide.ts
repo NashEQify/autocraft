@@ -98,9 +98,10 @@ const fixing = (f: PrFacts): boolean => ["fix", "running"].includes(premergeFix(
 /**
  * The latest review of a PR approved for merge has fixes, or a hold, that do not block it (src/core/review-blocking.ts): they are not made, and
  * are filed in its follow-up issue, once per reviewed head. The review's head is the PR's head or leads to it through our own pushes (a
- * fix-up of its blocking fixes, a base merge), so the filing is planned at the PR's head; a stale review is read again first.
+ * fix-up of its blocking fixes, a base merge), so the filing is planned at the PR's head; a stale review is read again first. A carried
+ * review's filing is the row at its `filingHead`: filed there once, and retried there while it sent nothing.
  */
-export const reviewFollowUpsDue = (f: PrFacts): boolean => reviewFollowUpsOwed(f) && !f.followUps?.reviewHeads.includes(f.review!.head) && !f.followUps?.retry?.reviewHeads.includes(f.review!.head);
+export const reviewFollowUpsDue = (f: PrFacts): boolean => reviewFollowUpsOwed(f) && !f.followUps?.reviewHeads.includes(f.review!.filingHead) && !f.followUps?.retry?.reviewHeads.includes(f.review!.filingHead);
 const reviewFollowUpsOwed = (f: PrFacts): boolean => {
   const r = f.review;
   return !!workflowOf(f)?.approved && !!f.head && !!r && r.followUps > 0 && r.leadsToHead && !r.stale;
@@ -118,7 +119,7 @@ const followUpsOwed = (f: PrFacts): boolean => {
 
 /** A filing of either source whose try sent nothing waits for its retry (src/core/rules.ts unsentAsk), and the merge waits with it until the last one. */
 const followUpsRetrying = (f: PrFacts): boolean =>
-  (followUpsOwed(f) && !!f.followUps?.retry?.heads.includes(f.head!)) || (reviewFollowUpsOwed(f) && !!f.followUps?.retry?.reviewHeads.includes(f.review!.head));
+  (followUpsOwed(f) && !!f.followUps?.retry?.heads.includes(f.head!)) || (reviewFollowUpsOwed(f) && !!f.followUps?.retry?.reviewHeads.includes(f.review!.filingHead));
 
 /** The queue entry of a PR that has a take or take-fix review at its head (or merged at the reviewed head), or of a merge-entry PR (no review needed). */
 export function queueEntry(f: PrFacts, merged: boolean, open: boolean): Entry {
@@ -782,7 +783,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // File the follow-ups of a PR approved for merge: the defects of its pre-merge review at the head that do not stop the merge, once per head.
   if (!held && followUpsDue(f)) actions.push(act("followups", f.head, { source: "premerge" }));
   // And the review's fixes and hold that do not block it: of the reviewed head, planned at the PR's head.
-  if (!held && reviewFollowUpsDue(f)) actions.push(act("followups", f.head, { source: "review", reviewHead: f.review!.head }));
+  if (!held && reviewFollowUpsDue(f)) actions.push(act("followups", f.head, { source: "review", reviewHead: f.review!.filingHead }));
 
   // Verify: a take at the head (or a merge entry, which has no review), CI not failing, not verified yet (a stale verification does not count).
   // A PR approved for merge is verified once, at the head it merges (verifyDue).

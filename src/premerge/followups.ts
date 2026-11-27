@@ -73,9 +73,9 @@ export const reviewEntries = (r: Pick<ReviewRow, "verdict" | "fixes" | "workflow
 /**
  * The Opus review's code-incomplete claims that it did not turn into a fix (src/core/review-blocking.ts followUpClaims), worded as the
  * pre-merge review words the same claim, so a gap both reviews raised is listed once. `src`: the review at the head, or the one a carried
- * review came from. These are filed whether or not a pre-merge call ran: a carried pre-merge review reads no claims.
+ * review came from; `goesOn`: the pipeline acts on the review as a take or take-fix. These are filed whether or not a pre-merge call ran: a carried pre-merge review reads no claims.
  */
-const claimEntries = (src: PostSource | null): FollowupEntry[] => (src ? premergeEntries(claimFindings(followUpClaims({ ...src, verdict: src.sourceVerdict }), [])) : []);
+const claimEntries = (src: PostSource | null, goesOn: boolean): FollowupEntry[] => (src ? premergeEntries(claimFindings(followUpClaims({ ...src, verdict: src.sourceVerdict }, goesOn), [])) : []);
 
 /** The follow-ups of one head, numbered: where, what to change or what goes wrong, and why it does not stop the merge. */
 export function followupBody(pr: number, head: string, source: FollowupSource, fs: readonly FollowupEntry[], first: boolean): string {
@@ -115,7 +115,8 @@ export async function runPremergeFollowups(db: Db, params: FollowupsParams, log:
     const pm = source === "premerge" ? await premergeAt(db, repo, number, head) : null;
     const row = rv ?? pm;
     const sources = await postSourcesOf(db, [ref]);
-    const claimsAt = async (h: string) => claimEntries(await sources(repo, number, h));
+    const goesOn = f.review?.verdict === "take" || f.review?.verdict === "take-fix";
+    const claimsAt = async (h: string) => claimEntries(await sources(repo, number, h), goesOn);
     const all = rv ? [...reviewEntries(rv, dropped), ...await claimsAt(rowHead)] : pm ? premergeEntries(findingsOf(pm)) : [];
     if (!all.length) { await skip(`the ${source === "review" ? "review" : "pre-merge review"} at the head has none`); continue; }
     const g = await guard(db, { repo, number }, { kind: "followups", head, source }, by);
