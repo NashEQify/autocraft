@@ -45,4 +45,9 @@ test("one repo whose job keeps failing neither stalls nor pauses a step that suc
   const alone = await seed(failing);
   assert.match((await stalled(alone))[0]?.text ?? "", /on app .*its last 3 runs there failed/);
   assert.match((await pauseOf(alone, "verify", NOW))?.why ?? "", /^failed 3 times in a row/);
+  // Every repo fails at once (a revoked token), an hour after a success on one of them: the step itself is failing.
+  const everywhere = await seed([{ step: "verify", repo: "other", state: "done", h: 1 }, ...["app", "other", "third"].map((repo, i) => ({ step: "verify", repo, state: "failed" as const, h: 0.05 - i * 0.01, error: "bad credentials" }))]);
+  const wide = await stalled(everywhere);
+  assert.deepEqual(wide.map((c) => c.state), ["warn"], "warned at once, though a repo succeeded within the stall limit");
+  assert.doesNotMatch(wide[0]!.text, / on (app|other|third) /, "about the step, not one repo");
 });

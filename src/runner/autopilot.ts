@@ -62,7 +62,7 @@ import { refreshOutsideHolds } from "../outside.ts";
 import { ackDeadlines, addAudit, freshConfig, loadAuditMax, loadLiveConfig, loadStageLimits, loadTrips, readSettingsSnapshot, rereadSettingsSnapshot, resetLimitCounts, saveSettings, setStageLimit, withSettingsSnapshot, limitsSignature } from "../data/control/index.ts";
 import { dropJobCalls } from "./lifecycle.ts";
 import { prLease } from "../prepush/settle.ts";
-import { enqueueJobs, itemFpStep, loadLastJobPerStep, loadDeadlineStops, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, markCancelQueued, pruneItemFps, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut } from "../data/jobs/index.ts";
+import { enqueueJobs, itemFpStep, loadLastJobPerStep, loadDeadlineStops, loadHeldLeaseKeys, loadLaneInputs, loadLaneState, markCancelQueued, pruneItemFps, removeLaneState, saveLaneState, saveLanes, loadLanes, type DeadlineStop, type EndedJob, type LaneInputs, type LaneStatePut, type StreakRow } from "../data/jobs/index.ts";
 import { loadTakerSignature } from "../data/runners/index.ts";
 import { loadItems } from "../data/mirror/index.ts";
 import { loadRefereeFailureTimes } from "../data/triage/index.ts";
@@ -1018,23 +1018,35 @@ export const DEADLINE_BACKOFF_MS = 3600_000;
  * An operator release since the last failure ends it. After a single failure, so does a changed input (`fp` given and
  * different from the one the failed job saw); later failures wait out the backoff, because inputs that change every
  * minute would otherwise retry a failing step at once, every time. Jobs a runner restart ended, and jobs that failed only because a write was paced (it is retried later anyway), do not count.
- * Without `repo` it is the whole step's: each repo (and lane PR) keeps its own streak, and the step waits only while every one of them does,
- * until the first of them may run again; one repo that keeps failing does not hold the others.
+ * Without `repo` it is the whole step's: each repo (and lane PR) keeps its own streak, and the step waits only while every one of them
+ * that is live (its newest job failed, or it ran within STEP_LIVE_MS) does, until the first of them may run again; one repo that keeps
+ * failing does not hold the others.
  */
-export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string; lane?: number | null; exact?: boolean } = {}): Promise<{ until: number; failures: number } | null> {
-  if (o.repo === undefined) {
-    const groups = new Map<string, { repo: string | null; lane: number | null }>();
-    for (const r of (await readsOf(db, ms)).inputs.streaks) if (r.step === step) groups.set(`${r.repo ?? ""}#${r.lane_number ?? ""}`, { repo: r.repo, lane: r.lane_number });
-    let first: { until: number; failures: number } | null = null;
-    for (const g of groups.values()) {
-      const b = await failureBackoff(db, step, ms, { repo: g.repo, lane: g.lane, exact: true });
-      if (!b) return null;
-      if (!first || b.until < first.until) first = b;
-    }
-    return first;
+export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string; lane?: number | null } = {}): Promise<{ until: number; failures: number } | null> {
+  const all = (await readsOf(db, ms)).inputs.streaks.filter((r) => r.step === step);
+  if (o.repo !== undefined) {
+    // The pipeline jobs of the step (of the repo, and the jobs without a lane or one lane PR's, when given).
+    return await streakBackoff(db, step, ms, all.filter((r) => (o.repo === null || r.repo === o.repo) && (o.lane === undefined || r.lane_number === o.lane)), o);
   }
-  // The pipeline jobs of the step (of the repo, and the jobs without a lane or one lane PR's, when given), newest first, back to the first success, at most 12.
-  const rows = (await readsOf(db, ms)).inputs.streaks.filter((r) => r.step === step && ((o.repo === null && !o.exact) || r.repo === o.repo) && (o.lane === undefined || r.lane_number === o.lane)).sort((a, b) => b.id - a.id).slice(0, 12);
+  const groups = new Map<string, StreakRow[]>();
+  for (const r of all) { const k = `${r.repo ?? ""}#${r.lane_number ?? ""}`; (groups.get(k) ?? groups.set(k, []).get(k)!).push(r); }
+  let first: { until: number; failures: number } | null = null;
+  for (const rows of groups.values()) {
+    const newest = rows.reduce((a, b) => (b.id > a.id ? b : a));
+    if (newest.state !== "failed" && ms - Date.parse(newest.ended_at ?? "") > STEP_LIVE_MS) continue;
+    const b = await streakBackoff(db, step, ms, rows, { repo: newest.repo, lane: newest.lane_number });
+    if (!b) return null;
+    if (!first || b.until < first.until) first = b;
+  }
+  return first;
+}
+
+/** How recently a repo's job of a step must have run for a success there to keep the whole step out of its failure backoff. */
+const STEP_LIVE_MS = 3600_000;
+
+/** The backoff of one streak: `rows` are its jobs, any order (newest first, back to the first success, at most 12, are read). */
+async function streakBackoff(db: Db, step: string, ms: number, streak: readonly StreakRow[], o: { repo?: string | null; fp?: string; lane?: number | null }): Promise<{ until: number; failures: number } | null> {
+  const rows = [...streak].sort((a, b) => b.id - a.id).slice(0, 12);
   let failures = 0;
   while (failures < rows.length && rows[failures]!.state === "failed") failures++;
   if (!failures || !rows[0]!.ended_at) return null;
