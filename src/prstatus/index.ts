@@ -158,16 +158,17 @@ const isWorkflowText = (line: string | null | undefined): boolean => !!line?.inc
 export const WAIT_FLIP_MS = 60 * 60_000;
 
 /**
- * Whether two comment texts differ only in their head line flipping between "Running: <step>" and "Waiting for a Task Runner" (or
- * "Waiting for <login>'s Task Runner (<why>)", which comments already on GitHub may carry): a step that waits for a Task Runner is claimable for a moment each time the runner reports, which flips the line without
- * any change an editor of the comment needs to see.
+ * Whether two comment texts differ only in their head line flipping between "Running: <step>" and "Waiting for a Task Runner": a
+ * step that waits for a Task Runner is claimable for a moment each time the runner reports, which flips the line without any change
+ * an editor of the comment needs to see. A head line that names a person's Task Runner, which comments already on GitHub may carry,
+ * is never such a flip, so the next edit takes the name out.
  */
 export function onlyWaitFlip(prev: string, line: string): boolean {
   const split = (s: string): [string, string] => { const i = s.indexOf("\n\n"); return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i)]; };
   const [a, rest] = split(prev), [b, rest2] = split(line);
   const running = (h: string) => h.startsWith("**Running: ");
-  const waiting = (h: string) => /^\*\*Waiting for (?:a Task Runner|.+'s Task Runner \(.+\))\*\*$/.test(h);
-  return rest === rest2 && a !== b && ((running(a) && waiting(b)) || (waiting(a) && running(b)) || (waiting(a) && waiting(b)));
+  const waiting = (h: string) => h === `**${t("Waiting for a Task Runner")}**`;
+  return rest === rest2 && a !== b && ((running(a) && waiting(b)) || (waiting(a) && running(b)));
 }
 
 const parseSteps = (s: string): HistoryStep[] => {

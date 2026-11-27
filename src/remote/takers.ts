@@ -9,6 +9,7 @@
 // keep their own rules (calls.ts awaitCall, picks). A call bound to a user (a maintainer's conversation turn) has a taker only
 // in that user's runners.
 import { NO_TAKER_PREFIX } from "./calls.ts";
+import { t, tk } from "../i18n/index.ts";
 import { orderedOf } from "./cands.ts";
 import { pickCounts } from "./picks-rules.ts";
 import { heldForOwner, startedOf } from "./started.ts";
@@ -94,17 +95,19 @@ export function waitingOnIn(v: RemoteView, c: TakerCall): RunnerWait[] {
   });
 }
 
-const HOLD_TEXT: Record<RunnerHold, string> = { offline: "offline", "usage-limit": "usage limit", "cooling-off": "cooling off", "not-ready": "not ready" };
+const HOLD_TEXT: Record<RunnerHold, string> = { offline: tk("offline"), "usage-limit": tk("usage limit"), "cooling-off": tk("cooling off"), "not-ready": tk("not ready") };
 const hhmm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
 
 /**
- * The line of work that waits for one person's Task Runner (waitingOnIn, or loginWaitIn's renewal). `shown`: the reader may see
- * whose runner it is and why it cannot claim (operators and maintainers); others read only that it waits for a Task Runner.
+ * The line of work that waits for one person's Task Runner (waitingOnIn, or loginWaitIn's renewal), in the words of the item's state
+ * line (src/workflow/waits.ts). `shown`: the reader may see whose runner it is and why it cannot claim (operators and maintainers);
+ * others read only that it waits for a Task Runner.
  */
 export function runnerWaitText(w: RunnerWait | { login: string; renewsAt: number }, shown: boolean): string {
-  if (!shown) return "Waiting for a Task Runner";
-  const why = "renewsAt" in w ? `login renews at ${hhmm(w.renewsAt)} UTC` : `${HOLD_TEXT[w.hold]}${w.until !== null ? ` until ${hhmm(w.until)} UTC` : ""}`;
-  return `Waiting for ${w.login}'s Task Runner (${why})`;
+  if (!shown) return t("Waiting for a Task Runner");
+  if ("renewsAt" in w) return t("Waiting for {login}'s Task Runner (login renews at {time} UTC)", { login: w.login, time: hhmm(w.renewsAt) });
+  const why = w.until !== null ? t("{hold} until {time} UTC", { hold: t(HOLD_TEXT[w.hold]), time: hhmm(w.until) }) : t(HOLD_TEXT[w.hold]);
+  return t("Waiting for {login}'s Task Runner ({why})", { login: w.login, why });
 }
 
 /**

@@ -8,7 +8,8 @@
 import { freshConfig, saveSettings } from "../data/control/index.ts";
 import { loadLiveJobs } from "../data/jobs/index.ts";
 import { taskOfStep, TASK_CHOICES } from "../remote/my-tasks.ts";
-import { takerTest } from "../remote/takers.ts";
+import { takerTest, takerTestIn, type TakerCall } from "../remote/takers.ts";
+import type { RemoteView } from "../remote/view.ts";
 import { approvedLane, knownStep, modelsOf, perItemLane, usesClaude, type Params, type StepDef } from "./steps.ts";
 import { filterSeq, someSeq } from "../async-seq.ts";
 import type { ItemRef } from "../../web/src/api/types.ts";
@@ -89,8 +90,10 @@ export const noRunnerForItems = (_repo: string, step: string, refs: readonly Ite
  * them, someone's started work elsewhere in the repo makes their runner a taker for the whole repo, although a call about an item
  * nobody started never reaches it and is withdrawn.
  */
-export async function untakenTest(db: Db, steps?: Map<string, StepDef>, nowMs: number = Date.now()): Promise<UntakenTest> {
-  const takes = takerTest(db, nowMs);
+export async function untakenTest(db: Db, steps?: Map<string, StepDef>, nowMs: number = Date.now(), view?: RemoteView): Promise<UntakenTest> {
+  // `view`: a reading of the runners the caller already made, used instead of reading them again.
+  const within = view ? takerTestIn(view) : null;
+  const takes = within ? async (c: TakerCall): Promise<boolean> => within(c) : takerTest(db, nowMs);
   const load = (): Promise<unknown> => takes({ prompt_id: "", repos: [] });
   const claude = (j: JobOfRepo): boolean => {
     let params: Params = {};
