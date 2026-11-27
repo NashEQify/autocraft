@@ -1,14 +1,15 @@
 // Which jobs may run together: one queued or running job per (step, repo), at most `step_parallel` repos per step,
 // and the named mutexes of StepDef.exclusive. The planner, the command-line gate and the runner use the same rules.
 // A queued job that no Task Runner may take (untakenTest) holds no repo of the step.
-// Approved lane (hasApprovedLane): each PR a person started or approved for merge (ownLane in src/core/select.ts) gets a job of its
-// own, `{ repo, number, lane: "approved" }`, beside the repo's regular job, which leaves those PRs alone. One live job per (step, repo,
-// number); such jobs neither count toward step_parallel nor wait for it, so a person's PR never waits for another PR's job.
+// Per-item steps (hasApprovedLane): each due PR gets a job of its own, `{ repo, number, lane: "approved" }` for a PR a person started
+// or approved for merge (ownLane in src/core/select.ts) and `{ repo, number, lane: "item" }` for the others. One live job per (step, repo,
+// number); such jobs neither count toward step_parallel nor wait for it, so no PR waits for another PR's job. A job of the step
+// without a lane (a command-line run) works the repo's PRs nobody started: it does the same work as their item jobs.
 import { freshConfig, saveSettings } from "../data/control/index.ts";
 import { loadLiveJobs } from "../data/jobs/index.ts";
 import { taskOfStep, TASK_CHOICES } from "../remote/my-tasks.ts";
 import { takerTest } from "../remote/takers.ts";
-import { approvedLane, knownStep, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
+import { approvedLane, knownStep, modelsOf, perItemLane, usesClaude, type Params, type StepDef } from "./steps.ts";
 import { filterSeq, someSeq } from "../async-seq.ts";
 import type { ItemRef } from "../../web/src/api/types.ts";
 import type { Db } from "../db/index.ts";
@@ -41,12 +42,14 @@ export async function setStepParallel(db: Db, input: unknown, by: string): Promi
 }
 
 /**
- * A job that holds or waits for its (step, repo). `number` is the finding of a security-fix job or the PR of an approved-lane job;
- * `params` (JSON) is read for jobs in the table; `approved` marks a proposal of the approved lane (a job in the table says so in `params`).
+ * A job that holds or waits for its (step, repo). `number` is the finding of a security-fix job or the PR of a per-item job;
+ * `params` (JSON) is read for jobs in the table; `approved` and `perItem` mark a proposal of the approved lane and of either per-item
+ * lane (a job in the table says so in `params`).
  */
-export type Active = { id: number; step: string; state: string; repo: string | null; number: number | null; params?: string; approved?: boolean };
+export type Active = { id: number; step: string; state: string; repo: string | null; number: number | null; params?: string; approved?: boolean; perItem?: boolean };
 
 const isApproved = (j: { approved?: boolean; params?: string }): boolean => j.approved ?? approvedLane(j.params);
+const isPerItem = (j: { perItem?: boolean; params?: string }): boolean => j.perItem ?? perItemLane(j.params);
 
 export async function activeJobs(db: Db, states: ("queued" | "running")[] = ["queued", "running"]): Promise<Active[]> {
   return (await loadLiveJobs(db)).filter((j) => (states as string[]).includes(j.state)).map((j) => ({ id: j.id, step: j.step, state: j.state, repo: j.repo, number: j.number, params: j.params }));
@@ -105,27 +108,29 @@ export async function untakenTest(db: Db, steps?: Map<string, StepDef>, nowMs: n
   return Object.assign(test, { load });
 }
 
-type Work = { repo: string | null; number: number | null; approved: boolean };
+type Work = { repo: string | null; number: number | null; approved: boolean; perItem: boolean };
 
 /**
- * Two jobs of one step do the same work: one of them is not about a single repo, or the same repo and the same finding (security-fix),
- * both regular, or both approved for the same PR.
+ * Two jobs of one step do the same work: one of them is not about a single repo; or the same repo and: the same finding (security-fix),
+ * two per-item jobs of the same PR, an item job and a job of the repo without a lane, or two jobs without a lane.
  */
 function sameWork(step: string, a: Work, b: Work): boolean {
   if (a.repo === null || b.repo === null) return true;
   if (a.repo !== b.repo) return false;
   if (step === "security-fix") return a.number === b.number;
-  return a.approved === b.approved && (!a.approved || a.number === b.number);
+  if (a.perItem && b.perItem) return a.number === b.number;
+  if (a.perItem || b.perItem) return !(a.perItem ? a : b).approved;
+  return true;
 }
 
-/** `approved`: a job of the approved lane, for the PR `number`. */
-export type Want = { step: string; repo: string | null; number?: number | null; approved?: boolean };
+/** `perItem`: a job of a per-item lane, for the PR `number`; `approved`: of the approved lane. */
+export type Want = { step: string; repo: string | null; number?: number | null; approved?: boolean; perItem?: boolean };
 
 /** The Want of a job of `step` with these params. */
 export const wantOf = (step: string, params: Params | string): Want => {
   let p: Params = {};
   if (typeof params === "string") { try { p = JSON.parse(params) as Params; } catch { /* no params */ } } else p = params;
-  return { step, repo: typeof p.repo === "string" ? p.repo : null, number: typeof p.number === "number" ? p.number : null, approved: approvedLane(p) };
+  return { step, repo: typeof p.repo === "string" ? p.repo : null, number: typeof p.number === "number" ? p.number : null, approved: approvedLane(p), perItem: perItemLane(p) };
 };
 
 /**
@@ -141,14 +146,14 @@ export async function jobBlock(db: Db, steps: Map<string, StepDef>, want: Want, 
   const held = [...await jobsIn(o.states), ...(o.reserved ?? [])].filter((j) => j.step === want.step);
   const same = [...held, ...(o.extra ?? []).filter((j) => j.step === want.step)];
   if (!o.precheck) {
-    const w: Work = { repo: want.repo, number: want.number ?? null, approved: !!want.approved };
-    const clash = same.find((j) => sameWork(want.step, { repo: j.repo, number: j.number, approved: isApproved(j) }, w));
+    const w: Work = { repo: want.repo, number: want.number ?? null, approved: !!want.approved, perItem: !!want.perItem };
+    const clash = same.find((j) => sameWork(want.step, { repo: j.repo, number: j.number, approved: isApproved(j), perItem: isPerItem(j) }, w));
     if (clash) return `job ${clash.id} of ${want.step} is ${clash.state}`;
   }
-  const cap = want.approved ? Infinity : o.cap ?? await stepParallel(db);
+  const cap = want.perItem ? Infinity : o.cap ?? await stepParallel(db);
   if (cap !== Infinity) {
     let untaken = o.untaken;
-    const holds = async (j: Active): Promise<boolean> => !isApproved(j) && (j.state !== "queued" || j.params === undefined || !await (untaken ??= await untakenTest(db, steps))(j));
+    const holds = async (j: Active): Promise<boolean> => !isPerItem(j) && (j.state !== "queued" || j.params === undefined || !await (untaken ??= await untakenTest(db, steps))(j));
     const repos = new Set((await filterSeq(held, holds)).map((j) => j.repo ?? ""));
     if (repos.size >= cap && (o.precheck || !repos.has(want.repo ?? ""))) return `${want.step} is working ${repos.size} repo${repos.size === 1 ? "" : "s"}, the most at once (step_parallel)`;
   }

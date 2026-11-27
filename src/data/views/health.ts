@@ -29,6 +29,8 @@ export type HealthFacts = {
   heartbeat: string | null;
   /** A part of the runner's work fails since then (src/runner/runner.ts TickFailure). */
   tickFailure: { since: string; state: "warn" | "fail"; error: string } | null;
+  /** The runner's job cap and its parts as JSON (src/runner/capacity.ts JobCapacity), as it stored them last. */
+  jobCapacity: string | null;
   /** Live workflows whose check keeps failing (src/workflow/advance.ts), as the runner stored them last. */
   workflowFailures: jobs.WorkflowFailure[];
   leaders: LeaderFacts[];
@@ -111,7 +113,7 @@ export async function loadHealthFacts(db: Db, nowMs: number, o: HealthOptions): 
   const unbound = syncState.author_ids_error ? new Set((await mirror.loadUnboundLoginPrs(db)).map((r) => r.login)).size : 0;
   const ackAt = ack?.at ?? null;
   return {
-    heartbeat: lanes.get("mark|heartbeat|")?.value ?? null, tickFailure: failureOf(lanes.get("mark|tick_failure|")?.value), workflowFailures: jobs.workflowFailuresOf(lanes.get(`mark|${jobs.WORKFLOW_FAILURES_MARK}|`)?.value),
+    heartbeat: lanes.get("mark|heartbeat|")?.value ?? null, tickFailure: failureOf(lanes.get("mark|tick_failure|")?.value), jobCapacity: lanes.get("mark|job_capacity|")?.value ?? null, workflowFailures: jobs.workflowFailuresOf(lanes.get(`mark|${jobs.WORKFLOW_FAILURES_MARK}|`)?.value),
     leaders, endpoint, envs: envs as HealthEnv[],
     queued: { all: queuedAll, withoutPrivate: queuedPublic }, confidentialReadyAt, privateQueued, envWaits,
     syncRuns, syncState, tracked, repoErrors, deadlines, stepRuns, liveness,

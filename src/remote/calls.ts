@@ -2,7 +2,7 @@
 // heartbeats while it runs and submits the reply. The rows and their writers live in the runners module
 // (src/data/runners); this file holds the rules: the claim order, eligibility, the lease routes' checks and the caller's poll.
 import type { ItemRef } from "../../web/src/api/types.ts";
-import { allocation, callQueue, NoTakerError, stepOf, throwIfHalted, WaitLimitError } from "../agents/call.ts";
+import { allocation, callQueue, NoTakerError, stepOf, throwIfHalted, unitCalled, WaitLimitError } from "../agents/call.ts";
 import { packPrompt } from "../agents/runs.ts";
 import { scrubError } from "../agents/text.ts";
 import type { Usage } from "../classify/run.ts";
@@ -108,7 +108,9 @@ export type NewCall = {
  */
 export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()): Promise<number> {
   const s = stepOf(c.promptId), q = callQueue(c.promptId);
-  return await runners.enqueueCall(db, { ...c, job: { jobId: s.jobId, step: s.step, stage: s.stage, cls: q.cls, repo: q.repo } }, nowMs);
+  const id = await runners.enqueueCall(db, { ...c, job: { jobId: s.jobId, step: s.step, stage: s.stage, cls: q.cls, repo: q.repo } }, nowMs);
+  unitCalled();
+  return id;
 }
 
 /** Ends a call that is in one of `states` as failed; true when it did. A leased call's agent run fails with it. */

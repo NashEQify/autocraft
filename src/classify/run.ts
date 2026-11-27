@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { loadLiveConfig } from "../data/control/index.ts";
 import { askJevCloudflare, jevCloudflareConfig } from "../agents/jev-cloudflare.ts";
 import { JEV_UNREADABLE_SUMMARY, jevAvailable, jevEnv, jevFailure, markJevUnavailable, markJevUnreadable, markJevWorking, jevStatus } from "../agents/jev.ts";
-import { allocation, itemRepos, NoTakerError, poolRoom, repoBatches, type PoolRoom, startJevRun, isHalt } from "../agents/call.ts";
+import { allocation, itemRepos, NoTakerError, poolRoom, repoBatches, runAsUnit, type PoolRoom, type PoolUnit, startJevRun, isHalt } from "../agents/call.ts";
 import { type KeptSession, type SessionAsk } from "../prepush/resume.ts";
 import { finishRun } from "../agents/runs.ts";
 import { fixTurnMessage, mergeFixFields, needsFixTurn, type Lint, type LintProblem } from "../replylint.ts";
@@ -109,9 +109,10 @@ export type PoolOptions = {
  * account is enabled.
  *
  * A PoolRoom (poolRoom: the model queue's room for each job's repos) starts the first job in order that has room, so a job
- * whose repos have no room does not hold back later ones. It asks again when a job ends or the room may have changed
+ * whose repos have no room does not hold back later ones. It reads the room when a job ends or the room may have changed
  * (PoolRoom.changed), so a pool whose calls wait long for a Task Runner reads the room only when the queue or the Task Runners
- * change. When none has room and none runs, the first job whose repos have a
+ * change. A reading does not yet count the calls of jobs still preparing theirs (running, no call queued: PoolUnit), and the
+ * jobs started after it: both are taken off it, so a room of N starts N jobs. When none has room and none runs, the first job whose repos have a
  * Task Runner that may take them starts regardless; jobs no Task Runner may take never start, and once only they are left the
  * pool ends without them (a later pass picks them again). With `first`, the first job that has such a Task Runner runs alone first.
  * A job whose model call was withdrawn because no Task Runner could take it (NoTakerError) is skipped the same way; the others go on.
@@ -124,9 +125,14 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
   // Indices of the jobs not started yet, in order; a PoolRoom may start them out of order.
   const pending = jobs.map((_, i) => i);
   let failed: { e: unknown } | null = null;
+  // The running jobs' units, and the room the last reading left: its value minus the jobs started or preparing since.
+  const units = new Set<PoolUnit>();
+  let fresh = true, used = 0;
   const launch = (i: number): Promise<void> => {
     pending.splice(pending.indexOf(i), 1);
-    const p: Promise<void> = jobs[i]!().then((r) => void (results[i] = r), (e) => void (e instanceof NoTakerError ? opts.skipped?.(i) : (failed ??= { e }))).finally(() => running.delete(p));
+    const u: PoolUnit = { called: false };
+    units.add(u);
+    const p: Promise<void> = runAsUnit(u, jobs[i]!).then((r) => void (results[i] = r), (e) => void (e instanceof NoTakerError ? opts.skipped?.(i) : (failed ??= { e }))).finally(() => { running.delete(p); units.delete(u); });
     running.add(p);
     return p;
   };
@@ -141,12 +147,17 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
   while (pending.length && !failed) {
     const free = (opts.max ?? Infinity) - running.size;
     if (typeof width === "object") {
-      width.round();
-      const i = free > 0 ? await findSeq(pending, async (x) => await width.room(x) > 0) : undefined;
-      if (i !== undefined) { launch(i); continue; }
+      if (fresh) {
+        width.round();
+        fresh = false;
+        used = [...units].filter((u) => !u.called).length;
+      }
+      const i = free > 0 ? await findSeq(pending, async (x) => await width.room(x) - used > 0) : undefined;
+      if (i !== undefined) { used++; launch(i); continue; }
       if (!running.size) {
         const any = await findSeq(pending, takenBy);
         if (any === undefined) break;
+        used++;
         launch(any);
         continue;
       }
@@ -165,6 +176,7 @@ export async function pool<T>(jobs: (() => Promise<T>)[], width: number | ((next
         await Promise.race(!full ? [...running, roomy.changed(opts.pollMs ?? allocation.pollMs, stop.signal)] : [...running]);
       } finally {
         stop.abort();
+        fresh = true;
       }
     } else await Promise.race([...running, new Promise((r) => setTimeout(r, opts.pollMs ?? POOL_POLL_MS))]);
   }

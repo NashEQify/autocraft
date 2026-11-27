@@ -31,7 +31,7 @@ import { advanceSecurityFixes, autoFixConfirmed, loadSecurityFixWork } from "../
 import { advanceScanTests, loadScanTestWork } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
 import { buildDiffFacts } from "../review/diff.ts";
-import { approvedLane, loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
+import { laneOf, loadSteps, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
 import { jobBlock, STEP_PARALLEL_KEY, wantOf } from "./concurrency.ts";
 import { queueRoomPass } from "../agents/call.ts";
 import { TRY_STEP } from "../build/workspace-session.ts";
@@ -41,7 +41,8 @@ import { JOB_DEADLINE_ENV, RUNNER_FAILING_MS, stepDeadlineMin, stepNoProgressMin
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
 import { REMOTE_WAIT_CAP_MS } from "../remote/calls.ts";
-import { CALLER_STALE_MS, roomState } from "../remote/room.ts";
+import { CALLER_STALE_MS, roomState, type RoomState } from "../remote/room.ts";
+import { CAPACITY_EVERY_MS, capacityText, readJobCapacity, type JobCapacity } from "./capacity.ts";
 import { claimJob, failQueued, loadLiveJobs, loadRunnerTick, markDeadlineStops, saveLaneState, setPids, type LogCursor, type QueuedJob, type RunningState } from "../data/jobs/index.ts";
 import { loadSyncState, hasSyncRequests } from "../data/mirror/index.ts";
 import { hasCommandWork, linkWorkflows } from "../data/workflow/index.ts";
@@ -66,15 +67,22 @@ export const WEBHOOK_DRAIN_MS = 5_000;
 export const RECONCILE_CHECK_MS = 5 * 60_000;
 const CLI = fileURLToPath(new URL("../cli.ts", import.meta.url));
 
-/** Job processes at once. A job that calls Claude also waits for a free account slot (see startJobs). */
+/**
+ * The most job processes at once (the ceiling of the capacity-based cap, src/runner/capacity.ts): the database connection budget
+ * of src/db/postgres.ts. A job that calls Claude also waits for room in the model queue (see startJobs).
+ */
 export const DEFAULT_MAX_JOBS = 32;
+/** The job capacity mark: the cap startJobs keeps and where it comes from (JSON JobCapacity). */
+export const JOB_CAPACITY_MARK = "job_capacity";
+/** A Claude job started this recently that has no call queued or leased yet is still preparing its call: it takes room the queue does not show yet. */
+const PREPARING_MS = 90_000;
 
 export type RunnerOptions = {
   db: Db;
   /** Database the children and worker threads open (a SQLite path or a postgres:// URL); default `dbTarget()`. */
   dbTarget?: string;
   logs?: string;
-  /** Most job processes running at once. */
+  /** Most job processes running at once: the ceiling of the capacity-based cap. */
   maxJobs?: number;
   /** Time a job gets to stop after SIGTERM before SIGKILL. */
   killAfterMs?: number;
@@ -153,6 +161,9 @@ export class Runner {
   private storedFailure: string | undefined;
   /** Jobs were queued at the last look: the next tick reads the model queue's room with the rest. */
   private jobsWaited = false;
+  /** The job cap startJobs keeps (src/runner/capacity.ts), when it was read, and the text last stored in the mark. */
+  private capacity: { at: number; c: JobCapacity } | null = null;
+  private storedCapacity = "";
   /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
   private preapprovalMark: { sig: string; wakeAt: number } | null = null;
   /** The workflows whose check failed when it last ran, kept between the passes of advanceWorkflows. */
@@ -634,14 +645,23 @@ export class Runner {
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
     // Room by class, then by the job's step and repo ("" for a job without one): a runner counts only for the tasks it takes.
     const room = new Map<number, Map<string, number>>();
-    const pass = await queueRoomPass(this.db, undefined, state);
-    let started = 0;
+    const st = state ?? await roomState(this.db);
+    const pass = await queueRoomPass(this.db, undefined, st);
+    const maxJobs = await this.jobCap(st);
+    // Claude jobs still preparing their call take room the queue does not count yet, as this pass's starts do.
+    const nowMs = Date.now();
+    const calling = new Map(tick.running.map((r) => [r.id, r.queued || r.lastLeaseAt !== null]));
+    let started = running.filter((j) => {
+      const r = this.running.get(j.id), step = steps.get(j.step);
+      if (!r || calling.get(j.id) !== false || nowMs - r.startedAt > PREPARING_MS || !step) return false;
+      try { return usesClaude(modelsOf(step, JSON.parse(j.params) as Params)); } catch { return false; }
+    }).length;
     const pids: Promise<unknown>[] = [];
     const failed: { id: number; error: string }[] = [];
     try {
       for (const q of queued) {
         if (draining || (q.requested_by === AUTOPILOT_USER && !on)) continue;
-        if (this.running.size >= this.o.maxJobs) return;
+        if (this.running.size >= maxJobs) return;
         const step = steps.get(q.step);
         if (!step) {
           failed.push({ id: q.id, error: "This step does not exist in this build." });
@@ -686,6 +706,31 @@ export class Runner {
     }
   }
 
+  /**
+   * The most job processes now: the capacity of the Task Runners and build environments (src/runner/capacity.ts), read at most every
+   * CAPACITY_EVERY_MS, within the ceiling `maxJobs`. A change is stored as the job capacity mark (the runner health check shows it) and logged.
+   */
+  private async jobCap(st: RoomState): Promise<number> {
+    const nowMs = Date.now();
+    if (this.capacity && nowMs - this.capacity.at < CAPACITY_EVERY_MS) return this.capacity.c.max;
+    try {
+      const c = await readJobCapacity(this.db, st, this.o.maxJobs, nowMs);
+      this.capacity = { at: nowMs, c };
+      this.passed("job capacity");
+      const value = JSON.stringify(c);
+      if (value !== this.storedCapacity) {
+        await saveLaneState(this.db, [{ kind: "mark", step: JOB_CAPACITY_MARK, value }]);
+        if (this.storedCapacity === "" || this.capacity.c.max !== (JSON.parse(this.storedCapacity) as JobCapacity).max) this.o.log(`runner: ${capacityText(c)}`);
+        this.storedCapacity = value;
+      }
+    } catch (e) {
+      this.fault("job capacity", e);
+      // Without a reading, the last one, or the ceiling before any.
+      this.capacity = { at: nowMs, c: this.capacity?.c ?? { max: this.o.maxJobs, inference: 0, pods: 0, other: 0, floor: 0, ceiling: this.o.maxJobs } };
+    }
+    return this.capacity.c.max;
+  }
+
   /** The job's claim, then its process; null when another job holds the step or the claim failed. */
   private async start(q: QueuedJob, step: StepDef, steps: Map<string, StepDef>, cap: number, cursor: LogCursor | undefined): Promise<{ pid: number | null } | null> {
     const id = q.id, stepName = step.name;
@@ -694,7 +739,7 @@ export class Runner {
     const deadlineMin = this.maxMin(stepName, q.limit ?? undefined);
     const mutexSteps = step.exclusive ? [...steps.values()].filter((x) => x.exclusive === step.exclusive).map((x) => x.name) : [];
     // One guarded statement: a command-line run cannot take the step in between.
-    const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), approved: approvedLane(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
+    const claimed = await claimJob(this.db, { id, step: stepName, repo: q.repo, number: numberOfParams(q.params), lane: laneOf(q.params), cap: cap === Infinity ? null : cap, mutexSteps, logPath });
     if (!claimed) return null;
     const fd = openSync(logPath, "a");
     let child: ChildProcess;

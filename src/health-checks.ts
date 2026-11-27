@@ -15,6 +15,7 @@ import { envVar } from "./env.ts";
 import type { Db } from "./db/index.ts";
 import { BEAT_MS } from "./db/leader.ts";
 import { RUNNER_FAILING_MS } from "./runner/deadlines.ts";
+import { capacityOf, capacityText } from "./runner/capacity.ts";
 import { STATUS_FRESH_MS } from "./data/runners/index.ts";
 import { loadHealthFacts, loadTakerRows, type HealthEnv, type HealthFacts, type TakerRow } from "./data/views/health.ts";
 
@@ -85,7 +86,11 @@ async function runnerCheck({ nowMs, f }: CheckCtx): Promise<Check[]> {
   const beat = hb ? Date.parse(hb) : NaN;
   if (!Number.isNaN(beat) && nowMs - beat <= THRESHOLDS.runnerStaleMs) {
     const t = f.tickFailure;
-    if (!t || nowMs - Date.parse(t.since) < THRESHOLDS.runnerFailingMs) return [ok("runner", "/pipeline")];
+    if (!t || nowMs - Date.parse(t.since) < THRESHOLDS.runnerFailingMs) {
+      // An ok runner says how many jobs it runs at once and why (count: the cap).
+      const cap = capacityOf(f.jobCapacity);
+      return [ok("runner", "/pipeline", cap ? { text: capacityText(cap), count: cap.max } : {})];
+    }
     const brief = "A part of the runner's work has been failing";
     return [{ id: "runner", state: t.state, text: `${brief} for ${minutes(nowMs - Date.parse(t.since))}: ${t.error}`, brief, since: t.since, to: "/pipeline" }];
   }

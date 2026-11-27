@@ -32,18 +32,19 @@ export type Params = Record<string, string | number>;
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
 /**
- * The `lane` of a job of a per-repo step that works one PR a person started or approved for merge (core/select.ts ownLane): such a
- * job works only that PR, and a job without it only the others, so a person's work never waits behind the repo's other work
- * (src/runner/concurrency.ts).
+ * The `lane` of a job of a per-item step (Review, Pre-merge review, Fix-up, Fix) that works one PR (`number`): `approved` for a PR a
+ * person started or approved for merge (core/select.ts ownLane), `item` for a PR nobody started. A job without a lane works every PR
+ * of the repo nobody started (a command-line run). One live job per (step, PR), so no PR waits behind another (src/runner/concurrency.ts).
  */
 export const APPROVED_LANE = "approved";
-const LANE_PARAM: ParamDef = { name: "lane", label: "Lane", kind: "enum", options: [APPROVED_LANE], help: "approved: only pull requests a person started or approved for merge; empty: only the others" };
+export const ITEM_LANE = "item";
+const LANE_PARAM: ParamDef = { name: "lane", label: "Lane", kind: "enum", options: [APPROVED_LANE, ITEM_LANE], help: "approved: the pull request (number), which a person started or approved for merge; item: the pull request, which nobody started; empty: every pull request nobody started" };
 const PR_PARAM: ParamDef = { name: "number", label: "Pull request", kind: "int", min: 1, max: 1_000_000_000, help: "only this pull request" };
 
-/** The `number` param of a job of an approved-lane step: the one PR it works. */
+/** The `number` param of a job of a per-item step: the one PR it works. */
 const onlyPr = (params: Params): { number?: number } => (typeof params.number === "number" ? { number: params.number } : {});
 
-/** The step has an approved lane (Review, Pre-merge review, Fix-up, Fix): each PR a person started or approved (core/select.ts ownLane) gets a job of its own, `{ repo, number, lane: "approved" }`. */
+/** The step runs one job per PR (Review, Pre-merge review, Fix-up, Fix): `{ repo, number, lane: "approved" }` for a PR a person started or approved (core/select.ts ownLane), `{ repo, number, lane: "item" }` for the others. */
 export const hasApprovedLane = (step: StepDef | undefined): boolean => !!step?.params.some((p) => p.name === LANE_PARAM.name);
 
 /** True for a job (its params, as an object or the stored JSON) of the approved lane. */
@@ -53,6 +54,21 @@ export function approvedLane(params: Params | string | null | undefined): boolea
   }
   return params?.lane === APPROVED_LANE;
 }
+
+/** The `lane` param of a job (its params, as an object or the stored JSON), null without one. */
+export function laneOf(params: Params | string | null | undefined): string | null {
+  let lane: unknown;
+  if (typeof params === "string") {
+    try { lane = (JSON.parse(params) as Params).lane; } catch { return null; }
+  } else lane = params?.lane;
+  return typeof lane === "string" && lane !== "" ? lane : null;
+}
+
+/** True for a job of either per-item lane (approved or item): it works the one PR its `number` names. */
+export const perItemLane = (params: Params | string | null | undefined): boolean => {
+  const lane = laneOf(params);
+  return lane === APPROVED_LANE || lane === ITEM_LANE;
+};
 
 export type StepContext = {
   db: Db;

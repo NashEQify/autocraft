@@ -15,7 +15,9 @@ import { enqueue, JobError, listJobs, requestCancel } from "./jobs.ts";
 import { MIN_INTERVAL_KEY, reviewMinInterval, setReviewMinInterval } from "../review/gate.ts";
 import { PICK_MINUTES_KEY, pickMinutes, setPickMinutes } from "../remote/picks.ts";
 import { ParallelError, setStepParallel, stepParallelSetting } from "./concurrency.ts";
-import { DEFAULT_MAX_JOBS, Runner, runnerLockPath } from "./runner.ts";
+import { DEFAULT_MAX_JOBS, JOB_CAPACITY_MARK, Runner, runnerLockPath } from "./runner.ts";
+import { capacityOf, capacityText } from "./capacity.ts";
+import { loadLaneState } from "../data/jobs/index.ts";
 import { loadSteps } from "./steps.ts";
 import { dropPlanChanges } from "../db/sqlite-backfill.ts";
 import { dbReady, startHealthServer } from "../health.ts";
@@ -367,6 +369,8 @@ async function pipeline(args: string[]): Promise<void> {
   } else if (sub !== "status") die(PIPELINE_USAGE);
   const s = await pipelineState(db);
   console.log(`pipeline ${s.enabled ? "ON" : s.draining ? "DRAINING" : "OFF"}${s.changedAt ? ` (set by ${s.changedBy} at ${s.changedAt.slice(0, 16)})` : ""}`);
+  const cap = capacityOf((await loadLaneState(db, ["mark"])).get(`mark|${JOB_CAPACITY_MARK}|`)?.value);
+  if (cap) console.log(capacityText(cap));
   for (const l of s.limits) {
     console.log(`${l.step.padEnd(14)} ${String(l.usedToday).padStart(5)} / ${l.perDay === null ? "no limit" : l.perDay}${l.pausedReason ? `  ${l.pausedReason}` : ""}`);
     for (const t of l.trips ?? []) console.log(`${"".padEnd(14)} tripped ${t.repo ? `in ${t.repo}` : "on every repo"}: ${t.reason} (resume ${t.key})`);

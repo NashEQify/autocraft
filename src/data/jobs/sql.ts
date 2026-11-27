@@ -23,3 +23,6 @@ export const numberOf = (db: Db, col = "params") => kx.jsonNum(db, col, "$.numbe
 
 /** The job is of the approved lane: its params say `lane: "approved"` (src/runner/steps.ts APPROVED_LANE). */
 export const approvedOf = (db: Db, eb: AnyEb, col = "params") => eb(eb.fn.coalesce(kx.jsonText(db, col, "$.lane"), eb.val("")), "=", "approved");
+
+/** The job is of a per-item lane, one PR each: its params say `lane: "approved"` or `lane: "item"` (src/runner/steps.ts). */
+export const perItemOf = (db: Db, eb: AnyEb, col = "params") => eb(eb.fn.coalesce(kx.jsonText(db, col, "$.lane"), eb.val("")), "in", ["approved", "item"]);

@@ -50,9 +50,9 @@ export type StepRun = { id: number; step: string; state: JobState; error: string
 export type DeadlineStop = { step: string; jobId: number; error: string; endedAt: string | null; count: number };
 export type ItemsByBucket = { step: string; bucket: string; items: number };
 
-/** `approved_number`: the PR of a job of the approved lane, null for every other job. */
-export type EndedJob = { step: string; repo: string | null; requested_by: string; id: number; state: JobState; error: string | null; ended_at: string | null; items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null; approved_number: number | null };
-export type StreakRow = { step: string; repo: string | null; id: number; state: JobState; error: string | null; ended_at: string | null; approved_number: number | null };
+/** `lane_number`: the PR of a job of a per-item lane (approved or item), null for every other job. */
+export type EndedJob = { step: string; repo: string | null; requested_by: string; id: number; state: JobState; error: string | null; ended_at: string | null; items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null; lane_number: number | null };
+export type StreakRow = { step: string; repo: string | null; id: number; state: JobState; error: string | null; ended_at: string | null; lane_number: number | null };
 export type FpRecord = { job: number | null; fp: string };
 /** An ended job of the approved lane: the one PR it worked. */
 export type LaneRun = { repo: string; number: number; step: string; id: number; state: "done" | "failed"; endedAt: string };

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { poolRoom, repoBatches, takersFirst } from "../src/agents/call.ts";
+import { poolRoom, repoBatches, takersFirst, type PoolRoom } from "../src/agents/call.ts";
 import { pool, runHaiku, setRunner } from "../src/classify/run.ts";
 import type { Item } from "../src/classify/parse.ts";
 import { pruneJevUnsure, runTiered } from "../src/agents/step.ts";
@@ -115,4 +115,18 @@ test("an unsure Jev answer whose Haiku batch nobody may take is not asked of Jev
     assert.equal(asked, 2, "changed text is asked again");
     assert.equal(await pruneJevUnsure(db), 1, "the answer of an item that is not open in a tracked repo is dropped");
   } finally { restore(); }
+});
+
+test("a pool starts as many units as the room it read while none has queued its call, and one when there is no room", async () => {
+  // The room a cached reading keeps showing while the units prepare their calls.
+  const fixed = (room: number): PoolRoom => ({
+    round: () => {}, room: async () => room, taker: async () => true,
+    changed: (_ms, signal) => new Promise<void>((r) => { const t = setTimeout(r, 5); signal.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); }),
+  });
+  for (const [room, want] of [[2, 2], [0, 1]] as const) {
+    let live = 0, most = 0;
+    const unit = async (): Promise<void> => { live++; most = Math.max(most, live); await new Promise((r) => setTimeout(r, 40)); live--; };
+    await pool(Array.from({ length: 5 }, () => unit), fixed(room), { pollMs: 5 });
+    assert.equal(most, want, `room ${room}`);
+  }
 });

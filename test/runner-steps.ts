@@ -117,12 +117,12 @@ export const steps: StepDef[] = [
   {
     name: "test-lane",
     title: "Lane repo work",
-    description: "Test step with an approved lane: a regular job per repo and a job per approved pull request.",
+    description: "Test step with per-item lanes: a job per pull request, approved or item, and a job without a lane per repo.",
     stage: 6,
     requires: "operator",
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true }, { name: "ms", label: "Milliseconds", kind: "int", min: 0, max: 600000, default: 300 },
-      { name: "lane", label: "Lane", kind: "enum", options: ["approved"] }, { name: "number", label: "Pull request", kind: "int", min: 1, max: 1_000_000_000 },
+      { name: "lane", label: "Lane", kind: "enum", options: ["approved", "item"] }, { name: "number", label: "Pull request", kind: "int", min: 1, max: 1_000_000_000 },
     ],
     run: async (ctx) => { await sleep(Number(ctx.params.ms)); return "lane done"; },
   },

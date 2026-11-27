@@ -74,7 +74,7 @@ describe("a tripped stage pushes and merges nothing and still does what writes n
     try {
       await w.review(2, { verdict: "take-fix" });
       await reportingTaskRunner(w.db);
-      assert.deepEqual(await proposed(w, "fixup"), ["fixup"]);
+      assert.deepEqual(await proposed(w, "fixup"), ["fixup", "fixup"], "one job per PR");
       await trip(w, key);
       assert.deepEqual(await proposed(w, "fixup"), []);
       await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 2, from_head: "sha2", state: "linting", attempt: 1, created_at: T0, patch: "+z\n", lint_round: 1, lint_state: "pending", source: "review" }));

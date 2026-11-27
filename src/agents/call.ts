@@ -6,6 +6,7 @@ import { batchKey, roomKey, takerTestIn, type TakerCall } from "../remote/takers
 import { loadRunningCounts } from "../data/inference/index.ts";
 import { cachedSnapshot, dropSnapshotCache } from "../data/runners/index.ts";
 import type { Db } from "../db/index.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /** Set by the job process: which job and step the calls belong to, and whether a cancel was asked. */
 export type CallContext = { jobId: number; step: string; stage: number; /** Queue class of the step (StepDef.priority). */ class?: 0 | 1 | 2; /** The job's repo param. */ repo?: string; cancelled(): Promise<boolean>; /** True once the job is cancelled or the pipeline is switched off: no new model call starts. */ stopping?(): Promise<boolean> };
@@ -20,6 +21,13 @@ export async function throwIfHalted(what: string): Promise<void> {
   if (await context?.cancelled()) throw new CancelledError(`cancelled while ${what}`);
   if (await context?.stopping?.()) throw new StoppedError("the pipeline was switched off");
 }
+/** A pool unit (classify/run.ts pool) runs in a store of its own: `called` turns true once it queued a model call (enqueueCall). */
+export type PoolUnit = { called: boolean };
+const units = new AsyncLocalStorage<PoolUnit>();
+/** Runs `fn` as the pool unit `u`. */
+export const runAsUnit = <T>(u: PoolUnit, fn: () => Promise<T>): Promise<T> => units.run(u, fn);
+/** Marks the current pool unit, if any, as having queued its call: the queue's room counts it from now on. */
+export const unitCalled = (): void => { const u = units.getStore(); if (u) u.called = true; };
 /** Queue fields of a call made now: the job's repo and the queue class of the call's prompt. */
 export const callQueue = (promptId: string): { repo: string | null; cls: 0 | 1 | 2; jobId: number | null } => ({ repo: context?.repo ?? null, cls: currentClass(promptId), jobId: context?.jobId ?? null });
 

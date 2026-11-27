@@ -6,7 +6,7 @@ import { itemsStartedSince, limitResets } from "./cross.ts";
 import { loadHeldLeaseKeys } from "./leases.ts";
 import { CALL_WAIT_LIMIT, RUNNER_STOPPED } from "./fragments.ts";
 import { loadLiveJobs } from "./queue.ts";
-import { approvedOf, nowIso, numberOf } from "./sql.ts";
+import { approvedOf, nowIso, numberOf, perItemOf } from "./sql.ts";
 import type { EndedJob, FpRecord, JobState, LaneInputs, LaneRun, LaneStateKind, LaneStatePut, LaneStateRow, StoredLane, StoredLaneItems, StreakRow, WorkflowFailure } from "./types.ts";
 
 const PIPELINE_USER = "pipeline";
@@ -19,7 +19,7 @@ const STREAK_ROWS = 12;
 export const dayStart = (ms: number): string => `${new Date(ms).toISOString().slice(0, 10)}T00:00:00.000Z`;
 
 /** Postgres reads a JSON number as text. */
-const approvedNum = (n: unknown): number | null => (n === null || n === undefined ? null : Number(n));
+const laneNum = (n: unknown): number | null => (n === null || n === undefined ? null : Number(n));
 
 /**
  * One load per planner pass: eight statements in one `together`, joined into the pass's wave. `marks` holds the
@@ -30,24 +30,27 @@ export async function loadLaneInputs(db: Db, nowMs: number): Promise<LaneInputs>
   const q = queryDb(db);
   const day = dayStart(nowMs);
   const notStopped = (eb: kx.AnyEb) => eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED);
-  // The PR of a job of the approved lane, null for every other job: each approved PR's jobs keep their own ends and streaks.
-  const approvedNumber = (eb: kx.AnyEb) => eb.case().when(approvedOf(db, eb)).then(numberOf(db)).end().as("approved_number");
-  const recent = q.k.selectFrom("jobs").select((eb) => ["step", "repo", "id", "state", "error", "ended_at", approvedNumber(eb)])
-    .where("id", ">", (eb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STREAK_WINDOW))
+  // The PR of a job of a per-item lane, null for every other job: each PR's jobs keep their own ends and streaks.
+  const laneNumber = (eb: kx.AnyEb) => eb.case().when(perItemOf(db, eb)).then(numberOf(db)).end().as("lane_number");
+  const windowStart = (eb: kx.AnyEb) => eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STREAK_WINDOW);
+  const recent = q.k.selectFrom("jobs").select((eb) => ["step", "repo", "id", "state", "error", "ended_at", laneNumber(eb)])
+    .where("id", ">", windowStart)
     .where("requested_by", "=", PIPELINE_USER).where("state", "in", ["done", "failed"])
     .where((eb) => eb.and([notStopped(eb), eb.not(kx.like(db, eb.fn.coalesce("error", eb.val("")), eb.val("write paced:%")))]));
-  const ranked = q.k.selectFrom(recent.as("j")).select((eb) => ["j.step", "j.repo", "j.id", "j.state", "j.error", "j.ended_at", "j.approved_number",
-    eb.fn.agg<number>("row_number").over((o) => o.partitionBy(["j.step", "j.repo", "j.approved_number"]).orderBy("j.id", "desc")).as("rn"),
-    eb.fn.max<number | null>(eb.case().when("j.state", "=", "done").then(eb.ref("j.id")).end()).over((o) => o.partitionBy(["j.step", "j.repo", "j.approved_number"])).as("last_ok")]);
+  const ranked = q.k.selectFrom(recent.as("j")).select((eb) => ["j.step", "j.repo", "j.id", "j.state", "j.error", "j.ended_at", "j.lane_number",
+    eb.fn.agg<number>("row_number").over((o) => o.partitionBy(["j.step", "j.repo", "j.lane_number"]).orderBy("j.id", "desc")).as("rn"),
+    eb.fn.max<number | null>(eb.case().when("j.state", "=", "done").then(eb.ref("j.id")).end()).over((o) => o.partitionBy(["j.step", "j.repo", "j.lane_number"])).as("last_ok")]);
   const [live, used, ends, streaks, fps, resets, heldLeaseKeys, marks] = await db.together(() => Promise.all([
     loadLiveJobs(db),
     q.all(itemsStartedSince(db, day)),
-    q.all(q.k.selectFrom("jobs").select((eb) => ["id", "step", "repo", "requested_by", "state", "error", "ended_at", "items", "acted", "lease_skips", "lease_skip_keys", approvedNumber(eb)]).$narrowType<{ state: JobState }>()
-      .where("id", "in", (eb) => eb.selectFrom(eb.selectFrom("jobs").select((e) => ["id", "step", "repo", "requested_by", approvedNumber(e)])
-        .where((e) => e.and([e("ended_at", "is not", null), notStopped(e)])).as("e")).select((e) => e.fn.max<number>("e.id").as("m")).groupBy(["e.step", "e.repo", "e.requested_by", "e.approved_number"]))),
-    q.all(q.k.selectFrom(ranked.as("r")).select(["r.step", "r.repo", "r.id", "r.state", "r.error", "r.ended_at", "r.approved_number"]).$narrowType<{ state: JobState }>()
+    q.all(q.k.selectFrom("jobs").select((eb) => ["id", "step", "repo", "requested_by", "state", "error", "ended_at", "items", "acted", "lease_skips", "lease_skip_keys", laneNumber(eb)]).$narrowType<{ state: JobState }>()
+      .where("id", "in", (eb) => eb.selectFrom(eb.selectFrom("jobs").select((e) => ["id", "step", "repo", "requested_by", laneNumber(e)])
+        // A per-item job's end counts only within the streak window: there is one per PR ever worked, and the checks that read ends are about recent runs.
+        .where((e) => e.and([e("ended_at", "is not", null), notStopped(e), e.or([e.not(perItemOf(db, e)), e("id", ">", windowStart(e))])])).as("e")).select((e) => e.fn.max<number>("e.id").as("m")).groupBy(["e.step", "e.repo", "e.requested_by", "e.lane_number"]))),
+    q.all(q.k.selectFrom(ranked.as("r")).select(["r.step", "r.repo", "r.id", "r.state", "r.error", "r.ended_at", "r.lane_number"]).$narrowType<{ state: JobState }>()
       .where("r.rn", "<=", STREAK_ROWS).where((eb) => eb.or([eb("r.last_ok", "is", null), eb("r.id", ">=", eb.ref("r.last_ok"))])).orderBy("r.step").orderBy("r.repo").orderBy("r.id", "desc")),
-    q.all(q.k.selectFrom("lane_state").select(["step", "repo", "value", "job_id"]).where("kind", "=", "fp")),
+    q.all(q.k.selectFrom("lane_state").select(["step", "repo", "value", "job_id"]).where("kind", "=", "fp")
+      .where((eb) => eb.or([eb.not(itemFp(db, eb)), eb("job_id", ">", windowStart(eb))]))),
     q.all(limitResets(db)),
     loadHeldLeaseKeys(db),
     q.all(q.k.selectFrom("lane_state").select(["step", "value"]).where("kind", "in", ["mark", "cursor"])),
@@ -55,8 +58,8 @@ export async function loadLaneInputs(db: Db, nowMs: number): Promise<LaneInputs>
   return {
     live,
     usedToday: new Map(used.map((r) => [r.step, Number(r.n)])),
-    ends: (ends as EndedJob[]).map((e) => ({ ...e, approved_number: approvedNum(e.approved_number) })),
-    streaks: (streaks as StreakRow[]).map((r) => ({ ...r, approved_number: approvedNum(r.approved_number) })),
+    ends: (ends as EndedJob[]).map((e) => ({ ...e, lane_number: laneNum(e.lane_number) })),
+    streaks: (streaks as StreakRow[]).map((r) => ({ ...r, lane_number: laneNum(r.lane_number) })),
     fps: new Map(fps.map((r): [string, FpRecord] => [`${r.step}|${r.repo}`, { job: r.job_id, fp: r.value }])),
     resets: new Map(resets.map((r) => [r.step, r.reset_at!])),
     heldLeaseKeys,
@@ -95,6 +98,18 @@ export async function loadLanes(db: Db, names?: string[]): Promise<StoredLaneIte
 }
 
 /** One upsert for everything a pass or an apply writes: fingerprints, resets, cursors, marks. The last row of a key wins. */
+/** The step name under which a per-item job's input fingerprint is kept (one per step and PR). */
+export const itemFpStep = (step: string, number: number): string => `${step}:pr:${number}`;
+/** A per-item fingerprint row: itemFpStep, or the name approved-lane jobs kept theirs under before. */
+const itemFp = (db: Db, eb: kx.AnyEb) => eb.or([kx.like(db, eb.ref("step"), eb.val("%:pr:%")), kx.like(db, eb.ref("step"), eb.val("%:approved:%"))]);
+
+/** Deletes the per-item fingerprints of jobs older than the streak window: their ends are no longer read (loadLaneInputs). */
+export async function pruneItemFps(db: Db): Promise<number> {
+  const q = queryDb(db);
+  return (await q.run(q.k.deleteFrom("lane_state").where("kind", "=", "fp").where((eb) => itemFp(db, eb))
+    .where((eb) => eb.or([eb("job_id", "is", null), eb("job_id", "<=", eb(eb.selectFrom("jobs as mx").select((e) => e.fn.max<number>("mx.id").as("m")), "-", STREAK_WINDOW))])))).changes;
+}
+
 export async function saveLaneState(db: Db, rows: LaneStatePut[]): Promise<void> {
   if (!rows.length) return;
   const q = queryDb(db);

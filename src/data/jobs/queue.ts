@@ -4,7 +4,7 @@ import { queryDb } from "../../db/query-db.ts";
 import * as kx from "../../db/kx.ts";
 import { lastLeaseOf, remoteQueuedOf } from "../runners/fragments.ts";
 import { resumingJobs } from "./fragments.ts";
-import { approvedOf, hasFilter, nowIso, numberOf, octets, repoVisible } from "./sql.ts";
+import { hasFilter, nowIso, numberOf, octets, perItemOf, repoVisible } from "./sql.ts";
 import type { CliJob, HiddenRepos, JobRow, JobState, LiveJob, LogCursor, NewJob, QueuedJob, RunningState } from "./types.ts";
 
 /** Longest a Task Runner caller may go unseen and still count as polling; the runner passes `CALLER_STALE_MS` of the remote protocol. */
@@ -122,10 +122,10 @@ function limitOf(params: string): number | null {
 /**
  * One guarded `UPDATE ... WHERE state = 'queued' AND NOT EXISTS (...)`; false when no row changed. The block rules
  * (the same work running, the step already working `cap` repos, a running job of a mutex step) are the SQL twin of
- * `jobBlock` with `states: ["running"]`. `approved`: a job of the approved lane (params `lane: "approved"`), one per PR `number`,
- * outside the repo count.
+ * `jobBlock` with `states: ["running"]`. `lane`: the job's lane param; a per-item job (`approved` or `item`) is one per PR
+ * `number`, outside the repo count, and an `item` job also clashes with a job of its repo without a lane.
  */
-export async function claimJob(db: Db, c: { id: number; step: string; repo: string | null; number: number | null; approved?: boolean; cap: number | null; mutexSteps: string[]; logPath: string }): Promise<boolean> {
+export async function claimJob(db: Db, c: { id: number; step: string; repo: string | null; number: number | null; lane?: string | null; cap: number | null; mutexSteps: string[]; logPath: string }): Promise<boolean> {
   const q = queryDb(db);
   const running = (eb: kx.AnyEb, alias: string): any => (kx.schemaEb(eb) as any).selectFrom(`jobs as ${alias}`).where(`${alias}.state`, "=", "running");
   const res = await q.run(q.k.updateTable("jobs").set({ state: "running", started_at: nowIso(), log_path: c.logPath })
@@ -133,14 +133,18 @@ export async function claimJob(db: Db, c: { id: number; step: string; repo: stri
     .where((eb) => {
       const same = running(eb, "s").where("s.step", "=", c.step).select(eb.lit(1).as("one"));
       const sameNumber = (e: kx.AnyEb) => (c.number === null ? e(numberOf(db, "s.params"), "is", null) : e(numberOf(db, "s.params"), "=", c.number));
-      const lane = c.step === "security-fix" ? sameNumber : c.approved ? (e: kx.AnyEb) => e.and([approvedOf(db, e, "s.params"), sameNumber(e)]) : (e: kx.AnyEb) => e.not(approvedOf(db, e, "s.params"));
+      const perItem = c.lane === "approved" || c.lane === "item";
+      // Per-item: the same PR in either lane, or (an item job) a job of the repo without a lane. Without a lane: any job but an approved one.
+      const lane = c.step === "security-fix" ? sameNumber
+        : perItem ? (e: kx.AnyEb) => e.or([e.and([perItemOf(db, e, "s.params"), sameNumber(e)]), ...(c.lane === "item" ? [e(e.fn.coalesce(kx.jsonText(db, "s.params", "$.lane"), e.val("")), "=", "")] : [])])
+        : (e: kx.AnyEb) => e(e.fn.coalesce(kx.jsonText(db, "s.params", "$.lane"), e.val("")), "<>", "approved");
       const sameWork = c.repo === null ? same : same.where((e: kx.AnyEb) => e.or([e("s.repo", "is", null), e.and([e("s.repo", "=", c.repo!), lane(e)])]));
       const conds = [eb.not(eb.exists(sameWork))];
-      if (c.cap !== null && !c.approved) {
-        const repos = running(eb, "p").where("p.step", "=", c.step).where((e: kx.AnyEb) => e.not(approvedOf(db, e, "p.params")));
+      if (c.cap !== null && !perItem) {
+        const repos = running(eb, "p").where("p.step", "=", c.step).where((e: kx.AnyEb) => e.not(perItemOf(db, e, "p.params")));
         conds.push(eb.or([
           eb(repos.select((e: kx.AnyEb) => e.fn.count<number>(e.fn.coalesce("p.repo", e.val(""))).distinct().as("n")), "<", c.cap),
-          eb.exists(running(eb, "r").where("r.step", "=", c.step).where((e: kx.AnyEb) => e.and([e(e.fn.coalesce("r.repo", e.val("")), "=", c.repo ?? ""), e.not(approvedOf(db, e, "r.params"))])).select(eb.lit(1).as("one"))),
+          eb.exists(running(eb, "r").where("r.step", "=", c.step).where((e: kx.AnyEb) => e.and([e(e.fn.coalesce("r.repo", e.val("")), "=", c.repo ?? ""), e.not(perItemOf(db, e, "r.params"))])).select(eb.lit(1).as("one"))),
         ]));
       }
       if (c.mutexSteps.length) conds.push(eb.not(eb.exists(running(eb, "m").where("m.step", "in", c.mutexSteps).select(eb.lit(1).as("one")))));
