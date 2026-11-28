@@ -1,6 +1,6 @@
 // The signed-in user's own settings (GET and PUT /api/me/settings); their Task Runners are listed by GET /api/runners (runners.ts).
-// Maintainers and operators set their own settings; a viewer writes nothing.
-import { pipelineRepos } from "../../pilot.ts";
+// Maintainers and operators set their own settings; a viewer has none.
+import { loadTrackedRepos } from "../../data/control/index.ts";
 import { manualOnly, parseManualOnly, setManualOnly } from "../../remote/manual-only.ts";
 import { parseInteractiveSlots, setUserInteractiveSlots, userInteractiveSlots } from "../../remote/interactive-slots.ts";
 import { parseMaxCalls, setUserMaxCalls, userMaxCalls } from "../../remote/max-calls.ts";
@@ -16,7 +16,7 @@ import type { Db } from "../../db/index.ts";
 
 /** Repos with the pipeline on where the user has write permission, the permission a claim requires. */
 async function repoChoices(db: Db, req: Req): Promise<string[]> {
-  const repos = [...await pipelineRepos(db)].sort();
+  const repos = [...(await loadTrackedRepos(db)).values()].filter((r) => r.pipeline).map((r) => r.name).sort();
   const ok = await Promise.all(repos.map((r) => req.user.canWrite(r).catch(() => false)));
   return repos.filter((_, i) => ok[i]);
 }
@@ -31,13 +31,13 @@ export const settings = async (db: Db, req: Req): Promise<SettingsReply> =>
   ({ reserve: await userReserve(db, req.user.login), repos: await userRepos(db, req.user.login), maxCalls: await userMaxCalls(db, req.user.login), interactiveSlots: await userInteractiveSlots(db, req.user.login, req.user.role), manualOnly: await manualOnly(db, req.user.login), tasks: await userTasks(db, req.user.login), taskChoices: TASK_CHOICES, taskItems: await userTaskItems(db, req.user.login), runnerPrivate: await runnerPrivate(db, req.user.login), repoChoices: await repoChoices(db, req) });
 
 export async function setSettings(db: Db, req: Req): Promise<SettingsReply> {
-  if (req.user.role === "viewer") throw new HttpError(403, "viewers have no settings to change");
   const b = req.json;
   if (!b || typeof b !== "object" || Array.isArray(b)) throw new HttpError(400, "the body must be a UserSettings object");
   const body = b as Record<string, unknown>;
   const known = ["reserve", "repos", "maxCalls", "interactiveSlots", "manualOnly", "tasks", "taskItems", "runnerPrivate"];
   for (const k of Object.keys(body)) if (!known.includes(k)) throw new HttpError(400, `unknown setting ${k}`);
   if (known.every((k) => body[k] === undefined)) throw new HttpError(400, "send reserve, repos, maxCalls, interactiveSlots, manualOnly, tasks, taskItems, runnerPrivate or several of them");
+  if (req.user.role === "viewer") throw new HttpError(403, "viewers have no settings to change");
   let reserve, repos, tasks, maxCalls: number | null | undefined, slots: number | undefined, manual: boolean | undefined, priv: boolean | undefined, items: TaskItems | undefined;
   try {
     if (body.reserve !== undefined) reserve = parseReserve(body.reserve);

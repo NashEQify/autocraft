@@ -16,6 +16,7 @@ import { ConfirmButton } from "../../ui/molecules/ConfirmButton";
 import { Page } from "../../ui/organisms/Page";
 import { day } from "../../lib/format";
 import { useWrite } from "../../lib/hooks";
+import { t as tr } from "../../../../src/i18n/index.ts";
 import { MySettings } from "./MySettings";
 import { Runners } from "./Runners";
 import { RunnerGuide } from "./Setup";
@@ -34,7 +35,7 @@ const TABS = [
 export function ConnectView({ user }: ViewProps) {
   const { tab = "" } = useParams();
   const [sp] = useSearchParams();
-  const local = user.role !== "viewer" && user.inference === "user-local";
+  const local = user.role !== "viewer";
   const runners = useQuery("runners", (a) => a.runners.list(), { enabled: local });
   if (!TABS.some(([t]) => t === tab) || (tab && !local)) return <Navigate to="/connect" replace />;
   if (local && !runners.data && !runners.error) return <Page title="Connect your Agents"><></></Page>;
@@ -72,7 +73,8 @@ export function ConnectView({ user }: ViewProps) {
   );
 }
 
-function Connector({ user }: Pick<ViewProps, "user">) {
+/** `agent`: the Runner page's wording, "Agent tokens", with what each token can do. */
+export function Connector({ user, agent = false }: Pick<ViewProps, "user"> & { agent?: boolean }) {
   const api = useApi();
   const write = useWrite();
   const { data, error } = useQuery("mcp-tokens", (a) => a.mcp.tokens());
@@ -84,7 +86,7 @@ function Connector({ user }: Pick<ViewProps, "user">) {
   const tokens = data?.tokens.filter((t) => t.kind === "connector") ?? [];
   const full = !!data && tokens.length >= data.max;
   const viewer = user.role === "viewer";
-  const settles = user.role === "operator" || (user.role === "maintainer" && user.maintainerWrites);
+  const settles = user.role !== "viewer";
 
   const close = () => {
     setForm(false);
@@ -103,7 +105,7 @@ function Connector({ user }: Pick<ViewProps, "user">) {
       dense
       flush
       className="mt-4"
-      title={<SectionTitle icon={PlugsConnectedIcon}>MCP Connector</SectionTitle>}
+      title={<SectionTitle icon={PlugsConnectedIcon}>{agent ? tr("Agent tokens") : "MCP Connector"}</SectionTitle>}
       aside={
         data && (
           <span className="flex items-center gap-3">
@@ -130,8 +132,8 @@ function Connector({ user }: Pick<ViewProps, "user">) {
           <Input autoFocus value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} placeholder="Label, e.g. laptop" aria-label="Token label" className="min-w-[12rem] flex-1 sm:max-w-xs" />
           {settles && data?.answering && (
             <span className="flex items-center gap-2 text-sm text-ink/80">
-              <Switch on={answer} onChange={setAnswer} label="Can answer decisions" />
-              Can answer decisions
+              <Switch on={answer} onChange={setAnswer} label="Can send commands" />
+              Can send commands
             </span>
           )}
           <span className="flex gap-2 max-sm:ml-auto">
@@ -156,7 +158,7 @@ function Connector({ user }: Pick<ViewProps, "user">) {
           <Snippets url={url} token={made.token} />
         </div>
       )}
-      {data && <Tokens tokens={tokens} write={write} fresh={made?.id ?? null} />}
+      {data && <Tokens tokens={tokens} write={write} fresh={made?.id ?? null} agent={agent} />}
       {data && !made && (
         <Fold className="border-t border-line px-3 py-1" title="How to connect">
           <div className="pb-2 pt-1">
@@ -184,7 +186,7 @@ function Snippets({ url, token }: { url: string; token: string }) {
   );
 }
 
-function Tokens({ tokens, write, fresh }: { tokens: McpToken[]; write: ReturnType<typeof useWrite>; fresh: number | null }) {
+function Tokens({ tokens, write, fresh, agent }: { tokens: McpToken[]; write: ReturnType<typeof useWrite>; fresh: number | null; agent: boolean }) {
   const api = useApi();
   if (!tokens.length) return null;
   return (
@@ -194,7 +196,8 @@ function Tokens({ tokens, write, fresh }: { tokens: McpToken[]; write: ReturnTyp
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-0.5">
             <span className="flex items-center gap-2 font-medium">
               {t.label ?? <span className="text-ink/40">no label</span>}
-              {t.canAnswer && <Badge>answers decisions</Badge>}
+              {agent && <Badge>{tr("Read")}</Badge>}
+              {t.canAnswer && <Badge>{agent ? tr("Answer") : "sends commands"}</Badge>}
               {t.id === fresh && <Badge tone="accent">new</Badge>}
             </span>
             <span className="text-xs text-ink/55">

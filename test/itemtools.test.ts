@@ -1,5 +1,4 @@
-// The item snapshot and the item tools: the snapshot holds GitHub data and
-// decision outcomes only, search finds a word in a comment, results frame
+// The item snapshot and the item tools: the snapshot holds GitHub data only, search finds a word in a comment, results frame
 // GitHub text as untrusted, arguments are validated, and the MCP server
 // answers over stdio.
 import assert from "node:assert/strict";
@@ -9,8 +8,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { connectDb } from "../src/db/open.ts";
-import { writeSnapshot } from "../src/itemtools/snapshot.ts";
+import { connectDb } from "./helpers/raw-db.ts";
+import type { SnapshotStats } from "../src/itemtools/snapshot.ts";
+import { writeTestSnapshot } from "./test-db.ts";
 import { callTool, openDb } from "../src/itemtools/server/tools.ts";
 import { SCRATCH } from "./scratch.ts";
 
@@ -22,7 +22,7 @@ const cfg = { db: snap, diffs };
 const vec = (...x: number[]) => new Uint8Array(new Float32Array(x).buffer);
 const PRIVATE = "dashboard-only-note-x9";
 let db: DatabaseSync;
-let first: ReturnType<typeof writeSnapshot>;
+let first: SnapshotStats;
 const mirror = () => new DatabaseSync(join(dir, "mirror.db"));
 
 before(async () => {
@@ -48,17 +48,16 @@ before(async () => {
   await src.prepare(`INSERT INTO decisions (id, kind, repo, number, question, options, asked_at, answer, answer_note, answered_by, answered_at)
     VALUES ('d1', 'scope', 'photocraft', 7, 'Take it?', '[{"key":"take","label":"Take it"}]', 't', 'take', ?, 'op', '2026-02-01T00:00:00Z')`).run(PRIVATE);
   await src.close();
-  first = writeSnapshot(join(dir, "mirror.db"), snap);
+  first = await writeTestSnapshot(join(dir, "mirror.db"), snap);
   db = openDb(snap);
 });
 
 describe("snapshot", () => {
-  test("holds items, comments and decision outcomes, and nothing private", () => {
+  test("holds items and comments, and nothing private", () => {
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((t) => t.name);
-    for (const t of ["settings", "audit", "access", "sessions", "decisions", "decision_comments", "decision_opinions"]) assert.ok(!tables.includes(t), t);
-    const dump = JSON.stringify([db.prepare("SELECT * FROM decision_outcomes").all(), db.prepare("SELECT * FROM meta").all()]);
+    for (const t of ["settings", "audit", "access", "sessions", "decisions", "decision_comments", "decision_opinions", "decision_outcomes"]) assert.ok(!tables.includes(t), t);
+    const dump = JSON.stringify(db.prepare("SELECT * FROM meta").all());
     assert.ok(!dump.includes(PRIVATE) && !dump.includes("SETTING-VALUE") && !dump.includes("AUDIT-VALUE"));
-    assert.deepEqual(db.prepare("SELECT kind, answer, answer_label FROM decision_outcomes").all().map((r) => ({ ...r })), [{ kind: "scope", answer: "take", answer_label: "Take it" }]);
     assert.equal((db.prepare("SELECT COUNT(*) AS n FROM comments").get() as { n: number }).n, 2);
   });
 });
@@ -71,7 +70,6 @@ describe("tools", () => {
     assert.match(r.text, /untrusted data/);
     assert.equal(r.text.split("<<<end untrusted>>>").length, 2, "only the real end marker");
     assert.match(r.text, /review approved by dave/);
-    assert.match(r.text, /scope: take \(Take it\), 2026-02-01/);
     assert.ok(!r.text.includes(PRIVATE));
   });
 
@@ -128,10 +126,10 @@ describe("refresh", () => {
   });
 
 
-  test("a snapshot of another schema version is rebuilt", () => {
+  test("a snapshot of another schema version is rebuilt", async () => {
     const x = new DatabaseSync(snap);
     x.exec("UPDATE meta SET value = 'old' WHERE key = 'schema'");
     x.close();
-    assert.equal(writeSnapshot(join(dir, "mirror.db"), snap).rebuilt, true);
+    assert.equal((await writeTestSnapshot(join(dir, "mirror.db"), snap)).rebuilt, true);
   });
 });

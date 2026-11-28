@@ -12,7 +12,7 @@ import { VectorIndex } from "../src/embed/vectors.ts";
 import { Interactions } from "../src/discord/interactions.ts";
 import { sanitize } from "../src/discord/issue-draft.ts";
 import type { BotRequest, FileResult } from "../src/discord/file-issue.ts";
-import { signV4 } from "../src/discord/attachments.ts";
+import { signV4 } from "../src/storage/s3.ts";
 import { installPanel } from "../src/discord/panel.ts";
 import { installIssueNew, type IssueAsk } from "../src/discord/issue-new.ts";
 import { addFilingRepo, COVERAGE_TTL_MS, coverageReader, removeFilingRepo, type ReadRepo } from "../src/discord/filing-repos.ts";
@@ -21,16 +21,14 @@ import { DiscordKeys } from "../src/discord/keys.ts";
 import type { CallbackData, CommandDef, DiscordRest, EditBody, MessageBody } from "../src/discord/rest.ts";
 import { Search } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
-import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-issue-"));
 const db = await connectDb(join(dir, "d.db"));
 const keys = new DiscordKeys("k".repeat(40));
-await useTestAccount(db);
 after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true }); });
 
 const VOCAB = ["webp", "export", "quality", "dark", "mode", "layers"];
@@ -76,7 +74,8 @@ let n = 0;
 const send = async (type: number, user: string, data: unknown, channel = "c1", on = ix) => {
   rest.callbacks.length = 0; rest.edits.length = 0;
   on.dispatch("INTERACTION_CREATE", { id: `i${++n}`, token: "t", type, application_id: "app1", channel_id: channel, member: { user: { id: user } }, data });
-  for (let k = 0; k < 50 && !(rest.callbacks.length && (rest.callbacks.at(-1)!.type !== 5 || rest.edits.length)); k++) await new Promise((r) => setTimeout(r, 5));
+  // Until the response, or the edit that follows a deferral: up to 5 s, since Postgres answers slower than SQLite.
+  for (let k = 0; k < 1000 && !(rest.callbacks.length && (rest.callbacks.at(-1)!.type !== 5 || rest.edits.length)); k++) await new Promise((r) => setTimeout(r, 5));
 };
 const modalId = (): string => rest.callbacks.find((c) => c.type === 9)!.data!.custom_id!;
 const submit = (user: string, custom_id: string, values: Record<string, string>) =>
@@ -95,9 +94,15 @@ type Comp = { type: number; label?: string; custom_id?: string; url?: string; co
 const rows = (b: EditBody) => (b.components as Comp[]).flatMap((r) => (r.type === 9 ? [r.accessory!] : r.type === 10 ? [] : r.components!));
 const v2text = (b: EditBody) => (b.components as Comp[]).flatMap((c) => (c.type === 9 ? c.components! : [c])).filter((c) => c.type === 10).map((c) => c.content).join("\n");
 const NONE = "None of these, file a new one";
-/** Presses a button that asks the questions: the model's choice was made at submit, so the form opens as the response. */
-const pressToQuestions = async (user: string, id: string) => {
-  await press(user, id);
+/**
+ * Presses a button that asks the questions. The model chooses them in the background from submit: when it is done, the form
+ * opens as the response; while it still runs (its call and bookkeeping take longer on Postgres), the press is deferred and
+ * a Continue button opens the form.
+ */
+const pressToQuestions = async (user: string, id: string, on = ix) => {
+  await send(3, user, { custom_id: id }, "c1", on);
+  const next = rest.callbacks[0]?.type === 5 ? rows(rest.edits[0]!).find((x) => x.label === "Continue") : undefined;
+  if (next) await send(3, user, { custom_id: next.custom_id! }, "c1", on);
   return rest.callbacks[0]!;
 };
 const draftUrl = (b: EditBody): URL => new URL(rows(b).find((x) => x.label === "Open on GitHub instead")!.url!);
@@ -328,7 +333,7 @@ describe("search and filing flow", () => {
       { type: 18, component: { type: 19, custom_id: upload.component.custom_id, values: ["a1", "a2"] } },
     ], resolved: { attachments: { a1: att("a1", "shot.png", "image/png"), a2: att("a2", "notes].png", "image/png") } } }, "c1", ix2);
     const next = rows(rest.edits[0]!).find((x) => x.label === NONE || x.label === "Continue")!.custom_id!;
-    await send(3, "u40", { custom_id: next }, "c1", ix2);
+    await pressToQuestions("u40", next, ix2);
     await send(5, "u40", { custom_id: modalId(), components: [{ type: 1, components: [{ type: 4, custom_id: "steps", value: "Export" }] }] }, "c1", ix2);
     assert.match(rest.edits[0]!.content!, /attach them there/);
     assert.equal(puts.length, 0, "nothing is uploaded before Submit for me");
@@ -358,7 +363,7 @@ describe("search and filing flow", () => {
         { type: 18, component: { type: 3, custom_id: "app", values: ["sketchpad"] } },
         { type: 18, component: { type: 4, custom_id: "description", value: "brush strokes lag on large canvases" } },
       ] }, "c1", ix3);
-      await send(3, user, { custom_id: rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id! }, "c1", ix3);
+      await pressToQuestions(user, rows(rest.edits[0]!).find((x) => x.label === "Continue")!.custom_id!, ix3);
       await send(5, user, { custom_id: modalId(), components: [{ type: 1, components: [{ type: 4, custom_id: "steps", value: "Draw" }] }] }, "c1", ix3);
       return rest.edits[0]!;
     };

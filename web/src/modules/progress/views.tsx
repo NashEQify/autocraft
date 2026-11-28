@@ -1,3 +1,4 @@
+import { PageFrame, PageTitle } from "../../ui/organisms/Page";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ArrowDownIcon, ArrowUpIcon, CaretUpDownIcon } from "@phosphor-icons/react";
@@ -47,16 +48,15 @@ export function Overview(_: ViewProps) {
   const startOpen = p.repos.reduce((a, r) => a + (r.openTrend[0] ?? 0), 0);
   const since = day(p.trackingSince);
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-[1180px] px-4 pb-12 pt-5 md:px-6">
+    <PageFrame>
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-          <h1 className="text-xl font-semibold">Progress</h1>
+          <PageTitle>Progress</PageTitle>
           <span className="text-sm text-ink/55">
             Tracking since {since} · {p.repos.length} repos
           </span>
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-3">
           <Stat label="Open now" value={num(p.funnel.open)} sub={<>{num(startOpen)} when tracking began</>} />
           <Stat
             label="Done by the pipeline"
@@ -64,16 +64,6 @@ export function Overview(_: ViewProps) {
             sub={ours ? `${num(p.done.mergedByPipeline)} merged · ${num(p.done.closedByPipeline)} closed` : "not started yet"}
           />
           <Stat label="Closed by others" value={num(p.done.closedByOthers)} sub={`on GitHub since ${since}`} />
-          <Stat
-            label="Decisions waiting"
-            value={String(p.decisionsOpen)}
-            tone="warn"
-            sub={
-              <Link to="/needs" className="text-accent-ink hover:underline">
-                {p.decisionsAnsweredToday} answered today
-              </Link>
-            }
-          />
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_1fr]">
@@ -107,16 +97,15 @@ export function Overview(_: ViewProps) {
         <Block title="By repo" aside={phone ? undefined : "Click a column header to sort"} className="mt-4" flush>
           {phone ? <RepoCards p={p} /> : <RepoTable p={p} />}
         </Block>
-      </div>
-    </div>
+    </PageFrame>
   );
 }
 
-type SortKey = "repo" | "open" | "done" | "decisions" | "reviewed";
+type SortKey = "repo" | "open" | "done" | "reviewed";
 
 function RepoTable({ p }: { p: Progress }) {
   const [sort, setSort] = useState<{ k: SortKey; desc: boolean }>({ k: "open", desc: true });
-  const val = (r: RepoProgress): number | string => ({ repo: r.repo, open: r.funnel.open, done: doneTotal(r.done), decisions: r.decisionsOpen, reviewed: r.funnel.open ? r.funnel.reviewed / r.funnel.open : 0 })[sort.k];
+  const val = (r: RepoProgress): number | string => ({ repo: r.repo, open: r.funnel.open, done: doneTotal(r.done), reviewed: r.funnel.open ? r.funnel.reviewed / r.funnel.open : 0 })[sort.k];
   const rows = [...p.repos].sort((a, b) => {
     const x = val(a);
     const y = val(b);
@@ -154,9 +143,6 @@ function RepoTable({ p }: { p: Progress }) {
             <Th k="done" className="w-[220px]">
               Done
             </Th>
-            <Th k="decisions" right className="w-[90px]">
-              Waiting
-            </Th>
             <Th className="w-[110px]">Open, by day</Th>
           </tr>
         </thead>
@@ -167,7 +153,7 @@ function RepoTable({ p }: { p: Progress }) {
             return (
               <tr key={r.repo} className="h-9 border-b border-line last:border-0 hover:bg-ink/[0.03]">
                 <td className="px-3">
-                  <Link to={`/needs?repo=${r.repo}`} className="font-medium hover:text-accent-ink hover:underline">
+                  <Link to={`/items?repo=${r.repo}`} className="font-medium hover:text-accent-ink hover:underline">
                     {r.repo}
                   </Link>
                 </td>
@@ -194,7 +180,6 @@ function RepoTable({ p }: { p: Progress }) {
                     <span className="num w-12 text-right">{num(d)}</span>
                   </div>
                 </td>
-                <td className={cn("num px-3 text-right", r.decisionsOpen ? "font-medium text-warn" : "text-ink/30")}>{r.decisionsOpen || "–"}</td>
                 <td className="px-3 text-ink/45">
                   <Sparkline values={r.openTrend} />
                 </td>
@@ -215,7 +200,6 @@ function RepoCards({ p }: { p: Progress }) {
         <li key={r.repo} className="border-b border-line px-4 py-2.5 last:border-0">
           <div className="flex items-baseline gap-2 text-sm">
             <span className="font-medium">{r.repo}</span>
-            {r.decisionsOpen > 0 && <span className="text-xs text-warn">{r.decisionsOpen} waiting</span>}
             <span className="num ml-auto">{num(r.funnel.open)} open</span>
           </div>
           {OUTCOMES.some((o) => r.funnel[o.key] > 0) && (
