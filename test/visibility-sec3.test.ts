@@ -116,8 +116,8 @@ test("viewers read no staff text of queue rows or of a quiet pull request's next
   assert.deepEqual(fix.rows.map((r) => [r.number, r.next]), [[2, ""]]);
 });
 
-test("the merge tab shows an inconclusive regression to staff and viewers, its note to staff only, and nothing of it on a quiet pull request", async () => {
-  const boss = await signIn("boss"), reader = await signIn("reader");
+test("the merge tab shows an inconclusive pass to staff and viewers, its note to staff only, and nothing of it on a quiet pull request", async () => {
+  const boss = await signIn("boss"), reader = await signIn("reader"), maint = await signIn("maint");
   const stored = await db.prepare("SELECT number, view FROM item_plans WHERE repo = 'open-app'").all() as { number: number; view: string }[];
   const update = db.prepare("UPDATE item_plans SET view = ? WHERE repo = 'open-app' AND number = ?");
   const setVerify = async (verify: unknown) => {
@@ -140,6 +140,15 @@ test("the merge tab shows an inconclusive regression to staff and viewers, its n
       // The stored flag decides, not the note: the same note without the flag is no warning.
       assert.equal((await verifyOf(get, 1, { ...passed, inconclusive: false }))?.inconclusive, false, `staff ${staff}`);
     }
+    // A stale verification keeps its stored flag, but is no inconclusive pass.
+    assert.equal((await verifyOf(boss, 1, { ...passed, state: "stale", inconclusive: true }))?.inconclusive, false);
+    // Staff text naming a repo hidden from the reader is blanked for that reader only.
+    const naming = { state: "failed", kind: "build", summary: "the base of vault#7 broke", note: "vault#7 was not built", inconclusive: false };
+    const full = await verifyOf(boss, 1, naming);
+    assert.match(`${full?.summary} ${full?.note}`, /vault#7.*vault#7/);
+    const blanked = await verifyOf(maint, 1, naming);
+    assert.equal(blanked?.summary, null);
+    assert.equal(blanked?.note, null);
     // open-app#2 is quiet for a viewer: nothing of its verification shows.
     const quiet = await verifyOf(reader, 2, { ...passed, inconclusive: true });
     assert.equal(quiet?.inconclusive, false);

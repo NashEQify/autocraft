@@ -58,11 +58,14 @@ export function statusFor<S extends Pick<ItemStatus, "waiting" | "next">>(r: Rea
 export function queueTextFor(r: Reader, row: QueueRow): QueueRow {
   const veiled = veiledFor(r, row.repo, row.number);
   const result = row.verify;
-  // The inconclusive flag is no staff text: viewers see it, except on a pull request veiled from them.
+  // The inconclusive flag is no staff text: viewers see it, except on a pull request veiled from them. It belongs to a pass only:
+  // a verification marked stale keeps its stored flag until the head is planned again.
   const verify = result && {
     ...result,
-    inconclusive: !veiled && result.inconclusive,
-    ...(!r.staff || veiled ? { summary: null, note: null } : {}),
+    inconclusive: !veiled && result.state === "passed" && result.inconclusive,
+    ...(!r.staff || veiled
+      ? { summary: null, note: null }
+      : { summary: blankIfHidden(result.summary, r.hidden) || null, note: blankIfHidden(result.note, r.hidden) || null }),
   };
   if (veiled) return { ...row, reason: "", refusedReason: null, note: null, outsideRule: [], verify };
   if (!r.staff) return { ...row, reason: "", refusedReason: null, note: null, outsideRule: row.outsideRule.map(plainReason), verify };
