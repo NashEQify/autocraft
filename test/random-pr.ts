@@ -328,7 +328,7 @@ export function factsOf(w: PrRows): PrFacts {
   f.brokeByUs = w.brokeByUs && redNow;
   f.gateRed = !f.brokeByUs && !!f.reviewHold?.red && head !== qh && redNow;
   if (w.attempt && !(handed && handed.updatedAt > at("10:05"))) { f.lastMerge = w.attempt; f.runsApprovedAfterMerge = w.runsApprovedAfterMerge; }
-  f.verification = w.verification && { state: w.verification.state, kind: "build", summary: "what it found", note: null };
+  f.verification = w.verification && { state: w.verification.state, kind: "build", summary: "what it found", note: null, inconclusive: false };
   f.verifyOverride = !!handed && !!w.verification && (w.verification.state === "failed" || w.verification.state === "error") && w.verification.finishedAt <= handed.updatedAt;
   if (!f.verification || f.verification.state === "stale") f.verifyUnavailable = w.publicRepo ? null : "the repo is private";
   if (open && f.mergeable === "UNKNOWN") f.unknown = { since: at("11:00"), reads: 4, rereads: w.unknownStuck ? 1 : 0, stuck: w.unknownStuck };

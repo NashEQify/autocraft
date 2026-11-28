@@ -20,7 +20,7 @@ export type QueueView = {
   author: string | null; tier: string; head: string; size: string; label: string | null; /** Null for a merge-entry PR, which has no review. */ verdict: "take" | "take-fix" | null; reason: string; fixes: number;
   ci: string; mergeable: string; path: MergePath; eligible: boolean; refusedReason: string | null;
   reviewedAt: string; blockedLive: boolean; noCi: boolean; runsWaiting: number; runsBlocked: "off" | "failed" | "unsupported" | null;
-  verify: { state: string; kind: string | null; summary: string | null; note: string | null } | null;
+  verify: { state: string; kind: string | null; summary: string | null; note: string | null; inconclusive: boolean } | null;
   conflictNote?: string; mainFix?: true;
 };
 

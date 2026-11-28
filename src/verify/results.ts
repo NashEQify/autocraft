@@ -86,7 +86,8 @@ export function outcomeOf(t: FinishedTask): Outcome {
   return { kind: "fail", step: bad.step, exitCode: bad.exitCode, timedOut: bad.timedOut };
 }
 
-export type Verdict = { state: "passed" | "failed" | "error"; note?: string; failed?: { role: "head" | "base"; step: string; exitCode: number | null; timedOut: boolean }; reason?: string };
+/** `inconclusive`: the head passed a regression check, but the base result does not show the regression (`note` says why). */
+export type Verdict = { state: "passed" | "failed" | "error"; note?: string; inconclusive?: true; failed?: { role: "head" | "base"; step: string; exitCode: number | null; timedOut: boolean }; reason?: string };
 
 /** Combines the head task's outcome and, for a regression, the base task's. */
 export function verdictOf(head: Outcome, base: Outcome | null): Verdict {
@@ -97,7 +98,7 @@ export function verdictOf(head: Outcome, base: Outcome | null): Verdict {
   if (base.kind === "pass") return { state: "failed", reason: NOT_FAILING_REASON };
   if (base.step === "test" && !base.timedOut) return { state: "passed" };
   const limitation = base.step === "test" ? "the base test timed out" : "the base did not build with the test";
-  return { state: "passed", note: `Head passed; regression comparison inconclusive: ${limitation}.` };
+  return { state: "passed", inconclusive: true, note: `Head passed; regression comparison inconclusive: ${limitation}.` };
 }
 
 // ---- the run -----------------------------------------------------------------
@@ -165,9 +166,9 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
       const sha7 = v.headSha.slice(0, 7);
       const stageOf = (stage: string, at: string, note: string): StageRow => ({ repo: v.repo, number: v.number, stage, at, actor: ACTOR, note: note.slice(0, 300) });
       /** Settles the row while it is still planned or running; the stage events are written with it. `hold` follows a failure. */
-      const finish = async (state: VerificationState, summary: string | null, note: string | null, stage?: StageRow, hold?: StageRow): Promise<boolean> =>
+      const finish = async (state: VerificationState, summary: string | null, note: string | null, stage?: StageRow, hold?: StageRow, inconclusive = false): Promise<boolean> =>
         await db.write(async () => {
-          const changed = (await settleVerifications(db, [{ key, from: ["planned", "running"], set: { state, summary, note, finishedAt: now() }, ...(stage ? { stage } : {}) }])).has(key);
+          const changed = (await settleVerifications(db, [{ key, from: ["planned", "running"], set: { state, summary, note, inconclusive, finishedAt: now() }, ...(stage ? { stage } : {}) }])).has(key);
           if (changed && hold) await addStageEvents(db, [{ ...hold, stage: "hold" }]);
           return changed;
         });
@@ -214,7 +215,7 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
 
       if (verdict.state === "passed") {
         const st = stageOf("verified", at, `${v.kind} at ${sha7} passed${verdict.note ? `: ${verdict.note}` : ""}`);
-        if (await finish("passed", null, verdict.note ?? null, st)) { s.passed++; s.changed++; await noted(st); }
+        if (await finish("passed", null, verdict.note ?? null, st, undefined, verdict.inconclusive === true)) { s.passed++; s.changed++; await noted(st); }
       } else if (verdict.state === "error") {
         const why = oneLine(verdict.reason ?? "error");
         const st = stageOf("verify-error", at, `${v.kind} at ${sha7}: ${why}`);

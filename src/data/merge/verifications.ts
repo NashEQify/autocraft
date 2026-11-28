@@ -137,10 +137,10 @@ export async function saveVerifications(db: Db, rows: SavedVerification[]): Prom
   await db.write(async () => {
     for (const values of kx.batches(list.map((r) => ({
       repo: r.repo, number: r.number, head_sha: r.headSha, base_sha: r.baseSha, kind: r.kind, reason: r.reason, plan: r.plan === null ? null : JSON.stringify(r.plan), model: r.model,
-      head_task_id: r.headTaskId, base_task_id: r.baseTaskId, state: r.state, summary: r.summary, note: r.note, created_at: r.at, finished_at: r.finishedAt,
+      head_task_id: r.headTaskId, base_task_id: r.baseTaskId, state: r.state, summary: r.summary, note: r.note, inconclusive: 0, created_at: r.at, finished_at: r.finishedAt,
     }))))
       await q.run(q.k.insertInto("verifications").values(values).onConflict((oc) => oc.columns(["repo", "number", "head_sha"])
-        .doUpdateSet(kx.excluded(["base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"]))));
+        .doUpdateSet(kx.excluded(["base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "inconclusive", "created_at", "finished_at"]))));
     const stages = stageRows(list.map((r) => r.stage));
     if (stages.length) await addStageEvents(db, stages);
   });
@@ -153,12 +153,13 @@ export async function saveVerifications(db: Db, rows: SavedVerification[]): Prom
 export async function settleVerifications(db: Db, rows: VerificationSettle[]): Promise<Set<HeadRef>> {
   if (rows.length === 0) return new Set();
   return await db.write(async () => {
-    const changed = await settleByHead(db, "verifications", { state: "text", summary: "text", note: "text", finished_at: "text" }, rows.map((r) => ({
+    const changed = await settleByHead(db, "verifications", { state: "text", summary: "text", note: "text", inconclusive: "bigint", finished_at: "text" }, rows.map((r) => ({
       key: r.key, from: r.from,
       set: {
         state: r.set.state,
         ...(r.set.summary !== undefined ? { summary: r.set.summary } : {}),
         ...(r.set.note !== undefined ? { note: r.set.note } : {}),
+        ...(r.set.inconclusive !== undefined ? { inconclusive: r.set.inconclusive ? 1 : 0 } : {}),
         ...(r.set.finishedAt !== undefined ? { finished_at: r.set.finishedAt } : {}),
       },
     })));

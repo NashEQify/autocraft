@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { QueuePage } from "../web/src/api/types.ts";
 import { after, before, test } from "node:test";
 import { addLogin } from "../src/access.ts";
 import { finishRun, insertRun } from "../src/agents/runs.ts";
@@ -113,6 +114,39 @@ test("viewers read no staff text of queue rows or of a quiet pull request's next
   assert.doesNotMatch(await reader("/api/queue/page?tab=all&repos=all"), /MARK-/);
   const fix = JSON.parse(await reader("/api/queue/page?tab=fix&repos=all")) as { rows: { number: number; next: string }[] };
   assert.deepEqual(fix.rows.map((r) => [r.number, r.next]), [[2, ""]]);
+});
+
+test("the merge tab shows an inconclusive regression to staff and viewers, its note to staff only, and nothing of it on a quiet pull request", async () => {
+  const boss = await signIn("boss"), reader = await signIn("reader");
+  const stored = await db.prepare("SELECT number, view FROM item_plans WHERE repo = 'open-app'").all() as { number: number; view: string }[];
+  const update = db.prepare("UPDATE item_plans SET view = ? WHERE repo = 'open-app' AND number = ?");
+  const setVerify = async (verify: unknown) => {
+    for (const r of stored) {
+      const view = JSON.parse(r.view) as { queue: Record<string, unknown> };
+      await update.run(JSON.stringify({ ...view, queue: { ...view.queue, verify } }), r.number);
+    }
+  };
+  const verifyOf = async (get: typeof boss, n: number, verify: unknown) => {
+    await setVerify(verify);
+    const page = JSON.parse(await get("/api/queue/page?tab=merge&repos=all")) as QueuePage;
+    return page.mergeRows.find((r) => r.repo === "open-app" && r.number === n)?.verify;
+  };
+  const passed = { state: "passed", kind: "regression", summary: null, note: "MARK-VERIFY-NOTE" };
+  try {
+    for (const [get, staff] of [[boss, true], [reader, false]] as const) {
+      const flagged = await verifyOf(get, 1, { ...passed, inconclusive: true });
+      assert.equal(flagged?.inconclusive, true, `staff ${staff}`);
+      assert.equal(flagged?.note, staff ? "MARK-VERIFY-NOTE" : null);
+      // The stored flag decides, not the note: the same note without the flag is no warning.
+      assert.equal((await verifyOf(get, 1, { ...passed, inconclusive: false }))?.inconclusive, false, `staff ${staff}`);
+    }
+    // open-app#2 is quiet for a viewer: nothing of its verification shows.
+    const quiet = await verifyOf(reader, 2, { ...passed, inconclusive: true });
+    assert.equal(quiet?.inconclusive, false);
+    assert.equal(quiet?.note, null);
+  } finally {
+    for (const r of stored) await update.run(r.view, r.number);
+  }
 });
 
 test("a maintainer who cannot see a repo finds its name in no fact, wait, statement conflict or model call", async () => {

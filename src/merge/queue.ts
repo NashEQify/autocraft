@@ -46,7 +46,7 @@ export type QueueEntry = {
   /** The block (state changes-requested) comes from a live read newer than the PR's last update, not from the mirrored reviews alone. */
   blockedLive: boolean;
   /** The verification of the PR's current head, or null when there is none. */
-  verify: { state: string; kind: string | null; summary: string | null; note: string | null } | null;
+  verify: { state: string; kind: string | null; summary: string | null; note: string | null; inconclusive: boolean } | null;
   /** For a conflicting PR: what Fix-up does about it ("conflict: merging main", "conflict: asked the contributor", "conflict: held"), or null. */
   conflictNote?: string | null;
   /** The PR is one AutoCraft opened to fix main CI (branch prefix MAIN_FIX_BRANCH_PREFIX); it merges alone, also while main is red. */

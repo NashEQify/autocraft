@@ -266,7 +266,7 @@ export type PrFacts = {
   runsApprovedAfterMerge: boolean;
   /** The merge was approved after the failed or errored verification of the head: that approval stands over it. */
   verifyOverride: boolean;
-  verification: { state: string; kind: string | null; summary: string | null; note: string | null } | null;
+  verification: { state: string; kind: string | null; summary: string | null; note: string | null; inconclusive: boolean } | null;
   /** Why Verify cannot build the repo (private, not Rust without CI), or null. */
   verifyUnavailable: string | null;
 

@@ -382,6 +382,8 @@ const BASE_COLUMNS: [table: string, column: string, type: string][] = [
   // The question of a status comment whose asked people were last pinged in a reply (src/prstatus/ping.ts).
   ["pr_status_comments", "pinged", "TEXT"],
   ["pr_status_comments", "ping_failures", "INTEGER NOT NULL DEFAULT 0"],
+  // A regression pass whose base result does not show the regression (src/verify/results.ts verdictOf). Earlier rows keep 0.
+  ["verifications", "inconclusive", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.

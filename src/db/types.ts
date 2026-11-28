@@ -2622,6 +2622,7 @@ export interface Verifications {
   note: string | null;
   created_at: string;
   finished_at: string | null;
+  inconclusive: Generated<number>;
 }
 
 export interface WebhookRedeliveries {
@@ -3414,7 +3415,7 @@ export const COLUMNS = {
   user_settings: ["login", "key", "value", "updated_at"],
   user_token_revocations: ["id", "login", "token_enc", "queued_at", "kind", "aad", "attempts"],
   user_tokens: ["login", "github_id", "token_enc", "version", "updated_at", "status", "refresh_error"],
-  verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
+  verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at", "inconclusive"],
   webhook_redeliveries: ["guid", "asked", "asked_at", "updated_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],

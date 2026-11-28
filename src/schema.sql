@@ -1349,6 +1349,7 @@ CREATE TABLE IF NOT EXISTS verifications (
   note TEXT,                          -- on a pass: what the result does not show
   created_at TEXT NOT NULL,
   finished_at TEXT,
+  inconclusive INTEGER NOT NULL DEFAULT 0, -- 1 on a regression pass whose base result does not show the regression (src/verify/results.ts verdictOf)
   PRIMARY KEY (repo, number, head_sha)
 );
 CREATE INDEX IF NOT EXISTS verifications_state ON verifications(state);

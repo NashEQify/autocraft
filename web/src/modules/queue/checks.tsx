@@ -60,7 +60,7 @@ const BUILD_TONE: Record<Build, Tone> = { queued: "neutral", running: "accent", 
 export function checkCells(c: ItemChecks | null | undefined): Record<string, ReactNode> {
   if (!c) return {};
   const verify = c.verify;
-  const inconclusive = verify?.regressionInconclusive;
+  const inconclusive = verify?.inconclusive;
   return {
     review: <Check label="Review" tone={c.verdict === "take" ? "ok" : c.verdict === null ? "neutral" : "warn"} state={c.verdict ?? "none"} />,
     ci: <Check label="CI" tone={CI_TONE[c.ci]} state={c.ci} />,

@@ -478,7 +478,7 @@ async function buildPr(db: Db, d: PrPassData, ref: string, m: Mirrored, c: Ctx):
     base.runsApprovedAfterMerge = !!wait?.approvedAt && wait.approvedAt > last.at;
   }
   const v = d.merge.verifications.get(`${ref}@${qh}`);
-  base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note } : null;
+  base.verification = v ? { state: v.state, kind: v.kind, summary: v.summary, note: v.note, inconclusive: v.inconclusive } : null;
   // The leg went to the queue over this result: the person had seen it when they answered (src/preapproval handOver).
   base.verifyOverride = !!handed && !!v?.finishedAt && (v.state === "failed" || v.state === "error") && v.finishedAt <= handed.updated_at;
   const shots = state === "OPEN" ? d.merge.regressions.get(`${ref}@${qh}`) : undefined;

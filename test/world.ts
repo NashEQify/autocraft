@@ -16,7 +16,7 @@ const base = (): Omit<PrFacts, "may"> => ({
   post: { postable: true, posted: { head: HEAD, at: "2026-11-04T10:01:00.000Z", opusAt: REVIEW_AT } },
   checksHere: true, checksOpen: true, ci: "success", mergeable: "MERGEABLE", unknown: null, runs: null,
   lastMerge: null, runsApprovedAfterMerge: false, verifyOverride: false,
-  verification: { state: "passed", kind: "build", summary: null, note: null }, verifyUnavailable: null,
+  verification: { state: "passed", kind: "build", summary: null, note: null, inconclusive: false }, verifyUnavailable: null,
   handOver: false, mergeWaiting: false,
   workflow: { entry: "review", approved: true, startedBy: "maint", startedAt: "2026-11-04T09:00:00.000Z", own: true },
   premerge: { head: HEAD, at: "2026-11-04T10:30:00.000Z", tries: 0, hasFindings: true, unsure: false, defects: 0, followUps: 0, fixesSafe: true, minor: 0, error: null },

@@ -58,10 +58,10 @@ export function statusFor<S extends Pick<ItemStatus, "waiting" | "next">>(r: Rea
 export function queueTextFor(r: Reader, row: QueueRow): QueueRow {
   const veiled = veiledFor(r, row.repo, row.number);
   const result = row.verify;
-  // A passing regression carries a note only when the base result was inconclusive.
+  // The inconclusive flag is no staff text: viewers see it, except on a pull request veiled from them.
   const verify = result && {
     ...result,
-    regressionInconclusive: !veiled && result.kind === "regression" && result.state === "passed" && !!result.note,
+    inconclusive: !veiled && result.inconclusive,
     ...(!r.staff || veiled ? { summary: null, note: null } : {}),
   };
   if (veiled) return { ...row, reason: "", refusedReason: null, note: null, outsideRule: [], verify };
