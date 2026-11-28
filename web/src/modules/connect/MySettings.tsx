@@ -11,13 +11,13 @@ import type { TaskItems } from "../../api/types";
 import { TipLines, Tooltip } from "../../ui/atoms/Tooltip";
 import { useWrite } from "../../lib/hooks";
 import { Fold } from "./Fold";
+import { t } from "../../../../src/i18n/index.ts";
 import { SectionTitle } from "./SectionTitle";
 
 /** A model id as people say it: opus → Opus. */
 const modelName = (m: string) => m.charAt(0).toUpperCase() + m.slice(1);
 
-/** The item choices of My tasks: fast-tracked items are those added with Queue items, the queue command or the fast-track list. */
-const ITEMS_LABEL: Record<TaskItems, string> = { all: "All items", fast: "Fast-tracked", mine: "Fast-tracked by me" };
+const ITEMS_LABEL: Record<TaskItems, string> = { all: "All items", started: "Items someone started", mine: "Items I started" };
 
 /**
  * Saves of one setting run one after another, so the server ends with the latest selection. `confirmed` is the server's last
@@ -26,7 +26,8 @@ const ITEMS_LABEL: Record<TaskItems, string> = { all: "All items", fast: "Fast-t
 type ListSaves<T = string[]> = { chain: Promise<unknown>; n: number; confirmed: T };
 const listSaves = <T = string[],>(confirmed: T): ListSaves<T> => ({ chain: Promise.resolve(), n: 0, confirmed });
 
-export function MySettings() {
+/** `runner`: the Runner page's layout of the same settings (what the runner takes, Takes, Limits, Interactive slots, Visibility). */
+export function MySettings({ runner = false }: { runner?: boolean }) {
   const api = useApi();
   const write = useWrite({ latestOnly: true });
   const { data, error } = useQuery("my-settings", (a) => a.me.settings.get());
@@ -184,6 +185,80 @@ export function MySettings() {
       <span className="text-ink/55">%</span>
     </label>
   );
+  if (runner) {
+    const sec = "flex flex-col gap-2 border-t border-line pt-4";
+    const h = "text-md font-semibold";
+    const num = (label: string, value: string, set: (v: string) => void, save: (v: string) => void, valid: boolean, min: number, max: number, ph?: string) => (
+      <label className="flex min-h-11 items-center justify-between gap-3 text-md">
+        {label}
+        <Input type="number" inputMode="numeric" min={min} max={max} step={1} placeholder={ph} value={value} invalid={!valid} aria-label={label} className="w-20 text-right"
+          onChange={(e) => { set(e.target.value); edited(); }} onBlur={() => save(value)} onKeyDown={(e) => { if (e.key === "Enter") save(value); }} />
+      </label>
+    );
+    const takes = (repo: string) => !manual && (!picks.length || picks.includes(repo));
+    return (
+      <div className="mt-4 flex flex-col gap-4">
+        <section aria-label={t("What your runner takes")} className={sec}>
+          <h2 className={h}>{t("What your runner takes")}</h2>
+          <ul className="flex flex-col gap-1 text-sm">
+            {data.repoChoices.map((repo) => (
+              <li key={repo}>
+                <span className="code">{repo}</span>: {takes(repo) ? t("all work you may run") : t("only what you start")}
+              </li>
+            ))}
+            <li className="text-ink/70">{t("Other repos: only what you start")}</li>
+          </ul>
+        </section>
+        <section aria-label={t("Takes")} className={sec}>
+          <h2 className={h}>{t("Takes")}</h2>
+          <div role="radiogroup" aria-label={t("Takes")}>
+            <RadioRow selected={manual} onSelect={() => !manual && saveManual(true)} title={t("Only what I start")} />
+            <RadioRow selected={!manual} onSelect={() => manual && saveManual(false)} title={t("Anything I may run")}>
+              <Fold title={t("My repos")} summary={picks.length ? `${picks.length} / ${shown.length}` : t("All my repos")}>
+              <div role="group" aria-label={t("My repos")} className="mt-1 rounded-md border border-line p-1">
+                <CheckRow checked={!picks.length} onChange={() => picks.length && savePicks([])} title={t("All my repos")} />
+                {shown.map((r) => {
+                  const ok = choices.has(r);
+                  return (
+                    <CheckRow key={r} checked={picks.includes(r)} onChange={() => savePicks(picks.includes(r) ? picks.filter((x) => x !== r) : [...picks, r].sort())}
+                      title={<span className={ok ? undefined : "line-through opacity-60"} title={ok ? undefined : t("Pipeline off or no write permission")}>{r}</span>} />
+                  );
+                })}
+              </div>
+              </Fold>
+              <Fold title={t("Task kinds")} summary={tasks.length === allTasks.length ? t("All task kinds") : `${tasks.length} / ${allTasks.length}`}>
+              <div role="group" aria-label={t("Task kinds")} className="mt-1 rounded-md border border-line p-1">
+                <CheckRow checked={tasks.length === allTasks.length} onChange={(on) => saveTasks(on ? allTasks : [])} title={t("All task kinds")} />
+                {data.taskChoices.map((k) => (
+                  <CheckRow key={k.id} checked={tasks.includes(k.id)} onChange={() => saveTasks(tasks.includes(k.id) ? tasks.filter((x) => x !== k.id) : allTasks.filter((x) => x === k.id || tasks.includes(x)))} title={k.title} description={k.about} />
+                ))}
+              </div>
+              </Fold>
+            </RadioRow>
+          </div>
+        </section>
+        <section aria-label={t("Limits")} className={sec}>
+          <h2 className={h}>{t("Limits")}</h2>
+          {num(t("Calls at once"), maxCalls, setMaxCalls, saveMax, validMax(maxCalls), 1, 64, t("None"))}
+          {num(t("Keep of 5-hour quota (%)"), vals.fiveHour, (v) => setVals({ ...vals, fiveHour: v }), (v) => save({ ...vals, fiveHour: v }), valid(vals.fiveHour), 0, 90)}
+          {num(t("Keep of weekly quota (%)"), vals.weekly, (v) => setVals({ ...vals, weekly: v }), (v) => save({ ...vals, weekly: v }), valid(vals.weekly), 0, 90)}
+        </section>
+        <section aria-label={t("Interactive slots")} className={sec}>
+          <h2 className={h}>{t("Interactive slots")}</h2>
+          {num(t("Discord replies at once"), slots, setSlots, saveSlots, validSlots(slots), 0, 4)}
+          <p className="text-sm text-ink/70">{t("Separate from calls at once. Pipeline work never uses them.")}</p>
+        </section>
+        <section aria-label={t("Visibility")} className={sec}>
+          <h2 className={h}>{t("Visibility")}</h2>
+          <div className="flex min-h-11 items-center justify-between gap-3 text-md">
+            <span>{t("Show my runner on the shared runner list")}</span>
+            <Switch on={!priv} onChange={(on) => savePrivate(!on)} label={t("Show my runner on the shared runner list")} busy={write.busy === "runner-private"} />
+          </div>
+        </section>
+        <ErrorLine error={problem ?? write.error} />
+      </div>
+    );
+  }
   const item = "flex items-center gap-3 max-sm:justify-between";
   return (
     <Block
@@ -291,7 +366,7 @@ export function MySettings() {
       <Fold className="mt-1" title="My tasks" summary={`${tasks.length === allTasks.length ? "All tasks" : `${tasks.length} of ${allTasks.length} tasks`}${taskItems === "all" ? "" : `, ${ITEMS_LABEL[taskItems].toLowerCase()}`}`}>
         <div className="mt-1 text-sm text-ink/80">Run my tasks on</div>
         <div role="radiogroup" aria-label="Run my tasks on" className="mt-1 rounded-md border border-line p-1 sm:max-w-md">
-          {(["all", "fast", "mine"] as const).map((v) => (
+          {(["all", "started", "mine"] as const).map((v) => (
             <RadioRow key={v} selected={taskItems === v} onSelect={() => taskItems !== v && saveTaskItems(v)} title={ITEMS_LABEL[v]} />
           ))}
         </div>

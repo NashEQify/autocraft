@@ -400,7 +400,8 @@ export function reusableFile(st: { mode: bigint; uid: bigint; gid: bigint }, uid
   return (st.mode & 0o022n) === 0n && Number(st.uid) === uid && Number(st.gid) === gid;
 }
 
-export type ApplyStats = { files: number; dirs: number; symlinks: number; linked: number; copied: number; fetched: number; fetchedBytes: number; bytes: number };
+/** `resumed`: files kept from an interrupted apply (ApplyOptions.resume). */
+export type ApplyStats = { files: number; dirs: number; symlinks: number; linked: number; copied: number; fetched: number; fetchedBytes: number; bytes: number; resumed: number };
 
 /**
  * `pace` is awaited before each chunk of file content is written (fetched or copied, not hard-linked) with its size in
@@ -412,6 +413,16 @@ export type ApplyOptions = {
   pace?: (bytes: number) => Promise<void>;
   /** Called once with the live counters, which the restore keeps updating (`bytes` counts the files started so far). */
   onStats?: (stats: ApplyStats) => void;
+  /** Stops the restore at the next file and aborts running downloads; what is written stays, for a resume. */
+  signal?: AbortSignal;
+  /**
+   * The roots may hold what an interrupted apply of this manifest left (pruneTo turns the tree of another manifest
+   * into that). A file there is kept when this process owns it, nobody else can write it, and its size, mode and mtime
+   * are the entry's: the apply sets the mtime last, after the content is written and checked, so a half-written file
+   * never passes. With `hash`, its sha256 is checked too, for a tree whose writes may not have reached the disk (the
+   * node rebooted since). Everything else there is replaced.
+   */
+  resume?: { hash: boolean };
 };
 
 /** Fails once more than `max` bytes have passed. */
@@ -458,14 +469,15 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   if (!given.length) throw new ManifestError("restore names no root");
   for (const r of given) {
     mkdirSync(roots[r]!, { recursive: true, mode: 0o700 });
-    if (!lstatSync(roots[r]!).isDirectory() || readdirSync(roots[r]!).length) throw new ManifestError(`restore root ${r} is not an empty directory`);
+    if (!lstatSync(roots[r]!).isDirectory() || (!opts.resume && readdirSync(roots[r]!).length)) throw new ManifestError(`restore root ${r} is not an empty directory`);
+    if (opts.resume) chmodSync(roots[r]!, 0o700);
   }
   const rootOf = (p: string) => p.slice(0, p.indexOf("/")) as RootName;
   // Manifests from before modes were normalized may hold 0640 files: every applied entry is readable to all.
   const readable = (e: Entry): Entry => (e.type === "file" ? { ...e, mode: readableFileMode(e.mode) } : e.type === "dir" ? { ...e, mode: readableDirMode(e.mode) } : e);
   const m = { ...full, entries: full.entries.filter((e) => roots[rootOf(e.path)] !== undefined && !isCargoLock(e.path)).map(readable) };
   const abs = (rs: Partial<Roots>, p: string) => join(rs[rootOf(p)]!, p.slice(p.indexOf("/") + 1));
-  const stats: ApplyStats = { files: 0, dirs: 0, symlinks: 0, linked: 0, copied: 0, fetched: 0, fetchedBytes: 0, bytes: 0 };
+  const stats: ApplyStats = { files: 0, dirs: 0, symlinks: 0, linked: 0, copied: 0, fetched: 0, fetchedBytes: 0, bytes: 0, resumed: 0 };
   opts.onStats?.(stats);
   const prev = new Map<string, { abs: string; mtimeNs: bigint }[]>();
   if (opts.previous) {
@@ -479,8 +491,30 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   }
   const near = (a: bigint, b: bigint) => (a > b ? a - b : b - a) < MTIME_SLACK_NS;
   const dirs = m.entries.filter((e): e is DirEntry => e.type === "dir");
-  for (const d of dirs) mkdirSync(abs(roots, d.path), { mode: 0o700 });
+  for (const d of dirs) {
+    const p = abs(roots, d.path);
+    if (opts.resume) {
+      // A finished apply made its directories read-only; anything else at the path goes.
+      const st = lstatSync(p, { throwIfNoEntry: false });
+      if (st?.isDirectory()) {
+        chmodSync(p, 0o700);
+        continue;
+      }
+      removeTree(p);
+    }
+    mkdirSync(p, { mode: 0o700 });
+  }
   stats.dirs = dirs.length;
+  const uid = process.getuid!(), gid = process.getgid!();
+  /** Whether `dest` is a finished file of an earlier apply (see ApplyOptions.resume); removes it when not. */
+  const kept = async (e: FileEntry, dest: string): Promise<boolean> => {
+    const st = lstatSync(dest, { bigint: true, throwIfNoEntry: false });
+    if (!st) return false;
+    if (st.isFile() && Number(st.size) === e.size && Number(st.mode & 0o777n) === e.mode && near(st.mtimeNs, e.mtimeNs) && reusableFile(st, uid, gid)
+      && (!opts.resume!.hash || (await hashFile(dest)).sha256 === e.sha256)) return true;
+    removeTree(dest);
+    return false;
+  };
 
   const groups = new Map<string, FileEntry[]>();
   for (const e of m.entries) if (e.type === "file") groups.get(e.sha256)?.push(e) ?? groups.set(e.sha256, [e]);
@@ -506,9 +540,15 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   await mapLimit([...groups.values()], opts.concurrency ?? 8, async (group) => {
     let local: FileEntry | undefined;
     for (const e of group) {
+      opts.signal?.throwIfAborted();
       const dest = abs(roots, e.path);
       stats.files++;
       stats.bytes += e.size;
+      if (opts.resume && await kept(e, dest)) {
+        stats.resumed++;
+        local ??= e;
+        continue;
+      }
       if (e.size === 0) {
         // Every empty file is its own inode: a shared one makes flock-based lock files deadlock.
         writeFileSync(dest, "", { flag: "wx" });
@@ -532,7 +572,7 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
         copyFileSync(abs(roots, local.path), dest);
         stats.copied++;
       } else {
-        await fetchOne(e, dest, fetch, opts.pace);
+        await fetchOne(e, dest, fetch, opts.pace, opts.signal);
         stats.fetched++;
         stats.fetchedBytes += e.size;
         local = e;
@@ -545,6 +585,7 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   for (const e of m.entries) {
     if (e.type !== "symlink") continue;
     const dest = abs(roots, e.path);
+    if (opts.resume) removeTree(dest);
     symlinkSync(e.target, dest);
     times.push({ abs: dest, ns: e.mtimeNs });
     stats.symlinks++;
@@ -557,7 +598,7 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   return stats;
 }
 
-async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (bytes: number) => Promise<void>): Promise<void> {
+async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (bytes: number) => Promise<void>, signal?: AbortSignal): Promise<void> {
   const h = createHash("sha256");
   let n = 0;
   const tap = new Transform({
@@ -569,7 +610,7 @@ async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (b
     },
   });
   try {
-    await pipeline(await fetch(e.sha256, e.size), createZstdDecompress(), capped(e.size, `blob ${e.sha256.slice(0, 12)}`), tap, createWriteStream(dest, { mode: 0o600, flags: "wx" }));
+    await pipeline(await fetch(e.sha256, e.size), createZstdDecompress(), capped(e.size, `blob ${e.sha256.slice(0, 12)}`), tap, createWriteStream(dest, { mode: 0o600, flags: "wx" }), { signal });
   } catch (err) {
     const msg = `blob ${e.sha256.slice(0, 12)} for ${e.path}: ${(err as Error).message}`;
     // Only a copy that is missing, too large or not valid zstd is bad; timeouts, 5xx, dropped connections and a full disk say nothing about the store.
@@ -606,5 +647,38 @@ export function clearDir(dir: string): void {
     const p = join(dir, n);
     if (lstatSync(p).isDirectory()) open(p);
     rmSync(p, { recursive: true, force: true });
+  }
+}
+
+/** Removes whatever is at `p`, read-only directories in it included. */
+export function removeTree(p: string): void {
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  if (!st) return;
+  if (st.isDirectory()) {
+    chmodSync(p, 0o700);
+    clearDir(p);
+  }
+  rmSync(p, { recursive: true, force: true });
+}
+
+/**
+ * Turns a tree that an apply of `old` left under `roots`, finished or not, into one that `applyManifest(next, roots,
+ * { resume })` can continue: a file stays where `next` lists the same content, mode and mtime at its path, a directory
+ * where `next` lists a directory; everything else `old` put there goes (symlinks too: the apply makes them again).
+ */
+export function pruneTo(old: Manifest, next: Manifest, roots: Partial<Roots>): void {
+  validateEntries(old.entries);
+  const rootOf = (p: string) => p.slice(0, p.indexOf("/")) as RootName;
+  const abs = (p: string) => join(roots[rootOf(p)]!, p.slice(p.indexOf("/") + 1));
+  const want = new Map(next.entries.map((e) => [e.path, e]));
+  const olds = old.entries.filter((e) => roots[rootOf(e.path)] !== undefined);
+  // Every directory writable first, so entries in read-only ones can go.
+  for (const r of ROOTS) if (roots[r] !== undefined && lstatSync(roots[r], { throwIfNoEntry: false })?.isDirectory()) chmodSync(roots[r], 0o700);
+  for (const e of olds) if (e.type === "dir" && lstatSync(abs(e.path), { throwIfNoEntry: false })?.isDirectory()) chmodSync(abs(e.path), 0o700);
+  for (const e of olds) {
+    const n = want.get(e.path);
+    const same = e.type === "dir" ? n?.type === "dir"
+      : e.type === "file" && n?.type === "file" && n.sha256 === e.sha256 && n.mtimeNs === e.mtimeNs && readableFileMode(n.mode) === readableFileMode(e.mode);
+    if (!same) removeTree(abs(e.path));
   }
 }

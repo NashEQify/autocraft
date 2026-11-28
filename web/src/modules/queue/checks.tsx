@@ -62,7 +62,7 @@ export function checkCells(c: ItemChecks | null | undefined): Record<string, Rea
   const verify = c.verify;
   const inconclusive = verify?.regressionInconclusive;
   return {
-    review: <Check label="Review" tone={c.verdict === "take" ? "ok" : "warn"} state={c.verdict} />,
+    review: <Check label="Review" tone={c.verdict === "take" ? "ok" : c.verdict === null ? "neutral" : "warn"} state={c.verdict ?? "none"} />,
     ci: <Check label="CI" tone={CI_TONE[c.ci]} state={c.ci} />,
     verify: <Check label="Verify" tone={inconclusive ? "warn" : verify ? V_TONE[verify.state] ?? "neutral" : "neutral"} state={inconclusive ? "Head passed, regression inconclusive" : verify ? V_LABEL[verify.state] ?? verify.state : "none"} details={[verify?.summary, verify?.note]} />,
     merge: <Check label="Merge" tone={MERGEABLE[c.mergeable][1]} state={MERGEABLE[c.mergeable][0]} />,

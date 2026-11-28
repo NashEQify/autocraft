@@ -7,6 +7,9 @@ import { CLAUDE_PROMPTS, type ClaudePromptId } from "../prompts/index.ts";
 import { AREAS_MAX, FINDINGS_PER_AREA_MAX } from "../security/rules.ts";
 import { stepMaxMin } from "../stages/registry.ts";
 
+/** How long a part of the runner's work fails before it counts as failing (the health check, and which failure it shows). */
+export const RUNNER_FAILING_MS = 60_000;
+
 /** One call per item. `lint`: follow-up turns of the same call (one per lint round). */
 type Call = { id: ClaudePromptId; lint?: boolean };
 /** `items`: the job's items when its params have no `limit`. */
@@ -21,7 +24,6 @@ const item = (id: ClaudePromptId, lint = false): Call => ({ id, ...(lint && { li
 export const STEP_PLANS: Record<string, Plan> = {
   referee: { calls: [item("referee.sonnet")], items: 100 },
   "dupes-compare": { calls: [item("dupes.compare-prs.opus"), item("dupes.compare-issues.sonnet")], items: 20 },
-  decide: { calls: [item("decide.prepare")], items: 50 },
   conversation: { calls: [item("conversation.turn")], items: 30 },
   "areas-propose": { calls: [item("areas.propose")], items: 1 },
   "areas-suggest": { calls: [item("areas.suggest")], items: 1 },
@@ -58,6 +60,16 @@ export function stepBoundMin(step: string, items?: number): number | null {
   }
   return total;
 }
+
+/** Environment variable through which the runner tells a job process its deadline in minutes. */
+export const JOB_DEADLINE_ENV = "AUTOCRAFT_JOB_DEADLINE_MIN";
+
+/**
+ * Share of its deadline after which a job that works in slices (StepContext.timeUp) starts no new unit. The rest covers the unit in
+ * flight and the passes after it, so the job ends as a success well before the runner would stop it. Such jobs end near this share of
+ * the deadline, so a registry floor taken as twice the longest done job stays at or above the deadline.
+ */
+export const SLICE_SHARE = 0.5;
 
 /** Margin on the bound: a quarter and a few minutes for the work around the calls (git, GitHub, the database). */
 const margin = (min: number): number => Math.ceil(min * 1.25) + 5;

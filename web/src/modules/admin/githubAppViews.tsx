@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { useApi, useQuery } from "../../api/client";
 import type { GithubAppStatus, GithubSetupLink } from "../../api/types";
@@ -15,7 +15,9 @@ import { Segmented } from "../../ui/molecules/Segmented";
 import { useUser } from "../../shell/UserContext";
 import { Facts } from "../../ui/molecules/Facts";
 import { Page } from "../../ui/organisms/Page";
-import { authorizeHref } from "../decisions/ExecLine";
+
+/** Starts the GitHub App user authorization for the signed-in operator and returns to this page. The session is not touched. */
+const authorizeHref = (): string => `/auth/authorize-app?${new URLSearchParams({ return_to: window.location.pathname + window.location.search })}`;
 
 const IDENTITY_LABEL = { box: "Box account", app: "GitHub App" } as const;
 const IDENTITY_LINE = {
@@ -101,6 +103,7 @@ function AppBlock({ s, onChange }: { s: GithubAppStatus; onChange: () => void })
               rows={[
                 ["Name", s.app.name],
                 ["Slug", <code key="slug">{s.app.slug}</code>],
+                ...(s.app.mention ? [["Mention name", <code key="mention">{s.app.mention}</code>] as [string, ReactNode]] : []),
                 ["App id", <code key="id">{s.app.id}</code>],
                 ["Acts as you", s.authorized ? "Authorized" : "Not authorized"],
               ]}

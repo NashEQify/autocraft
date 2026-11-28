@@ -12,11 +12,12 @@ import { createHash } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { planChangesSql } from "../core/plan-changes.ts";
-import type { Db, Param, Row, Value } from "./index.ts";
+import { planChangesSql } from "./plan-triggers.ts";
+import type { Param, Row, Value } from "./index.ts";
 import { connect } from "../db.ts";
 import { connectDb, dbFor, isPgUrl, loadPg } from "./open.ts";
-import { applyPgSchema, MIGRATION_LOCK_KEY, pgSchemaSql } from "./pg-migrate.ts";
+import { queryDb, type QueryDb } from "./query-db.ts";
+import { MIGRATION_LOCK_KEY, pgSchemaSql } from "./pg-migrate.ts";
 import { migratePg } from "./pg-triggers.ts";
 import { pgConnectionString } from "./postgres.ts";
 import { HAND_TRIGGERS } from "./pg-schema.ts";
@@ -29,10 +30,10 @@ import { HAND_TRIGGERS } from "./pg-schema.ts";
 export const RUNTIME_TABLES = new Set(["change_seq", "item_changes", "plan_full", "plan_full_causes", "plan_shadow_diffs", "plan_pass_stats", "plan_bulk", "review_blockers", "live_flush"]);
 
 /**
- * Rows a copy leaves where they are and a comparison leaves out: the schema stamp belongs to each database's own
- * migration (SQLite and Postgres stamps differ), so the target keeps or writes its own.
+ * Rows a copy leaves where they are and a comparison leaves out: the schema stamp and the Postgres schema generation
+ * belong to each database's own migration (SQLite and Postgres stamps differ), so the target keeps or writes its own.
  */
-const ROW_FILTER: Record<string, string> = { settings: "key <> 'schema_stamp'" };
+const ROW_FILTER: Record<string, string> = { settings: "key NOT IN ('schema_stamp', 'schema_generation')" };
 
 /**
  * Columns that Postgres stores as bytea and SQLite rows may hold as plain text from before texts were gzipped
@@ -61,7 +62,7 @@ interface Table {
 }
 
 interface Side {
-  db: Db;
+  db: QueryDb;
   label: string;
   tables: Map<string, Table>;
 }
@@ -76,7 +77,7 @@ export function describeTarget(target: string): string {
   return u.toString();
 }
 
-async function sqliteTables(db: Db): Promise<Map<string, Table>> {
+async function sqliteTables(db: QueryDb): Promise<Map<string, Table>> {
   const out = new Map<string, Table>();
   const list = (await db.prepare("PRAGMA main.table_list").all()) as { name: string; type: string; wr: number }[];
   for (const t of list) {
@@ -102,7 +103,7 @@ async function sqliteTables(db: Db): Promise<Map<string, Table>> {
   return out;
 }
 
-async function pgTables(db: Db): Promise<Map<string, Table>> {
+async function pgTables(db: QueryDb): Promise<Map<string, Table>> {
   const cols = (await db.prepare(`SELECT c.relname AS t, a.attname AS c, a.attgenerated AS gen, format_type(a.atttypid, a.atttypmod) AS type
     FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid
     WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped
@@ -130,16 +131,16 @@ async function pgTables(db: Db): Promise<Map<string, Table>> {
   return out;
 }
 
-const tablesOf = (db: Db): Promise<Map<string, Table>> => (db.dialect === "postgres" ? pgTables(db) : sqliteTables(db));
+const tablesOf = (db: QueryDb): Promise<Map<string, Table>> => (db.dialect === "postgres" ? pgTables(db) : sqliteTables(db));
 
 async function openSide(target: string, opts: { readOnly: boolean }): Promise<Side> {
-  let db: Db;
+  let db: QueryDb;
   // Postgres opens as it is: the target gets its triggers after the rows are in, and a source is never migrated.
-  if (isPgUrl(target)) db = await connectDb(target, { role: "cli", migrate: false });
+  if (isPgUrl(target)) db = queryDb(await connectDb(target, { role: "cli", migrate: false }));
   else if (opts.readOnly) {
     if (!existsSync(target)) throw new Error(`no SQLite database at ${target}`);
-    db = await dbFor(new DatabaseSync(target, { readOnly: true }));
-  } else db = await dbFor(connect(target)); // The file itself, also where a test hook makes connectDb open Postgres for a path.
+    db = queryDb(await dbFor(new DatabaseSync(target, { readOnly: true })));
+  } else db = queryDb(await dbFor(connect(target))); // The file itself, also where a test hook makes connectDb open Postgres for a path.
   return { db, label: describeTarget(target), tables: new Map() };
 }
 
@@ -196,7 +197,7 @@ function matchTables(a: Pick<Side, "label" | "tables">, b: Pick<Side, "label" | 
 }
 
 /** The table's rows in key order, `batch` at a time. Inside a db.read every page comes from one snapshot. */
-async function* pages(db: Db, t: Table, batch: number): AsyncGenerator<Row[]> {
+async function* pages(db: QueryDb, t: Table, batch: number): AsyncGenerator<Row[]> {
   const sqlite = db.dialect === "sqlite";
   const keyRef = (k: string) => (sqlite && k === "rowid" && !t.select.includes(qi("rowid")) ? "rowid" : qi(k));
   const keys = t.key.map(keyRef);
@@ -285,7 +286,7 @@ async function copyTable(src: Side, dst: Side, from: Table, to: Table, batch: nu
  * The last key handed out per table, where the backend keeps a counter: SQLite AUTOINCREMENT tables (the larger of
  * sqlite_sequence and the largest rowid), Postgres identity sequences (0 before the first value).
  */
-async function sequences(db: Db): Promise<Map<string, number>> {
+async function sequences(db: QueryDb): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (db.dialect === "sqlite") {
     const auto = (await db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'table' AND sql LIKE '%AUTOINCREMENT%'").all()) as { name: string }[];
@@ -301,7 +302,7 @@ async function sequences(db: Db): Promise<Map<string, number>> {
   return out;
 }
 
-async function pgIdentities(db: Db): Promise<{ t: string; col: string; seq: string; v: number | null }[]> {
+async function pgIdentities(db: QueryDb): Promise<{ t: string; col: string; seq: string; v: number | null }[]> {
   return (await db.prepare(`SELECT c.relname AS t, a.attname AS col, s.seq,
       (SELECT p.last_value FROM pg_sequences p WHERE format('%I.%I', p.schemaname, p.sequencename) = s.seq) AS v
     FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid
@@ -311,7 +312,7 @@ async function pgIdentities(db: Db): Promise<{ t: string; col: string; seq: stri
 }
 
 /** Sets each identity sequence of the copied tables past the copied keys and the source's own counter. */
-async function setPgSequences(db: Db, copied: Set<string>, source: Map<string, number>): Promise<void> {
+async function setPgSequences(db: QueryDb, copied: Set<string>, source: Map<string, number>): Promise<void> {
   await db.write(async () => {
     for (const { t, col, seq } of await pgIdentities(db)) {
       if (!copied.has(t)) continue;
@@ -324,7 +325,7 @@ async function setPgSequences(db: Db, copied: Set<string>, source: Map<string, n
 }
 
 /** Sets sqlite_sequence of the copied AUTOINCREMENT tables to at least the source's counter. */
-async function setSqliteSequences(db: Db, copied: Set<string>, source: Map<string, number>): Promise<void> {
+async function setSqliteSequences(db: QueryDb, copied: Set<string>, source: Map<string, number>): Promise<void> {
   const auto = (await db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'table' AND sql LIKE '%AUTOINCREMENT%'").all()) as { name: string }[];
   await db.write(async () => {
     for (const { name } of auto) {
@@ -354,22 +355,25 @@ export function pgSchemaWithoutTriggers(sql: string = pgSchemaSql()): string {
 }
 
 /**
- * Brings a Postgres target to the app's schema and triggers once the copied rows are in, in one transaction under the
- * migration lock, so the copied rows fire nothing. This is the one place the copy migrates: `migratePg` applies the schema
- * file with its hand-translated triggers, creates the RUNTIME_TABLES with their runtime triggers and stores the stamp.
+ * Brings a Postgres target to the app's schema and triggers once the copied rows are in, under the migration lock; the
+ * triggers are created after the rows, so the copied rows fire nothing. This is the one place the copy migrates: `migratePg`
+ * applies the schema file with its hand-translated triggers, creates the RUNTIME_TABLES with their runtime triggers and
+ * stores the stamp. With no other session working on the target, the indexes are built plainly, which is faster than
+ * CONCURRENTLY.
  */
 async function migratePgTarget(url: string): Promise<void> {
   const pg = await loadPg();
   const client = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-copy" });
   await client.connect();
   try {
-    await migratePg(client);
+    const busy = (await client.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'")).rows[0]!.n as number;
+    await migratePg(client, { plainIndexes: busy === 0 });
   } finally {
     await client.end();
   }
 }
 
-async function hasRows(db: Db, tables: Iterable<string>): Promise<string | undefined> {
+async function hasRows(db: QueryDb, tables: Iterable<string>): Promise<string | undefined> {
   for (const t of tables) if (await db.prepare(`SELECT 1 AS x FROM ${qi(t)} LIMIT 1`).get()) return t;
   return undefined;
 }
@@ -415,7 +419,7 @@ async function prepareTarget(target: string, replace: boolean, match: (tables: M
     const probe = new DatabaseSync(target, { readOnly: true });
     let full: string | undefined;
     try {
-      const pdb = await dbFor(probe);
+      const pdb = queryDb(await dbFor(probe));
       full = await hasRows(pdb, (await sqliteTables(pdb)).keys());
     } finally {
       probe.close();
@@ -448,7 +452,7 @@ async function prepareTarget(target: string, replace: boolean, match: (tables: M
  * read here and written back by the returned function after the copy, under new rowids, since the copied rows bring
  * theirs and may take the old ones.
  */
-async function clearTables(db: Db, tables: string[]): Promise<() => Promise<void>> {
+async function clearTables(db: QueryDb, tables: string[]): Promise<() => Promise<void>> {
   const kept: { table: string; rows: Row[] }[] = [];
   if (!tables.length) return async () => undefined;
   await db.write(async () => {
@@ -470,7 +474,7 @@ async function clearTables(db: Db, tables: string[]): Promise<() => Promise<void
     });
 }
 
-async function finishSqlite(db: Db, triggers: string[]): Promise<void> {
+async function finishSqlite(db: QueryDb, triggers: string[]): Promise<void> {
   const sync = db.sync;
   if (!sync) throw new Error("SQLite target without a connection");
   const fts = (await db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%fts5%'").all()) as { name: string }[];
@@ -602,7 +606,7 @@ export interface TableDigest {
  * The table's row count and digest. Rows hash as canonical JSON with columns in name order; the table digest is over the
  * sorted row digests, so it does not depend on how each backend orders equal-looking keys (citext against NOCASE).
  */
-async function digestTable(db: Db, t: Table, batch: number): Promise<TableDigest> {
+async function digestTable(db: QueryDb, t: Table, batch: number): Promise<TableDigest> {
   const cols = [...t.columns].sort();
   const rowHashes: Buffer[] = [];
   for await (const page of pages(db, t, batch)) {

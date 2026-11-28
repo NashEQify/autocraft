@@ -3,10 +3,11 @@
 // everything, and every write to a shadowed table, names the table with `main.`.
 //
 // - SQLite: TEMP views on the handle's connection (`sqliteScopeSql`).
-// - Postgres: permanent views in schema `scoped`, kept current by migratePg (`pgScopeSql`). A scoped handle connects with
+// - Postgres: permanent views in schema `scoped`, kept current by migratePg (`pgScopeViews`). A scoped handle connects with
 //   `search_path=scoped,<app schema>`, so unqualified names find the views first, and its statements turn `main.x` into
 //   `<app schema>.x` (src/db/params.ts rewriteForPostgres).
 import { jsonEach, jsonText } from "./portable.ts";
+import { DROP_RETIRED, RETIRED_TABLES } from "./retired-names.ts";
 import type { Dialect } from "./index.ts";
 
 /** The schema of the Postgres views. */
@@ -20,7 +21,7 @@ function views(d: Dialect): [string, string][] {
   // A batch (repo NULL) is hidden when any of its items is in an untracked repo.
   const items = d === "postgres" ? "CASE WHEN items IS JSON ARRAY THEN items ELSE '[]' END" : "CASE WHEN json_valid(items) THEN items ELSE '[]' END";
   const batch = `repo IS NULL AND NOT EXISTS (SELECT 1 FROM ${jsonEach(d, items, "j")} WHERE ${jsonText(d, "j.value", "$.repo")} NOT ${TRACKED})`;
-  return [
+  const all: [string, string][] = [
     ["repos", byRepo("name")],
     ["items", byRepo("repo")],
     ["comments", byRepo("repo")],
@@ -29,6 +30,7 @@ function views(d: Dialect): [string, string][] {
     ["decisions", `${byRepo("repo")} OR (${batch})`],
     ["token_usage", `repo IS NULL OR ${byRepo("repo")}`],
   ];
+  return all.filter(([t]) => !DROP_RETIRED || !RETIRED_TABLES.includes(t));
 }
 
 /** Every table name a scoped handle shadows with a view; writes to them go through `main.`. */
@@ -46,14 +48,13 @@ export function plainSchema(name: string): string {
 }
 
 /**
- * The Postgres views over the tables of `schema` (the app schema), recreated from scratch so they pick up added columns.
- * The tables carry rowid as a column there, so `*` includes it.
+ * The Postgres views over the tables of `schema` (the app schema), each replaced in place so it picks up added columns
+ * (`*` is expanded when a view is created). The tables carry rowid as a column there, so `*` includes it.
  */
-export function pgScopeSql(schema: string): string {
+export function pgScopeViews(schema: string): { view: string; sql: string }[] {
   const app = plainSchema(schema);
-  return [
-    `DROP SCHEMA IF EXISTS ${SCOPED_SCHEMA} CASCADE;`,
-    `CREATE SCHEMA ${SCOPED_SCHEMA};`,
-    ...views("postgres").map(([t, where]) => `CREATE VIEW ${SCOPED_SCHEMA}.${t} AS SELECT * FROM ${app}.${t} WHERE ${where.replaceAll("main.", `${app}.`)};`),
-  ].join("\n");
+  return views("postgres").map(([t, where]) => ({
+    view: `${SCOPED_SCHEMA}.${t}`,
+    sql: `CREATE OR REPLACE VIEW ${SCOPED_SCHEMA}.${t} AS SELECT * FROM ${app}.${t} WHERE ${where.replaceAll("main.", `${app}.`)}`,
+  }));
 }

@@ -78,7 +78,7 @@ async function warmSync(args: string[]): Promise<void> {
     writeBytesPerSec: c.writeBytesPerSec, graceMs: c.graceMs, maxFsPct: c.maxFsPct,
   });
   log(`warm sync: node ${c.node}, dir ${c.dir}, every ${c.pollMs / 1000} s`);
-  if (args.includes("--once")) return await agent.cycle();
+  if (args.includes("--once")) return await agent.once();
   const ac = new AbortController();
   for (const s of ["SIGINT", "SIGTERM"] as const) process.on(s, () => ac.abort());
   await agent.run(ac.signal, c.pollMs);

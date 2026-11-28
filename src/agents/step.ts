@@ -2,15 +2,18 @@
 // where Jev is unsure or unavailable). A step is declared once (src/agents/steps.ts) with its parser, retries,
 // lint and fallbacks; the runner does the calls, retries, lint and fix turn (askClaude), the Jev reply parse, the
 // usage rows and the error result.
-import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
+import { ItemWithdrawnError, NoTakerError, poolRoom, repoBatches } from "./call.ts";
 import { jevAvailable } from "./jev.ts";
-import { jevParallel } from "./accounts.ts";
-import { add, askClaude, askJev, pool, saveUsage, type AskOptions, type LintedReply, type Usage } from "../classify/run.ts";
+import { add, askClaude, askJev, pool, promptVersion, saveUsages, type AskOptions, type UsageRow, type LintedReply, type Usage } from "../classify/run.ts";
 import { CLAUDE_PROMPTS, JEV_PROMPTS, JEV_USD_PER_INPUT_TOKEN, renderJev, type ClaudePromptId, type JevPromptId } from "../prompts/index.ts";
-import type { DupePair } from "../dupes/pair.ts";
+import type { DupeAsk, DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
 import type { Lint, LintProblem } from "../replylint.ts";
 import type { Db } from "../db/index.ts";
+import { loadLiveConfig, loadTrackedRepos } from "../data/control/index.ts";
+import { keepEarlierUsage, loadUnsure, pruneUnsure, saveUnsure } from "../data/inference/index.ts";
+import { loadItems } from "../data/mirror/index.ts";
+import { createHash } from "node:crypto";
 
 /** What a parser knows about the reply it reads. */
 export type ParseCtx = {
@@ -27,7 +30,7 @@ export type ParseCtx = {
 /** `value` is what the reply answered; `rest` is the part of the input without a valid answer, asked again on the next attempt (absent: done). */
 export type Parsed<I, V> = { value: V; rest?: I };
 
-type StepBase<I, V> = {
+type StepBase<I, _V> = {
   /** Items in an input, for the usage row's item count; default: its length for a list, else 1. */
   size?: (input: I) => number;
   /** Attempts per call; default: the prompt's registered `limits.attempts`. */
@@ -55,7 +58,7 @@ export type JevStep<I, V, C = void> = StepBase<I, V> & {
   provider: "jev";
   id: JevPromptId;
   /** The item the run records and the request body (default body: the registered request for the item). */
-  request: (input: I, ctx: C) => { item: Item | DupePair | { ref: string }; body?: string };
+  request: (input: I, ctx: C) => { item: Item | DupePair | DupeAsk | { ref: string }; body?: string };
   /** `answers` of Jev's JSON reply; null is a parse error. Not called when the reply was not JSON. */
   parse: (answers: unknown, input: I, ctx: ParseCtx, c: C) => Parsed<I, V> | null;
 };
@@ -75,6 +78,8 @@ export type UsageSave = {
   skipWhen?: (r: { ok: boolean }) => Promise<boolean>;
   /** Jev: also save the row (with zero tokens) when no reply carried a usage field. */
   withoutUsage?: boolean;
+  /** Collect the row here instead of saving it, for the caller to save a chunk of rows in one write (saveUsages). */
+  sink?: UsageRow[];
 };
 
 export type StepOpts<I, C = void> = Omit<AskOptions, "lint"> & {
@@ -84,12 +89,16 @@ export type StepOpts<I, C = void> = Omit<AskOptions, "lint"> & {
   ctx?: C;
   usage?: UsageSave;
   cancelled?: () => Promise<boolean>;
+  /** Jev: whether Jev may be called, in place of reading the stored state before every attempt. */
+  available?: () => Promise<boolean>;
   /** The call itself, in place of the real model call (tests, injected dependencies). Gets the lint the step declares. */
   ask?: (input: I, lint: Lint | undefined) => Promise<LintedReply | null>;
   /** Called before each call with the input still to answer (the first call included). */
   onAttempt?: (input: I, attempt: number) => void;
   /** Called with each Claude reply before it is parsed (log the lint outcome, read `turns`). */
   onReply?: (reply: LintedReply) => void;
+  /** Jev: called with each finished `jev ask` (its exit code and stderr), before it is parsed. */
+  onJevProc?: (p: { code: number | null; stderr: string }) => void;
 };
 
 export type StepResult<I, V> =
@@ -108,7 +117,8 @@ type Reply = { text: string; usage: Usage; problems?: LintProblem[]; fixTurn?: b
  * model's safety filter declined, which the queue already ran once more elsewhere, ends the attempts with its error.
  * Values of every answered attempt are in `values`, in order; `rest` is what no attempt answered. A call withdrawn for lack of
  * a taker (NoTakerError) ends the attempts: with earlier answers they are returned with the rest unanswered, as when the
- * attempts run out; without, the usage of what ran is saved and the error is thrown.
+ * attempts run out; without, the usage of what ran is saved and the error is thrown. A call withdrawn for its item
+ * (ItemWithdrawnError) is thrown the same way, earlier answers or not.
  */
 export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C> = {}): Promise<StepResult<I, V>> {
   const reg = step.provider === "jev" ? JEV_PROMPTS[step.id] : CLAUDE_PROMPTS[step.id];
@@ -121,14 +131,15 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
   let ran: string | undefined, untaken: NoTakerError | undefined;
   for (let attempt = 0; attempt < attempts && todo !== undefined; attempt++) {
     if (await opts.cancelled?.()) break;
-    if (step.provider === "jev" && !await jevAvailable(db)) { error = "jev unavailable"; break; }
+    if (step.provider === "jev" && !await (opts.available ?? (() => jevAvailable(db)))()) { error = "jev unavailable"; break; }
     if (attempt > 0 && step.backoffMs) await sleep(step.backoffMs);
     opts.onAttempt?.(todo, attempt);
     let r: Reply | null;
     let refusal: string | null = null;
     try { r = await call(db, step, todo, { ...opts, onRefused: (e) => { refusal = e; opts.onRefused?.(e); } }); } catch (e) {
       if (!(e instanceof NoTakerError)) throw e;
-      if (!values.length) untaken = e;
+      // A call withdrawn for its item ends the item's work, earlier answers included.
+      if (!values.length || e instanceof ItemWithdrawnError) untaken = e;
       break;
     }
     if (!r && refusal !== null) { error = refusal; break; }
@@ -158,10 +169,14 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
     const items = u.items ? u.items(ok, total, rest === undefined ? 0 : sizeOf(step, rest)) : total - (rest === undefined ? 0 : sizeOf(step, rest));
     const model = u.model ?? reg.models[0]!;
     const saved = step.provider === "jev" ? { ...usage, cost: usage.input * JEV_USD_PER_INPUT_TOKEN } : usage;
-    if (u.keepEarlier) await db.run(db.k.updateTable("main.token_usage")
-      .set((eb) => ({ agent: eb(eb("agent", "||", eb.val("@")), "||", eb.fn.coalesce("started_at", eb.val(""))) }))
-      .where("run_id", "=", u.run).where("agent", "=", u.agent));
-    await saveUsage(db, u.run, u.agent, u.stage, model, items, saved, start, new Date().toISOString());
+    const row = { runId: u.run, agent: u.agent, stage: u.stage, model, items, u: saved, start, end: new Date().toISOString() };
+    if (u.sink) {
+      if (u.keepEarlier) await keepEarlierUsage(db, u.run, [u.agent]);
+      u.sink.push(row);
+    } else if (u.keepEarlier) {
+      // The rename and the new row commit together: a crash between them would leave the old row renamed and no new one.
+      await db.write(async () => { await keepEarlierUsage(db, u.run, [u.agent]); await saveUsages(db, [row]); });
+    } else await saveUsages(db, [row]);
   }
   if (untaken) throw untaken;
   const runId = opts.usage?.run;
@@ -172,12 +187,13 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
 async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C>): Promise<Reply | null> {
   if (step.provider === "claude") {
     const lint = step.lint?.make(input, opts.ctx as C);
-    const { ctx: _c, usage: _u, cancelled: _x, ask, model: m, onAttempt: _a, onReply: _r, ...ask_ } = opts;
+    const { ctx: _c, usage: _u, cancelled: _x, ask, model: m, onAttempt: _a, onReply: _r, onJevProc: _p, ...ask_ } = opts;
     const model = m ?? step.model ?? CLAUDE_PROMPTS[step.id].models[0]!;
     return ask ? ask(input, lint) : askClaude(step.id, model, (step.toPrompt ? step.toPrompt(input) : input) as never, db, { ...ask_, ...(lint && { lint }) });
   }
   const { item, body } = step.request(input, opts.ctx as C);
-  const p = await askJev(step.id, item as never, db, body ?? renderJev(step.id, item as Item | DupePair), opts.usage === undefined);
+  const p = await askJev(step.id, item as never, db, body ?? renderJev(step.id, item as Item | DupeAsk), opts.usage === undefined);
+  opts.onJevProc?.(p);
   type Json = { answers?: unknown; usage?: { input_tokens?: number; output_tokens?: number } };
   let parsed: unknown = null;
   try { parsed = JSON.parse(p.stdout); } catch { /* the step reports an unreadable answer */ }
@@ -186,7 +202,11 @@ async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C
   return { answers: j?.answers, usage, code: p.code, json: j !== null };
 }
 
-/** A Jev step with its Haiku fallback. Jev answers each item; Haiku answers (in batches) the items Jev is not sure about. */
+/**
+ * A Jev step with its Haiku fallback. Jev answers each item; Haiku answers (in batches) the items Jev is not sure about. An unsure
+ * answer whose Haiku batch no Task Runner could take is kept (jev_unsure) and stands in for Jev's answer while the item's Jev
+ * request is unchanged, so later passes ask only Haiku.
+ */
 export type TieredStep<It, JV, HV, C = void, B = It[]> = {
   jev: JevStep<It, JV, C>;
   /** Haiku answers a batch; its value is `[ref, answer]` pairs, and `rest` the batch items without one. */
@@ -204,7 +224,7 @@ export type TieredStep<It, JV, HV, C = void, B = It[]> = {
   onJevFailure: "haiku" | "haiku-when-unavailable";
 };
 
-export type TieredOpts<It, C> = {
+export type TieredOpts<It, C, JV = unknown> = {
   ctx?: C;
   /** Jev call width (default: the Jev parallelism setting). */
   jevWidth?: number | (() => Promise<number>);
@@ -215,10 +235,12 @@ export type TieredOpts<It, C> = {
   /** Start the first Haiku batch alone (a failure that stops all calls then shows early). */
   first?: boolean;
   cancelled?: () => Promise<boolean>;
+  /** Jev answers already given by ref (asked in another request: src/classify/run.ts runJev); these items are not sent to Jev. */
+  given?: ReadonlyMap<string, JV>;
 };
 
 export type TieredResult<JV, HV> = {
-  /** Jev's answer per ref (null: none, or Jev was not asked). */
+  /** Jev's answer per ref, asked, given or kept from an earlier pass (null: none, or Jev was not asked). */
   jev: Map<string, JV | null>;
   haiku: Map<string, HV>;
   /** Items Jev could not be asked or answer because it is unavailable, so Haiku decided alone. */
@@ -227,16 +249,22 @@ export type TieredResult<JV, HV> = {
   asked: Set<string>;
   /** Items Haiku was to answer whose batch did not run: no Task Runner may take its repo. */
   skipped: Set<string>;
+  /** Items whose Jev answer was kept from an earlier pass (jev_unsure), not asked now. */
+  kept: Set<string>;
 };
 
-export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C> = {}): Promise<TieredResult<JV, HV>> {
-  const out: TieredResult<JV, HV> = { jev: new Map(), haiku: new Map(), alone: new Set(), asked: new Set(), skipped: new Set() };
-  if (await jevAvailable(db)) {
-    await pool(items.map((x) => async () => {
+export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C, JV> = {}): Promise<TieredResult<JV, HV>> {
+  const out: TieredResult<JV, HV> = { jev: new Map(), haiku: new Map(), alone: new Set(), asked: new Set(), skipped: new Set(), kept: new Set() };
+  for (const x of items) if (opts.given?.has(tier.ref(x))) out.jev.set(tier.ref(x), opts.given.get(tier.ref(x))!);
+  const kept = await keptUnsure(db, tier, items, opts.ctx as C);
+  for (const x of items) { const k = kept.rows.get(tier.ref(x)); if (k !== undefined && !out.jev.has(tier.ref(x)) && k.hash === kept.hashOf(x)) { out.jev.set(tier.ref(x), k.answer); out.kept.add(tier.ref(x)); } }
+  const toJev = items.filter((x) => !out.jev.has(tier.ref(x)));
+  if (toJev.length && await jevAvailable(db)) {
+    await pool(toJev.map((x) => async () => {
       if (!await jevAvailable(db)) return;
       const r = await runModelStep(db, tier.jev, x, { ctx: opts.ctx, usage: opts.jevUsage?.(x), cancelled: opts.cancelled });
       out.jev.set(tier.ref(x), r.ok ? r.value : null);
-    }), opts.jevWidth ?? (async () => await jevParallel(db)));
+    }), opts.jevWidth ?? (async () => (await loadLiveConfig(db)).jevParallel));
   }
   const down = !await jevAvailable(db);
   const ask: It[] = [];
@@ -247,7 +275,8 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
     if (jv === null && down) out.alone.add(tier.ref(x));
     ask.push(x);
   }
-  if (!ask.length || await opts.cancelled?.()) return out;
+  if (!ask.length) { await keepUnsure(db, tier, items, out, kept, down); return out; }
+  if (await opts.cancelled?.()) return out;
   const per = opts.perCall ?? CLAUDE_PROMPTS[tier.haiku.id].limits.perCall;
   const batches = await repoBatches(db, ask, per, tier.repo, (x) => [tier.item(x)]);
   await pool(batches.map((batch, n) => async () => {
@@ -258,5 +287,67 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: Ti
   }), poolRoom(db, (i) => [...new Set(batches[i]!.map(tier.repo))], (i) => batches[i]!.map(tier.item), { promptId: tier.haiku.id }), { first: opts.first, skipped: (i) => {
     for (const x of batches[i]!) { out.skipped.add(tier.ref(x)); out.alone.delete(tier.ref(x)); }
   } });
+  await keepUnsure(db, tier, items, out, kept, down);
   return out;
+}
+
+/** The hash a kept Jev answer (jev_unsure) is valid for: the request's body, with the prompt's version and the parser that made the value. */
+export function jevRequestHash<I, V, C>(step: JevStep<I, V, C>, input: I, ctx: C): string {
+  const { item, body } = step.request(input, ctx);
+  return createHash("sha256").update(`${promptVersion(step.id)}\n${String(step.parse)}\n${body ?? renderJev(step.id, item as Item | DupeAsk)}`).digest("hex");
+}
+
+type Kept<It, JV> = { rows: Map<string, { hash: string; answer: JV | null }>; hashOf: (x: It) => string };
+
+/** The unsure Jev answers kept for `items` (jev_unsure), and the hash of each item's Jev request they are valid for. */
+async function keptUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], ctx: C): Promise<Kept<It, JV>> {
+  const hashes = new Map<It, string>();
+  const hashOf = (x: It): string => {
+    let h = hashes.get(x);
+    if (h === undefined) hashes.set(x, h = jevRequestHash(tier.jev, x, ctx));
+    return h;
+  };
+  const rows = new Map<string, { hash: string; answer: JV | null }>();
+  if (!items.length) return { rows, hashOf };
+  for (const [ref, r] of await loadUnsure(db, tier.jev.id, items.map(tier.ref))) {
+    try { rows.set(ref, { hash: r.hash, answer: JSON.parse(r.answer) as JV }); } catch { /* asked again */ }
+  }
+  return { rows, hashOf };
+}
+
+/** Whether a kept Jev answer with `hash` is for the item's current request: its next call is then Haiku's, not Jev's. */
+export async function keptIsCurrent<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, item: It, hash: string, ctx: C): Promise<boolean> {
+  return (await keptUnsure(db, tier, [], ctx)).hashOf(item) === hash;
+}
+
+/**
+ * Keeps the unsure Jev answer (or that Jev, while up, gave none) of each item whose Haiku batch no Task Runner could take, so the next pass
+ * asks only Haiku while the Jev request is unchanged; drops the kept answers of the other items (settled, or sent to Haiku).
+ */
+async function keepUnsure<It, JV, HV, C, B>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], out: TieredResult<JV, HV>, kept: Kept<It, JV>, down: boolean): Promise<void> {
+  const at = new Date().toISOString();
+  const keep = items.flatMap((x) => {
+    const ref = tier.ref(x), jv = out.jev.get(ref) ?? null;
+    if (!out.skipped.has(ref) || (jv === null && (down || !out.jev.has(ref)))) return [];
+    const hash = kept.hashOf(x);
+    return kept.rows.get(ref)?.hash === hash ? [] : [{ ref, hash, answer: JSON.stringify(jv), at }];
+  });
+  const drop = [...kept.rows.keys()].filter((ref) => !out.skipped.has(ref));
+  await saveUnsure(db, { promptId: tier.jev.id, keep, drop });
+}
+
+/** The items a kept answer's ref names: `repo#n`, or both items of a pair `repo#a~b` (src/dupes/pair.ts). */
+const refItems = (ref: string): { repo: string; number: number }[] => {
+  const i = ref.lastIndexOf("#");
+  return ref.slice(i + 1).split("~").map((n) => ({ repo: ref.slice(0, i), number: Number(n) }));
+};
+
+/** Drops kept unsure Jev answers older than the keep time and those with no item that is open in a tracked repo. */
+export async function pruneJevUnsure(db: Db, nowMs: number = Date.now()): Promise<number> {
+  return await pruneUnsure(db, nowMs, async (refs) => {
+    const keys = refs.flatMap(refItems);
+    const [items, tracked] = await db.together(() => Promise.all([loadItems(db, keys, "card"), loadTrackedRepos(db, [...new Set(keys.map((k) => k.repo))])]));
+    const open = new Set([...items].filter(([, i]) => i.state === "OPEN" && tracked.has(i.repo)).map(([k]) => k));
+    return new Set(refs.filter((ref) => refItems(ref).some((k) => open.has(`${k.repo}#${k.number}`))));
+  });
 }

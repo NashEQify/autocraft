@@ -12,7 +12,7 @@ import { handleMeta } from "../src/discord/index.ts";
 import { setup } from "../src/dash/api/discord.ts";
 import { countOf, forgetAuthor, handleDispatch, linksOf } from "../src/discord/store.ts";
 import { SCRATCH } from "./scratch.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb } from "./helpers/raw-db.ts";
 import { cols, excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -46,6 +46,13 @@ describe("event handler", () => {
     ]));
   });
   const msg = (id: string, content: string, channel = "c1") => ({ id, channel_id: channel, guild_id: "g1", content, timestamp: "2026-11-01T10:00:00.000Z", author: { id: "u1" } });
+
+  test("a forwarded message counts the items its snapshot names", async () => {
+    const fwd = { ...msg("mf1", ""), content: "", message_reference: { type: 1 }, message_snapshots: [{ message: { content: "see https://github.com/storytold/photocraft/issues/77" } }] };
+    await handleDispatch(db, keys, "MESSAGE_CREATE", fwd);
+    assert.equal(await countOf(db, "photocraft", 77), 1);
+    await handleDispatch(db, keys, "MESSAGE_DELETE", { id: "mf1", channel_id: "c1" });
+  });
 
   test("create, edit and delete keep counts right and rows encrypted", async () => {
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m1", "look at photocraft#1 and photocraft#2"));
@@ -98,6 +105,21 @@ describe("event handler", () => {
     await handleMeta(db, "THREAD_CREATE", { id: "t2", guild_id: "g1", parent_id: "c2", name: "other" });
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m9", "photocraft#9", "t2"));
     assert.equal(await countOf(db, "photocraft", 9), 0);
+  });
+
+  test("a message naming over 20 items records none; a flooding author stops being recorded, another is not", async () => {
+    await db.run(db.k.insertInto("discord_channels").values({ channel_id: "c3", guild_id: "g1", guild_name: "Guild", name: "flood", watched: 1 }));
+    const from = (author: string, id: string, nums: number[]) => ({ ...msg(id, nums.map((n) => `photocraft#${n}`).join(" "), "c3"), author: { id: author } });
+    const range = (a: number, b: number) => Array.from({ length: b - a }, (_, i) => a + i);
+    await handleDispatch(db, keys, "MESSAGE_CREATE", from("flood-a", "f0", range(1000, 1021)));
+    assert.equal(await countOf(db, "photocraft", 1000), 0);
+    for (let i = 0; i < 5; i++) await handleDispatch(db, keys, "MESSAGE_CREATE", from("flood-a", `f${i + 1}`, range(2000 + i * 10, 2010 + i * 10)));
+    assert.equal(await countOf(db, "photocraft", 2000), 1);
+    assert.equal(await countOf(db, "photocraft", 2040), 0);
+    await handleDispatch(db, keys, "MESSAGE_CREATE", from("flood-b", "g1x", [3000]));
+    assert.equal(await countOf(db, "photocraft", 3000), 1);
+    await db.run(db.k.deleteFrom("discord_mentions").where("number", ">=", 2000));
+    await db.run(db.k.deleteFrom("discord_mentions").where("number", "=", 3000));
   });
 });
 
